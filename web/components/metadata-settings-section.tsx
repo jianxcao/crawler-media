@@ -320,7 +320,7 @@ export function MetadataSettingsSection() {
               {testing ? "测试中…" : "测试连接"}
             </button>
             {settings.tmdb.configured && (
-              <button type="button" disabled={busy} onClick={() => void clear()} className="btn-glass px-4 py-2 text-ui font-medium text-[#ffaaaa] disabled:opacity-50">
+              <button type="button" disabled={busy} onClick={() => void clear()} className="btn-glass btn-glass--danger px-4 py-2 text-ui font-medium">
                 清除 Key
               </button>
             )}
@@ -387,7 +387,7 @@ export function MetadataSettingsSection() {
                 type="button"
                 disabled={fanartBusy}
                 onClick={() => void clearFanartKey()}
-                className="btn-glass px-4 py-2 text-ui font-medium text-[#ffaaaa] disabled:opacity-50"
+                className="btn-glass btn-glass--danger px-4 py-2 text-ui font-medium"
               >
                 恢复系统内置 Key
               </button>
@@ -515,7 +515,7 @@ export function MetadataSettingsSection() {
               type="button"
               disabled={diagnosing}
               onClick={() => void runDiagnose()}
-              className="btn-glass px-4 py-2 text-ui font-medium text-[var(--accent)] disabled:opacity-50"
+              className="btn-glass btn-glass--accent px-4 py-2 text-ui font-medium"
             >
               <RefreshIcon className={`size-4 ${diagnosing ? "animate-spin" : ""}`} />
               {diagnosing ? "正在诊断各域名…" : "检测各域名代理生效情况"}
@@ -525,7 +525,7 @@ export function MetadataSettingsSection() {
                 type="button"
                 disabled={proxyBusy}
                 onClick={() => void clearProxy()}
-                className="btn-glass px-4 py-2 text-ui font-medium text-[#ffaaaa] disabled:opacity-50"
+                className="btn-glass btn-glass--danger px-4 py-2 text-ui font-medium"
               >
                 清除代理
               </button>
@@ -551,7 +551,7 @@ export function MetadataSettingsSection() {
                         <span
                           className={`rounded-md px-2 py-0.5 text-[11px] font-medium ${
                             item.is_proxied
-                              ? "bg-[#38bdf8]/15 text-[#38bdf8]"
+                              ? "bg-[var(--info)]/15 text-[var(--info)]"
                               : "bg-emerald-500/15 text-emerald-400"
                           }`}
                         >

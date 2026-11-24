@@ -27,8 +27,7 @@ import {
 
 const CANCEL_BTN_CLS =
   "rounded-lg border border-white/10 bg-white/[0.06] px-4 py-2 text-ui text-white/80 transition hover:bg-white/[0.1]";
-const DANGER_BTN_CLS =
-  "rounded-lg bg-red-500/85 px-4 py-2 text-ui font-medium text-white transition hover:bg-red-500 disabled:opacity-50";
+const DANGER_BTN_CLS = "btn-danger rounded-lg px-4 py-2 text-ui font-medium";
 
 export function SubscriptionCancelDialog({
   open,
@@ -85,6 +84,19 @@ export function SubscriptionCancelDialog({
 
   const torrentCount = preview?.torrent_count ?? 0;
   const fileCount = preview?.library_file_count ?? 0;
+
+  useEffect(() => {
+    const win = globalThis.window;
+    if (!open || !raised || !win) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      e.preventDefault();
+      e.stopPropagation();
+      if (!busy) onClose();
+    };
+    win.addEventListener("keydown", onKeyDown, { capture: true });
+    return () => win.removeEventListener("keydown", onKeyDown, { capture: true });
+  }, [open, raised, busy, onClose]);
 
   return (
     <Modal

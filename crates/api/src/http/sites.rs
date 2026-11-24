@@ -82,12 +82,19 @@ pub(crate) struct PatchSiteInput {
     rate_limit_per_minute: Option<u32>,
     #[serde(default)]
     cdp_url: Option<String>,
-    #[serde(default)]
-    downloader_id: Option<String>,
+    #[serde(default, deserialize_with = "double_option")]
+    downloader_id: Option<Option<String>>,
     #[serde(default)]
     maintenance_via: Option<String>,
     #[serde(default)]
     enabled: Option<bool>,
+}
+
+fn double_option<'de, D>(deserializer: D) -> Result<Option<Option<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer).map(Some)
 }
 
 #[derive(Deserialize)]
@@ -132,10 +139,21 @@ fn site_public(site: &Site, auth_type: &str, admin: bool) -> Value {
     v
 }
 
-fn auth_type(site: &Site) -> &'static str {
-    if site.api_key.as_deref().is_some_and(|k| !k.is_empty()) {
+fn profile_auth_support(profile: Option<&indexer::Profile>) -> (bool, bool) {
+    match profile.filter(|p| p.id != "demo") {
+        Some(p) => {
+            let types = p.effective_auth_types();
+            (types.contains(&"apikey"), types.contains(&"cookie"))
+        }
+        None => (true, true),
+    }
+}
+
+fn auth_type_for(site: &Site, profile: Option<&indexer::Profile>) -> &'static str {
+    let (allow_api_key, allow_cookie) = profile_auth_support(profile);
+    if allow_api_key && site.api_key.as_deref().is_some_and(|k| !k.is_empty()) {
         "apikey"
-    } else if site.cookie.as_deref().is_some_and(|c| !c.is_empty()) {
+    } else if allow_cookie && site.cookie.as_deref().is_some_and(|c| !c.is_empty()) {
         "cookie"
     } else {
         "none"

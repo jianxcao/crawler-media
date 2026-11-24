@@ -151,9 +151,9 @@ export function MediaSearchResults({
                   }}
                   className="rounded-lg border border-white/10 bg-white/5 px-2 py-1 text-caption text-white/90 backdrop-blur-md outline-none transition focus:border-[var(--accent)]"
                 >
-                  <option value="default" className="bg-[#12141a] text-white">默认相关度</option>
-                  <option value="year_desc" className="bg-[#12141a] text-white">年份（最新优先）</option>
-                  <option value="year_asc" className="bg-[#12141a] text-white">年份（最早优先）</option>
+                  <option value="default">默认相关度</option>
+                  <option value="year_desc">年份（最新优先）</option>
+                  <option value="year_asc">年份（最早优先）</option>
                 </select>
               </div>
             )}
@@ -162,7 +162,7 @@ export function MediaSearchResults({
               <div className="flex items-center gap-2">
                 <span
                   title="这是历史留存的结果快照，来源站数据（评分/海报）可能已变化"
-                  className="flex items-center gap-1.5 rounded-full border border-[#6aa7ff]/30 bg-[#6aa7ff]/12 px-2.5 py-1 text-caption text-[#b9d4ff] backdrop-blur-sm"
+                  className="flex items-center gap-1.5 rounded-full border border-[var(--info)]/30 bg-[var(--info)]/10 px-2.5 py-1 text-caption text-[var(--info)] backdrop-blur-sm"
                 >
                   <svg
                     viewBox="0 0 24 24"
@@ -241,11 +241,11 @@ function MediaSourceSection({
   return (
     <section>
       <div className="mb-3 flex items-center gap-2.5">
-        <span className="rounded-full bg-black/30 px-2.5 py-0.5 text-caption text-[var(--accent)] backdrop-blur-sm">
+        <span className="rounded-full border border-[var(--line)] bg-[var(--accent-soft)] px-2.5 py-0.5 text-caption text-[var(--accent)]">
           {label}
         </span>
         {items && items.length > 0 && (
-          <span className="text-on-image text-sub text-[rgba(243,245,249,0.75)]">
+          <span className="text-on-image text-sub text-[var(--text-muted)]">
             共 {items.length} 条结果
           </span>
         )}
@@ -253,12 +253,12 @@ function MediaSourceSection({
 
       {!items && !error && <MediaSearchSkeleton />}
       {error && (
-        <p className="text-on-image text-sub leading-relaxed text-[rgba(243,245,249,0.6)]">
+        <p className="text-on-image text-sub leading-relaxed text-[var(--text-muted)]">
           {error}
         </p>
       )}
       {items?.length === 0 && (
-        <p className="text-on-image text-sub text-[rgba(243,245,249,0.6)]">
+        <p className="text-on-image text-sub text-[var(--text-muted)]">
           该来源没有找到相关条目
         </p>
       )}
@@ -288,7 +288,7 @@ function MediaSearchEmpty({
   return (
     <div className="flex flex-col items-center pt-24 text-center">
       <p className="text-on-image text-body-lg font-semibold text-white">{title}</p>
-      <p className="text-on-image mt-1.5 text-sub text-[rgba(243,245,249,0.7)]">{hint}</p>
+      <p className="text-on-image mt-1.5 text-sub text-[var(--text-muted)]">{hint}</p>
       {onSwitchToTorrent && (
         <button
           type="button"

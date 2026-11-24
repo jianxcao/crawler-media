@@ -530,7 +530,7 @@ export function ZoomLightbox({
       aria-label={label}
       // 高度走 viewport-overlay-height 而不是 inset-0：fixed 贴的是布局视口，
       // 手机上底部的缩略条会被浏览器工具栏盖住（见 globals.css 那条注释）
-      className="viewport-overlay-height fixed inset-x-0 top-0 z-[70] overflow-hidden bg-[rgba(4,5,9,0.94)] backdrop-blur-md"
+      className="dark-media-surface viewport-overlay-height fixed inset-x-0 top-0 z-[70] overflow-hidden bg-[rgba(4,5,9,0.94)] backdrop-blur-md"
     >
       {/* 舞台：铺满整个对话框（控件浮在它上面）。点画面收放控件、点画面外的
           空白关闭（未缩放时），滚轮 / 捏合 / 双击缩放，放大后拖拽平移、

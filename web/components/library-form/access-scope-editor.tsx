@@ -200,7 +200,9 @@ function ViewerCombobox({
             } else if (e.key === "Enter") {
               e.preventDefault();
               if (open && matches[active]) toggle(matches[active].id);
-            } else if (e.key === "Escape") {
+            } else if (e.key === "Escape" && open) {
+              e.preventDefault();
+              e.stopPropagation();
               setOpen(false);
             } else if (e.key === "Backspace" && query === "" && chosen.length > 0) {
               toggle(chosen[chosen.length - 1].id);
@@ -238,7 +240,7 @@ function ViewerCombobox({
                 >
                   <span
                     className={`grid size-4 shrink-0 place-items-center rounded border ${
-                      on ? "border-[var(--accent)] bg-[var(--accent)] text-white" : "border-white/25"
+                      on ? "border-[var(--accent)] bg-[var(--accent)] text-[var(--accent-ink)]" : "border-white/25"
                     }`}
                   >
                     {on && <CheckIcon className="size-3" />}

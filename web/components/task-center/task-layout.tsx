@@ -73,7 +73,7 @@ export function DeleteDownloadTaskDialog({
             type="button"
             onClick={() => onConfirm(deleteFiles)}
             disabled={busy}
-            className="rounded-lg bg-red-500/85 px-4 py-2 text-ui font-medium text-white transition hover:bg-red-500 disabled:opacity-40"
+            className="btn-danger rounded-lg px-4 py-2 text-ui font-medium"
           >
             {busy ? "正在删除…" : deleteFiles ? "删除任务和文件" : "仅删除任务"}
           </button>
@@ -89,7 +89,7 @@ export function SourceWarning({ error }: { error: string }) {
       <InfoIcon className="mt-0.5 size-4 shrink-0" />
       <p className="min-w-0 flex-1">{error}</p>
       <Link to={"/settings/downloaders"}
-        className="shrink-0 font-semibold text-amber-50 hover:underline"
+        className="shrink-0 font-semibold text-[var(--warn)] hover:underline"
       >
         检查设置
       </Link>
@@ -190,7 +190,7 @@ export function TaskTimelineItem({
     tone === "waiting"
       ? "bg-[var(--warn)] ring-[var(--warn)]/25"
       : tone === "success"
-        ? "bg-[var(--ok)] text-[#07120b] ring-[var(--ok)]/20"
+        ? "bg-[var(--ok)] text-[var(--ok-ink)] ring-[var(--ok)]/20"
         : tone === "cancelled"
           ? "bg-white/20 text-white/60 ring-white/10"
           : "bg-[var(--info)] ring-[var(--info)]/30";
@@ -198,7 +198,7 @@ export function TaskTimelineItem({
     <div className="grid grid-cols-[1.5rem_minmax(0,1fr)] gap-x-2 last:[&_[data-timeline-line]]:hidden max-md:grid-cols-[1.25rem_minmax(0,1fr)] max-md:gap-x-2.5">
       <span className="relative flex self-stretch justify-center" aria-hidden="true">
         <span
-          className={`absolute top-[0.7rem] z-10 flex items-center justify-center rounded-full border-2 border-[#0b0f17] ring-2 ${
+          className={`absolute top-[0.7rem] z-10 flex items-center justify-center rounded-full border-2 border-[var(--bg)] ring-2 ${
             completed ? "size-4" : "mt-0.5 size-2.5"
           } ${dotClass}`}
         >
@@ -265,7 +265,7 @@ export function EmptyView({ view }: { view: TaskCenterViewName }) {
     },
   };
   return (
-    <div className="mt-8 rounded-2xl border border-white/[0.07] bg-black/20 px-6 py-16 text-center backdrop-blur-xl">
+    <div className="css-glass mt-8 rounded-2xl px-6 py-16 text-center">
       <p className="text-title-sm font-semibold text-white/75">{copy[view].title}</p>
       <p className="mt-2 text-ui text-[var(--text-muted)]">{copy[view].note}</p>
     </div>

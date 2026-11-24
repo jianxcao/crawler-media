@@ -474,10 +474,10 @@ export function maxResolution(rows: TorrentHit[]): string | null {
 }
 
 export function seederTone(n: number): string {
-  if (n === 0) return "text-[#ff9a9a]";
-  if (n < 5) return "text-[#fbbf24]";
+  if (n === 0) return "text-[var(--danger)]";
+  if (n < 5) return "text-[var(--warn)]";
   if (n >= 100) return "font-semibold text-[var(--ok)]";
-  return "text-[#79d193]";
+  return "text-emerald-300";
 }
 
 export function formatNumList(nums: number[]): string {
@@ -531,13 +531,13 @@ export function torrentPromoBadges(
   if (hit.free) {
     badges.push({
       text: "免费",
-      cls: variant === "poster" ? "bg-[var(--ok)]/90 text-[#052e16]" : "bg-[var(--ok)]/15 text-[#79d193]",
+      cls: variant === "poster" ? "bg-[var(--ok)]/90 text-[#052e16]" : "bg-[var(--ok)]/15 text-[var(--ok)]",
     });
   }
   if (hit.hr) {
     badges.push({
       text: "H&R",
-      cls: variant === "poster" ? "bg-[#f59e0b]/90 text-[#3a2600]" : "bg-[#f59e0b]/15 text-[#fbbf24]",
+      cls: variant === "poster" ? "bg-[#f59e0b]/90 text-[#3a2600]" : "bg-[var(--warn)]/15 text-[var(--warn)]",
     });
   }
   return badges;

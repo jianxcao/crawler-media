@@ -136,7 +136,7 @@ fn enqueue_backlog(
         let source_version = unit.row.file.version.source_version.clone();
         if index < crate::probe_manager::dispatch::FINGERPRINT_WINDOW as u32 {
             let ledger_id = unit.row.file.file_id.to_string();
-            manager.seen.lock().insert(ledger_id.clone());
+            manager.set_seen(ledger_id.clone(), job_id.clone());
             manager
                 .fingerprint_tx
                 .try_send((

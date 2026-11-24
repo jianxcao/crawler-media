@@ -7,7 +7,7 @@ import type { PlaybackStatsDayRow, PlaybackStatsTitleRow } from "./api/playback.
 export type MetricKey = "watched_ms" | "plays" | "completion" | "active_members";
 
 export const SERIES_COLOR = "var(--info)";
-export const PREVIOUS_COLOR = "rgba(255,255,255,0.32)";
+export const PREVIOUS_COLOR = "var(--text-faint)";
 export const WEEKDAYS = ["一", "二", "三", "四", "五", "六", "日"];
 
 /** 从末尾往前每 size 天折成一桶，保证最新一桶是完整的（size=1 即不折）。 */

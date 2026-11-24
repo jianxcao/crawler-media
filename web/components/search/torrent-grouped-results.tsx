@@ -125,7 +125,7 @@ function GroupHeader({
           </span>
         )}
         {freeCount > 0 && (
-          <span className="tnum rounded-md bg-[var(--ok)]/15 px-1.5 py-0.5 text-micro font-semibold text-[#79d193]">
+          <span className="tnum rounded-md bg-[var(--ok)]/15 px-1.5 py-0.5 text-micro font-semibold text-[var(--ok)]">
             {freeCount} 个免费
           </span>
         )}

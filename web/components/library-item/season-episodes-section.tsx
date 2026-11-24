@@ -316,7 +316,7 @@ function SeasonEpisodesHeader({
         <select
           value={season}
           onChange={(e) => onSeasonChange(Number(e.target.value))}
-          className="tnum rounded-xl border border-white/[0.08] bg-white/[0.04] px-3 py-1.5 text-sub text-white/90 outline-none focus:border-white/25 [&>option]:bg-[#181c28]"
+          className="tnum rounded-xl border border-white/[0.08] bg-white/[0.04] px-3 py-1.5 text-sub text-white/90 outline-none focus:border-white/25"
         >
           {seasons.map((s) => (
             <option key={s} value={s}>
@@ -429,7 +429,7 @@ function EpisodeCard({
       className={`w-[200px] shrink-0 rounded-xl text-left outline-none transition ${dimClass}`}
     >
       <div
-        className={`relative aspect-video overflow-hidden rounded-xl bg-[#141824] transition ${
+        className={`dark-media-surface relative aspect-video overflow-hidden rounded-xl bg-[#141824] transition ${
           selected
             ? "ring-2 ring-white/85 shadow-[0_10px_30px_rgba(0,0,0,0.5)]"
             : "ring-1 ring-white/[0.08] hover:ring-white/35"
@@ -451,7 +451,7 @@ function EpisodeCard({
             {episode.played && (
               <span
                 aria-label="已看完"
-                className="flex size-5 items-center justify-center rounded-full bg-[var(--ok)] text-[#07120c] shadow-lg"
+                className="flex size-5 items-center justify-center rounded-full bg-[var(--ok)] text-[var(--ok-ink)] shadow-lg"
               >
                 <CheckIcon className="size-3 stroke-[2.5]" />
               </span>
@@ -492,21 +492,21 @@ function GridStatusPill({
   if (status === "in_library") {
     const res = formatEpisodeResolution(resolution);
     return (
-      <span className="rounded border border-emerald-400/35 bg-emerald-500/20 px-1.5 py-px text-micro font-semibold text-emerald-200">
+      <span className="rounded border border-[var(--ok)]/30 bg-[var(--ok)]/12 px-1.5 py-px text-micro font-semibold text-[var(--ok)]">
         {res ? `在库 · ${res}` : "在库"}
       </span>
     );
   }
   if (status === "downloading") {
     return (
-      <span className="rounded border border-sky-400/35 bg-sky-500/20 px-1.5 py-px text-micro font-semibold text-sky-200">
+      <span className="rounded border border-[var(--info)]/30 bg-[var(--info)]/12 px-1.5 py-px text-micro font-semibold text-[var(--info)]">
         下载中
       </span>
     );
   }
   if (status === "file_missing") {
     return (
-      <span className="rounded border border-orange-400/35 bg-orange-500/20 px-1.5 py-px text-micro font-semibold text-orange-200">
+      <span className="rounded border border-[var(--danger)]/30 bg-[var(--danger)]/12 px-1.5 py-px text-micro font-semibold text-[var(--danger)]">
         文件缺失
       </span>
     );
@@ -519,7 +519,7 @@ function GridStatusPill({
     );
   }
   return (
-    <span className="rounded border border-amber-400/25 bg-amber-500/12 px-1.5 py-px text-micro font-semibold text-amber-200/85">
+    <span className="rounded border border-[var(--warn)]/30 bg-[var(--warn)]/12 px-1.5 py-px text-micro font-semibold text-[var(--warn)]">
       缺失
     </span>
   );
@@ -563,7 +563,7 @@ function EpisodeGridCell({
           {episode.played && (
             <span
               aria-label="已看完"
-              className="flex size-4 items-center justify-center rounded-full bg-[var(--ok)] text-[#07120c]"
+              className="flex size-4 items-center justify-center rounded-full bg-[var(--ok)] text-[var(--ok-ink)]"
             >
               <CheckIcon className="size-2.5 stroke-[2.5]" />
             </span>

@@ -15,6 +15,13 @@ use crate::scrape_store::ScrapeStoreExt;
 pub(super) const METADATA_WINDOW: usize = 64;
 pub(super) const FINGERPRINT_WINDOW: usize = 16;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum FingerprintDispatchError {
+    Overflowed,
+    Full,
+    Closed,
+}
+
 pub(super) struct DispatchChannels {
     pub(super) metadata_tx: mpsc::Sender<ProbeDispatchId>,
     pub(super) metadata_rx: mpsc::Receiver<ProbeDispatchId>,
@@ -149,18 +156,72 @@ impl ProbeManager {
     ) -> bool {
         let ledger_id = work.unit.row.file.file_id.to_string();
         let Some(current_job_id) = work.unit.job_id.clone() else {
-            tracing::error!(ledger_id, "媒体信息已完成，但声纹任务缺少持久化任务 ID");
-            self.seen.lock().remove(&ledger_id);
+            tracing::error!(ledger_id, "媒体信息已完成，但声纹任务缺少持久化 ID");
+            self.remove_seen_any(&ledger_id);
             return false;
         };
-        let store = self.store.as_ref();
-        let current_job = store.get_probe_job(&current_job_id);
+        if !self.transition_to_fingerprint_stage(&current_job_id, &ledger_id, &mut work) {
+            return false;
+        }
+        let Some(job_id) = work.unit.job_id.clone() else {
+            return false;
+        };
+        self.set_seen(ledger_id.clone(), job_id.clone());
+        let id = ProbeDispatchId {
+            job_id: job_id.clone(),
+            ledger_id: ledger_id.clone(),
+            stage: ProbeDispatchStage::Fingerprint,
+        };
+        if (self.background_is_paused() && !self.is_dispatch_paused_exempt(&job_id, &ledger_id))
+            || self.should_defer_remote_dispatch(&work.unit.row.file.path)
+        {
+            tracing::info!(
+                ledger_id,
+                "后台探测或远程读取已暂停，已完成的媒体信息按顺序留在数据库排队等待声纹"
+            );
+            self.remove_seen_if_job(&ledger_id, &job_id);
+            return false;
+        }
+        match self.dispatch_fingerprint_work(id, work) {
+            Ok(()) => true,
+            Err(FingerprintDispatchError::Overflowed) => {
+                tracing::info!(
+                    ledger_id,
+                    "声纹队列存在积压，已完成的媒体信息按顺序留在数据库排队"
+                );
+                self.remove_seen_if_job(&ledger_id, &job_id);
+                self.wake.notify_waiters();
+                false
+            }
+            Err(FingerprintDispatchError::Full) => {
+                tracing::info!(
+                    ledger_id,
+                    "声纹窗口已满，已完成的媒体信息保持排队等待下一次派发"
+                );
+                self.remove_seen_if_job(&ledger_id, &job_id);
+                self.wake.notify_waiters();
+                false
+            }
+            Err(FingerprintDispatchError::Closed) => {
+                tracing::info!(ledger_id, "声纹 worker 已停止，已完成的媒体信息保持排队");
+                self.remove_seen_if_job(&ledger_id, &job_id);
+                false
+            }
+        }
+    }
 
-        let current_job = match current_job {
+    fn transition_to_fingerprint_stage(
+        &self,
+        current_job_id: &str,
+        ledger_id: &str,
+        work: &mut probe::FingerprintWork,
+    ) -> bool {
+        let store = self.store.as_ref();
+        let current_job = match store.get_probe_job(current_job_id) {
             Ok(Some(job)) => job,
             Ok(None) => {
                 tracing::error!(ledger_id, job_id = %current_job_id, "媒体信息任务已不存在，无法转入声纹");
-                self.seen.lock().remove(&ledger_id);
+                self.remove_seen_if_job(ledger_id, current_job_id);
                 return false;
             }
             Err(error) => {
@@ -169,14 +230,14 @@ impl ProbeManager {
                 return false;
             }
         };
-
-        let parent_exempt = self.is_job_paused_exempt(&current_job_id);
+        let parent_job_exempt = self.is_job_paused_exempt(current_job_id);
+        let parent_unit_exempt = self.is_unit_paused_exempt(current_job_id, ledger_id);
+        let parent_promoted = self.was_unit_promoted(current_job_id, ledger_id);
         if current_job.kind == "media_probe" {
             let fingerprint_job_id = uuid::Uuid::new_v4().to_string();
-            let store = self.store.as_ref();
             let transitioned = match store.complete_media_probe_and_enqueue_fingerprint(
-                &current_job_id,
-                &ledger_id,
+                current_job_id,
+                ledger_id,
                 &fingerprint_job_id,
             ) {
                 Ok(changed) => changed,
@@ -185,76 +246,38 @@ impl ProbeManager {
                     false
                 }
             };
-
             if !transitioned {
-                if parent_exempt
+                if (parent_job_exempt || parent_unit_exempt || parent_promoted)
                     && self
                         .store
-                        .get_probe_job(&current_job_id)
+                        .get_probe_job(current_job_id)
                         .ok()
                         .flatten()
                         .is_some_and(|job| !job.is_active())
                 {
-                    self.unmark_job_paused_exempt(&current_job_id);
+                    self.unmark_job_paused_exempt(current_job_id);
                 }
                 return false;
             }
-            if parent_exempt {
-                self.unmark_job_paused_exempt(&current_job_id);
+            self.unmark_unit_paused_exempt(current_job_id, ledger_id);
+            self.unmark_unit_promoted(current_job_id, ledger_id);
+            if parent_job_exempt {
+                self.unmark_job_paused_exempt(current_job_id);
                 self.mark_job_paused_exempt(fingerprint_job_id.clone());
+            } else if parent_unit_exempt || parent_promoted {
+                self.mark_unit_paused_exempt(fingerprint_job_id.clone(), ledger_id.to_string());
+                self.mark_unit_promoted(fingerprint_job_id.clone(), ledger_id.to_string());
             }
             work.unit.job_id = Some(fingerprint_job_id);
             work.start_job = true;
-        } else if !self.advance_running_unit(&current_job_id, &ledger_id) {
+            true
+        } else if !self.advance_running_unit(current_job_id, ledger_id) {
             tracing::warn!(ledger_id, job_id = %current_job_id, "声纹阶段未持久化，保持原任务可恢复");
             self.wake.notify_waiters();
-            return false;
+            false
         } else {
             work.start_job = true;
-        }
-
-        let Some(job_id) = work.unit.job_id.clone() else {
-            return false;
-        };
-        let id = ProbeDispatchId {
-            job_id,
-            ledger_id: ledger_id.clone(),
-            stage: ProbeDispatchStage::Fingerprint,
-        };
-        if self.should_defer_remote_dispatch(&work.unit.row.file.path) {
-            tracing::info!(
-                ledger_id,
-                "远程读取已暂停，已完成的媒体信息按顺序留在数据库排队等待声纹"
-            );
-            self.seen.lock().remove(&ledger_id);
-            return false;
-        }
-        if self.fingerprint_overflowed.load(Ordering::Acquire) {
-            tracing::info!(
-                ledger_id,
-                "声纹队列存在积压，已完成的媒体信息按顺序留在数据库排队"
-            );
-            self.seen.lock().remove(&ledger_id);
-            self.wake.notify_waiters();
-            return false;
-        }
-        match self.fingerprint_tx.try_send((id, work)) {
-            Ok(()) => true,
-            Err(mpsc::error::TrySendError::Full(_)) => {
-                self.fingerprint_overflowed.store(true, Ordering::Release);
-                tracing::info!(
-                    ledger_id,
-                    "声纹窗口已满，已完成的媒体信息保持排队等待下一次派发"
-                );
-                self.seen.lock().remove(&ledger_id);
-                self.wake.notify_waiters();
-                false
-            }
-            Err(mpsc::error::TrySendError::Closed(_)) => {
-                tracing::info!(ledger_id, "声纹 worker 已停止，已完成的媒体信息保持排队");
-                self.seen.lock().remove(&ledger_id);
-                false
-            }
+            true
         }
     }
 
@@ -284,6 +307,24 @@ impl ProbeManager {
         permit.send(id);
         observed();
         Ok(())
+    }
+
+    pub(super) fn dispatch_fingerprint_work(
+        &self,
+        id: ProbeDispatchId,
+        work: probe::FingerprintWork,
+    ) -> Result<(), FingerprintDispatchError> {
+        if self.fingerprint_overflowed.load(Ordering::Acquire) {
+            return Err(FingerprintDispatchError::Overflowed);
+        }
+        match self.fingerprint_tx.try_send((id, work)) {
+            Ok(()) => Ok(()),
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                self.fingerprint_overflowed.store(true, Ordering::Release);
+                Err(FingerprintDispatchError::Full)
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => Err(FingerprintDispatchError::Closed),
+        }
     }
 
     pub(super) fn dispatch_metadata_id(&self, id: ProbeDispatchId) -> Result<(), ()> {
@@ -335,7 +376,7 @@ impl ProbeManager {
             let mut ids = Vec::new();
             if let Some(rx) = guard.as_mut() {
                 while let Ok(id) = rx.try_recv() {
-                    ids.push(id.ledger_id);
+                    ids.push(id);
                 }
             }
             ids
@@ -345,7 +386,7 @@ impl ProbeManager {
             let mut ids = Vec::new();
             if let Some(rx) = guard.as_mut() {
                 while let Ok((id, _)) = rx.try_recv() {
-                    ids.push(id.ledger_id);
+                    ids.push(id);
                 }
             }
             ids
@@ -353,10 +394,10 @@ impl ProbeManager {
         if !metadata_drained.is_empty() || !fingerprint_drained.is_empty() {
             let mut seen = self.seen.lock();
             for id in &metadata_drained {
-                seen.remove(id);
+                super::remove_seen_entry_if_job(&mut seen, &id.ledger_id, &id.job_id);
             }
             for id in &fingerprint_drained {
-                seen.remove(id);
+                super::remove_seen_entry_if_job(&mut seen, &id.ledger_id, &id.job_id);
             }
         }
         for _ in &metadata_drained {
@@ -376,13 +417,13 @@ impl ProbeManager {
     }
 
     /// Top up a window once emptied or at half-drain when durable backlog overflowed.
-    /// While paused, only explicit exempt jobs (`paused_exempt_jobs`) are refilled.
+    /// While paused, only explicit exempt jobs and units are refilled.
     pub(super) fn refill_drained_windows(&self) {
         if self.shutting_down.load(Ordering::SeqCst) {
             return;
         }
         let paused = self.background_is_paused();
-        if paused && !self.has_paused_exempt_jobs() {
+        if paused && !self.has_paused_exempt_work() {
             return;
         }
         let metadata_free = self.metadata_tx.capacity();
@@ -411,21 +452,26 @@ impl ProbeManager {
         let store = self.store.as_ref();
         let remote_paused = self.remote_reads_are_paused();
         if self.background_is_paused() {
-            let exempt_ids = self.paused_exempt_job_ids();
-            if exempt_ids.is_empty() {
+            let exempt_jobs = self.paused_exempt_job_ids();
+            let exempt_units = self.paused_exempt_unit_pairs();
+            if exempt_jobs.is_empty() && exempt_units.is_empty() {
                 return None;
             }
-            match store.pending_probe_dispatch_ids_for_jobs(
-                stage,
-                &exempt_ids,
-                remote_paused,
-                window + 1,
-            ) {
-                Ok((ids, active_jobs)) => {
-                    self.prune_inactive_exempt_jobs(&exempt_ids, &active_jobs);
+            match store.library_read_snapshot(|conn| {
+                conn.pending_probe_dispatch_ids_for_exemptions(
+                    stage,
+                    &exempt_jobs,
+                    &exempt_units,
+                    remote_paused,
+                    window + 1,
+                )
+            }) {
+                Ok(Ok((ids, active_jobs, active_units))) => {
+                    self.prune_inactive_exempt_jobs(&exempt_jobs, &active_jobs);
+                    self.prune_inactive_exempt_units(&exempt_units, &active_units);
                     return Some(ids);
                 }
-                Err(error) => {
+                Ok(Err(error)) | Err(error) => {
                     tracing::error!(%error, ?stage, "读取暂停豁免派发窗口失败");
                     return None;
                 }
@@ -459,21 +505,19 @@ impl ProbeManager {
         let mut remaining_unseen = false;
         let mut seen = self.seen.lock();
         for id in ids {
-            if seen.contains(&id.ledger_id) {
+            if seen.contains_key(&id.ledger_id) {
                 continue;
             }
             if free == 0 {
                 remaining_unseen = true;
                 break;
             }
-            if !seen.insert(id.ledger_id.clone()) {
-                continue;
-            }
+            seen.insert(id.ledger_id.clone(), id.job_id.clone());
             if self
                 .publish_metadata_observed(tx, id.clone(), || {})
                 .is_err()
             {
-                seen.remove(&id.ledger_id);
+                super::remove_seen_entry_if_job(&mut seen, &id.ledger_id, &id.job_id);
                 remaining_unseen = true;
                 break;
             }
@@ -497,7 +541,7 @@ impl ProbeManager {
         let mut ready = Vec::new();
         let mut remaining_unseen = false;
         for id in ids {
-            if self.seen.lock().contains(&id.ledger_id) {
+            if self.has_seen(&id.ledger_id) {
                 continue;
             }
             if ready.len() >= free {
@@ -510,11 +554,12 @@ impl ProbeManager {
         }
         let mut seen = self.seen.lock();
         for (id, work) in ready {
-            if !seen.insert(id.ledger_id.clone()) {
+            if seen.contains_key(&id.ledger_id) {
                 continue;
             }
+            seen.insert(id.ledger_id.clone(), id.job_id.clone());
             if tx.try_send((id.clone(), work)).is_err() {
-                seen.remove(&id.ledger_id);
+                super::remove_seen_entry_if_job(&mut seen, &id.ledger_id, &id.job_id);
                 remaining_unseen = true;
                 break;
             }
@@ -550,12 +595,12 @@ impl ProbeManager {
         let snapshot = match snapshot {
             Ok(Some(snapshot)) => snapshot,
             Ok(None) => {
-                self.seen.lock().remove(&id.ledger_id);
+                self.remove_seen_if_job(&id.ledger_id, &id.job_id);
                 return None;
             }
             Err(error) => {
                 tracing::error!(%error, ledger_id = %id.ledger_id, "读取探测派发快照失败");
-                self.seen.lock().remove(&id.ledger_id);
+                self.remove_seen_if_job(&id.ledger_id, &id.job_id);
                 self.wake.notify_waiters();
                 return None;
             }
@@ -566,7 +611,7 @@ impl ProbeManager {
             snapshot.unit.status == "queued" || snapshot.unit.status == "running"
         };
         if snapshot.unit.stage != id.stage || !acceptable {
-            self.seen.lock().remove(&id.ledger_id);
+            self.remove_seen_if_job(&id.ledger_id, &id.job_id);
             return None;
         }
         let kind = match snapshot.unit.kind.parse::<domain::MediaKind>() {
@@ -579,7 +624,7 @@ impl ProbeManager {
                     false,
                     Some("派发时媒体类型无效"),
                 );
-                self.seen.lock().remove(&id.ledger_id);
+                self.remove_seen_if_job(&id.ledger_id, &id.job_id);
                 return None;
             }
         };
@@ -602,7 +647,7 @@ impl ProbeManager {
             Ok(settings) => settings,
             Err(error) => {
                 tracing::error!(%error, ledger_id = %id.ledger_id, "恢复派发单元的时长或声纹配置失败，保留持久任务");
-                self.seen.lock().remove(&id.ledger_id);
+                self.remove_seen_if_job(&id.ledger_id, &id.job_id);
                 return None;
             }
         };

@@ -153,6 +153,7 @@ export function LibraryItemDetailView({
             <ArtworkImage
               src={c.immersiveUrl}
               alt=""
+              loading="eager"
               decoding="async"
               className="aspect-[2/3] w-44 shrink-0 rounded-xl object-cover shadow-[0_18px_45px_rgba(0,0,0,0.55)] ring-1 ring-white/15"
             />
@@ -234,7 +235,7 @@ export function LibraryItemDetailView({
           )}
 
           {c.refreshError && (
-            <div className="mt-4 max-w-2xl rounded-xl border border-white/[0.1] bg-[rgba(14,16,22,0.6)] px-4 py-3 text-sub leading-6 text-[#ff9f9f] backdrop-blur-md">
+            <div className="mt-4 max-w-2xl rounded-xl border border-[var(--danger)]/25 bg-[var(--danger)]/10 px-4 py-3 text-sub leading-6 text-[var(--danger)] backdrop-blur-md">
               {c.refreshError}
             </div>
           )}

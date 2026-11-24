@@ -8,6 +8,17 @@ pub(crate) async fn douban_detail(
     user_id: Option<axum::Extension<Option<domain::UserId>>>,
     Path(id): Path<String>,
 ) -> Response {
+    if id.is_empty()
+        || !id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "media.invalid_id",
+            "豆瓣条目 id 格式无效",
+        );
+    }
     let viewer = user_id.and_then(|ext| ext.0);
     let state_clone = state.clone();
     let id_clone = id.clone();

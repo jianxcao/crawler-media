@@ -58,7 +58,7 @@ function PhotoCard({
       type="button"
       {...tapGuard}
       aria-label={`查看${label}第 ${index + 1} 张`}
-      className={`shrink-0 overflow-hidden rounded-xl bg-[#141824] ring-1 ring-white/[0.08] transition-all duration-300 ease-out hover:-translate-y-1 hover:shadow-[0_16px_40px_rgba(0,0,0,0.55)] hover:ring-white/30 ${
+      className={`dark-media-surface shrink-0 overflow-hidden rounded-xl bg-[#141824] ring-1 ring-white/[0.08] transition-all duration-300 ease-out hover:-translate-y-1 hover:shadow-[0_16px_40px_rgba(0,0,0,0.55)] hover:ring-white/30 ${
         landscape
           ? "aspect-video h-[148px] max-md:h-[104px]"
           : "aspect-[2/3] h-[148px] max-md:h-[126px]"

@@ -275,9 +275,9 @@ export function CreateLibraryDialog({
                   onChange={(e) => setDefaultFilterId(e.target.value)}
                   className="w-full rounded-xl border border-white/[0.08] bg-white/[0.04] px-3 py-2 text-ui text-[var(--text)] outline-none focus:border-[var(--accent)]/60"
                 >
-                  <option value="" className="bg-[#1c1d22] text-white">使用系统全局默认规则</option>
+                  <option value="">使用系统全局默认规则</option>
                   {ruleSets.map((rs) => (
-                    <option key={rs.id} value={String(rs.id)} className="bg-[#1c1d22] text-white">
+                    <option key={rs.id} value={String(rs.id)}>
                       {rs.name} {rs.is_default ? "（全局默认）" : ""}
                     </option>
                   ))}

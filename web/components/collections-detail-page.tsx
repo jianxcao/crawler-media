@@ -114,7 +114,7 @@ export function CollectionDetailPage({ idPromise }: { idPromise: Promise<{ id: s
                     type="button"
                     disabled={removing === item.media_item_id}
                     onClick={() => void removeItem(item)}
-                    className="absolute right-2 top-2 hidden rounded-full bg-black/50 px-2 py-0.5 text-caption text-white/70 backdrop-blur transition group-hover:block hover:text-white disabled:opacity-40"
+                    className="dark-media-surface absolute right-2 top-2 hidden rounded-full bg-black/50 px-2 py-0.5 text-caption text-white/70 backdrop-blur transition group-hover:block hover:text-white disabled:opacity-40"
                   >
                     移除
                   </button>

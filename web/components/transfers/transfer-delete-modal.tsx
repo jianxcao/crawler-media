@@ -98,7 +98,7 @@ export function TransferDeleteModal({
             type="button"
             onClick={onConfirm}
             disabled={isPending}
-            className="flex items-center gap-1.5 rounded-xl bg-red-600 px-4 py-2 text-xs sm:text-sm font-semibold text-white shadow-lg transition hover:bg-red-500 disabled:opacity-50"
+            className="flex items-center gap-1.5 rounded-xl bg-red-600 px-4 py-2 text-xs sm:text-sm font-semibold text-[#ffffff] shadow-lg transition hover:bg-red-500 disabled:opacity-50"
           >
             <TrashIcon className="size-4" />
             <span>{isPending ? "正在处理..." : "确认删除"}</span>

@@ -365,7 +365,7 @@ export function CollectionGridView({
                 : "正在读取完整榜单…"}
             </p>
           </div>
-          <label className="flex h-10 w-full items-center gap-2 rounded-full border border-white/10 bg-black/25 px-4 text-[var(--text-muted)] backdrop-blur-sm sm:w-72">
+          <label className="flex h-10 w-full items-center gap-2 rounded-full border border-[var(--line)] bg-[var(--surface-inset)] px-4 text-[var(--text-muted)] backdrop-blur-sm sm:w-72">
             <SearchIcon className="size-4 shrink-0" />
             <input
               value={query}
@@ -388,7 +388,7 @@ export function CollectionGridView({
               className={`rounded-full border px-3 py-1.5 text-sub font-semibold transition ${
                 selectedGenres.length === 0
                   ? "border-white/20 bg-white/15 text-white"
-                  : "border-white/[0.07] bg-black/20 text-[var(--text-muted)] hover:border-white/15 hover:text-white"
+                  : "border-white/[0.07] bg-[var(--glass-fill)] text-[var(--text-muted)] hover:border-white/15 hover:text-white"
               }`}
             >
               全部
@@ -402,7 +402,7 @@ export function CollectionGridView({
                 className={`rounded-full border px-3 py-1.5 text-sub font-semibold transition ${
                   selectedGenres.includes(name)
                     ? "border-white/20 bg-white/15 text-white"
-                    : "border-white/[0.07] bg-black/20 text-[var(--text-muted)] hover:border-white/15 hover:text-white"
+                    : "border-white/[0.07] bg-[var(--glass-fill)] text-[var(--text-muted)] hover:border-white/15 hover:text-white"
                 }`}
               >
                 {name}
@@ -423,12 +423,12 @@ export function CollectionGridView({
       </header>
 
       {error && !items && (
-        <div className="mx-auto mt-16 max-w-md rounded-2xl border border-white/10 bg-black/25 p-8 text-center text-body text-[var(--text-muted)]">
+        <div className="css-glass mx-auto mt-16 max-w-md rounded-2xl p-8 text-center text-body text-[var(--text-muted)]">
           <p className="mb-4">{error}</p>
           <button
             type="button"
             onClick={() => setReloadKey((k) => k + 1)}
-            className="rounded-lg bg-[var(--accent-2)] px-4 py-2 font-semibold text-black transition hover:opacity-90"
+            className="btn-accent rounded-lg px-4 py-2 font-semibold"
           >
             重新加载
           </button>
@@ -454,7 +454,7 @@ export function CollectionGridView({
           )}
 
           {error && (
-            <div className="mt-8 flex flex-wrap items-center justify-center gap-3 rounded-xl border border-white/[0.08] bg-black/20 px-4 py-3 text-sub text-[var(--text-muted)]">
+            <div className="mt-8 flex flex-wrap items-center justify-center gap-3 rounded-xl border border-white/[0.08] bg-[var(--glass-fill)] px-4 py-3 text-sub text-[var(--text-muted)]">
               <span>{error}</span>
               {errorSource === "page1" ? (
                 <button

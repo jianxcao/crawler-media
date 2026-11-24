@@ -22,6 +22,7 @@ export function BrandLoader({ className = "size-5" }: { className?: string }) {
       <ArtworkImage
         src="/logo-mark.svg"
         alt=""
+        loading="eager"
         draggable={false}
         className="brand-loader--silver size-full object-contain"
       />

@@ -166,7 +166,7 @@ function ChapterCard({
   return (
     <div className="group/chapter w-[168px] shrink-0 max-md:w-[144px]" data-chapter-index={chapter.index}>
       {/* 画面区单独一个相对定位盒：精致小巧，不占过多视觉空间 */}
-      <div className="relative aspect-video transition duration-200 group-hover/chapter:-translate-y-0.5">
+      <div className="dark-media-surface relative aspect-video transition duration-200 group-hover/chapter:-translate-y-0.5">
         <button
           type="button"
           onClick={onPlay}
@@ -188,7 +188,7 @@ function ChapterCard({
             {clock}
           </span>
           {resumeHere && (
-            <span className="pointer-events-none absolute right-1 top-1 rounded bg-[var(--accent-2)] px-1 py-0.5 text-micro font-medium text-white shadow-md">
+            <span className="pointer-events-none absolute right-1 top-1 rounded bg-[var(--accent-2)] px-1 py-0.5 text-micro font-medium text-[var(--accent-ink)] shadow-md">
               上次看到这里
             </span>
           )}

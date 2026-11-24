@@ -137,7 +137,7 @@ export function ReidentifyDialog({
             <CurrentIdentity preview={preview} />
 
             {preview.unreachable && (
-              <p className="rounded-lg border border-[var(--warn)]/30 bg-[var(--warn)]/[0.08] px-3 py-2 text-caption leading-relaxed text-[#f5d489]">
+              <p className="rounded-lg border border-[var(--warn)]/30 bg-[var(--warn)]/[0.08] px-3 py-2 text-caption leading-relaxed text-[var(--warn)]">
                 有文件因为 TMDB 不可达没能得出结论——那是网络问题不是识别问题。
                 建议先修好网络再来，此刻的结论不足以据此拍板。
               </p>
@@ -449,7 +449,7 @@ function GroupRow({
           type="button"
           disabled={busy}
           onClick={() => void detach()}
-          className="btn-glass px-3 py-1.5 text-sub font-medium text-[#ffb4b4] disabled:opacity-40"
+          className="btn-glass btn-glass--danger px-3 py-1.5 text-sub font-medium"
         >
           不是独立作品
         </button>

@@ -37,34 +37,34 @@ function DiscoverStatusBadge({
   if (status === "in_library") {
     const res = formatResolutionBadge(resolution);
     return (
-      <span className="rounded-md border border-emerald-400/40 bg-emerald-500/25 px-1.5 py-0.5 text-micro font-semibold text-emerald-100 backdrop-blur-sm">
+      <span className="rounded-md border border-emerald-400/45 bg-emerald-950/80 px-1.5 py-0.5 text-micro font-semibold text-emerald-100 backdrop-blur-sm">
         {res ? `已入库 · ${res}` : "已入库"}
       </span>
     );
   }
   if (status === "downloading") {
     return (
-      <span className="rounded-md border border-sky-400/40 bg-sky-500/25 px-1.5 py-0.5 text-micro font-semibold text-sky-100 backdrop-blur-sm">
+      <span className="rounded-md border border-sky-400/45 bg-sky-950/80 px-1.5 py-0.5 text-micro font-semibold text-sky-100 backdrop-blur-sm">
         下载中
       </span>
     );
   }
   if (status === "file_missing") {
     return (
-      <span className="rounded-md border border-orange-400/40 bg-orange-500/25 px-1.5 py-0.5 text-micro font-semibold text-orange-100 backdrop-blur-sm">
+      <span className="rounded-md border border-orange-400/45 bg-orange-950/80 px-1.5 py-0.5 text-micro font-semibold text-orange-100 backdrop-blur-sm">
         文件缺失
       </span>
     );
   }
   if (status === "unaired") {
     return (
-      <span className="rounded-md border border-white/10 bg-black/55 px-1.5 py-0.5 text-micro font-medium text-white/45 backdrop-blur-sm">
+      <span className="rounded-md border border-white/15 bg-black/65 px-1.5 py-0.5 text-micro font-medium text-white/65 backdrop-blur-sm">
         未开播
       </span>
     );
   }
   return (
-    <span className="rounded-md border border-amber-400/25 bg-amber-500/15 px-1.5 py-0.5 text-micro font-medium text-amber-200/90 backdrop-blur-sm">
+    <span className="rounded-md border border-amber-400/40 bg-black/65 px-1.5 py-0.5 text-micro font-semibold text-amber-200 backdrop-blur-sm">
       未入库
     </span>
   );
@@ -237,7 +237,7 @@ function DiscoverEpisodeCard({ season, ep }: { season: number; ep: MediaEpisodeD
 
   const content = (
     <>
-      <div className="relative aspect-video w-full overflow-hidden rounded-lg bg-white/[0.04]">
+      <div className="dark-media-surface relative aspect-video w-full overflow-hidden rounded-lg bg-[#141824]">
         {ep.still_url ? (
           <ArtworkImage
             src={imageUrl(ep.still_url)}
@@ -246,7 +246,7 @@ function DiscoverEpisodeCard({ season, ep }: { season: number; ep: MediaEpisodeD
             loading="lazy"
           />
         ) : (
-          <div className="flex size-full items-center justify-center text-sub font-semibold text-white/20">
+          <div className="flex size-full items-center justify-center text-sub font-semibold text-white/35">
             E{String(ep.episode_number).padStart(2, "0")}
           </div>
         )}

@@ -168,6 +168,138 @@
     rgba(255, 255, 255, 0.045);
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.09);
 }
+button.css-glass:hover:not(:disabled) {
+  border-color: var(--line-strong);
+  background:
+    linear-gradient(
+      180deg,
+      rgba(255, 255, 255, 0.09),
+      rgba(255, 255, 255, 0.015) 46%
+    ),
+    var(--glass-fill-hover);
+}
+.css-glass[aria-pressed="true"],
+button.css-glass[aria-pressed="true"]:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+  background:
+    linear-gradient(
+      180deg,
+      rgba(255, 255, 255, 0.1),
+      rgba(255, 255, 255, 0) 50%
+    ),
+    var(--accent-soft);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.16),
+    0 8px 24px -10px rgba(0, 0, 0, 0.45);
+}
+
+/*
+ * 分段切换胶囊（发现页 TMDB/豆瓣、订阅页类型切换、活动页观看/任务）：
+ * 统一抽为语义表面类，使纸感玻璃与液态玻璃各自呈现原生分段控件质感。
+ */
+.segmented-glass {
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(0, 0, 0, 0.35);
+  backdrop-filter: blur(24px);
+}
+.segmented-glass__item {
+  color: var(--text-muted);
+}
+.segmented-glass__item:hover {
+  color: var(--text);
+}
+.segmented-glass__item:is([aria-pressed="true"], [aria-selected="true"], [aria-checked="true"]) {
+  background: rgba(255, 255, 255, 0.15);
+  color: var(--text);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.18);
+}
+
+/* 订阅页「今日动态与追剧日历」主卡与分区吸顶条 */
+.arrival-calendar-surface {
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: linear-gradient(145deg, rgba(16, 19, 29, 0.82), rgba(8, 10, 16, 0.68));
+  box-shadow:
+    0 18px 55px rgba(0, 0, 0, 0.2),
+    inset 0 1px 0 rgba(255, 255, 255, 0.035);
+  backdrop-filter: blur(24px);
+}
+.section-sticky-bar {
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  background: linear-gradient(145deg, rgba(18, 21, 30, 0.88), rgba(10, 12, 18, 0.82));
+  box-shadow:
+    0 10px 28px rgba(0, 0, 0, 0.24),
+    inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  backdrop-filter: blur(24px);
+}
+
+/* 整理记录路径槽、探测队列库计数胶囊等内嵌代码/路径托盘 */
+.code-well {
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(0, 0, 0, 0.25);
+}
+
+/* —— 跨主题共享弹层、气泡、卡片行与页面顶栏图标键语义表面 —— */
+.dialog-surface {
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(16, 18, 26, 0.94);
+  box-shadow: 0 32px 90px rgba(0, 0, 0, 0.7);
+  backdrop-filter: blur(40px);
+}
+
+.modal-scrim {
+  background: rgba(0, 0, 0, 0.6);
+  backdrop-filter: blur(4px);
+}
+
+.popover-surface {
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(16, 18, 26, 0.94);
+  box-shadow: 0 20px 52px rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(28px);
+}
+
+.card-row-surface {
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(16, 18, 25, 0.78);
+}
+.card-row-surface--interactive:hover {
+  border-color: rgba(255, 255, 255, 0.14);
+  background: rgba(22, 25, 33, 0.88);
+}
+.card-row-surface--danger {
+  border-color: color-mix(in srgb, var(--danger) 32%, transparent);
+}
+.card-row-surface--warn {
+  border-color: color-mix(in srgb, var(--warn) 34%, transparent);
+}
+
+.page-nav-btn {
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  background: rgba(0, 0, 0, 0.3);
+  color: rgba(255, 255, 255, 0.85);
+  backdrop-filter: blur(12px);
+}
+.page-nav-btn:hover {
+  background: rgba(0, 0, 0, 0.5);
+  color: #ffffff;
+}
+.page-nav-btn[data-active="true"],
+.page-nav-btn[data-state="open"] {
+  border-color: rgba(255, 255, 255, 0.22);
+  background: rgba(0, 0, 0, 0.58);
+  color: #ffffff;
+}
+
+.input-glass {
+  border: 1px solid var(--line);
+  background: var(--surface-inset);
+  color: var(--text);
+  outline: none;
+  transition: border-color 150ms ease, background-color 150ms ease, width 150ms ease;
+}
+.input-glass:focus {
+  border-color: var(--line-strong);
+}
 
 /*
  * 可点击行：侧栏导航、探索、最近运行、菜单项等。
@@ -355,11 +487,23 @@
   background: rgba(255, 255, 255, 0.04);
   color: var(--text);
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
-  transition:
-    background 150ms ease,
-    border-color 150ms ease,
-    color 150ms ease;
+  transition: background 150ms ease, border-color 150ms ease, color 150ms ease;
 }
+.btn-glass--ok { color: var(--ok); }
+.btn-glass--danger { color: var(--danger); }
+.btn-glass--accent { color: var(--accent); }
+.btn-glass--muted { color: var(--text-muted); }
+.btn-glass--muted:hover:not(:disabled) { color: var(--text); }
+.btn-danger {
+  background: var(--danger-solid);
+  color: #ffffff;
+  transition: background-color 150ms ease, filter 150ms ease, transform 120ms ease;
+}
+.btn-danger:hover:not(:disabled) {
+  background: var(--danger-solid-hover);
+  filter: brightness(1.04);
+}
+.btn-danger:active:not(:disabled) { transform: scale(0.96); }
 .btn-accent:disabled {
   background: rgba(255, 255, 255, 0.08);
   color: var(--text-faint);
@@ -406,180 +550,6 @@
 .lg-send:hover .lg-icon-button__active-surface {
   opacity: 0.1;
   transform: scale(1);
-}
-
-/* 命令面板层级：vendor 默认 z-index:8，但本应用外壳 (.app-shell) 是 z-10，
-   若不抬高，Portal 到 body 后的浮层仍会被外壳内容盖住。抬到 50 稳压全站之上。 */
-.lg-command-overlay {
-  z-index: 50;
-}
-
-/* 主界面后推纵深（Spotlight 式）：命令面板打开时（body.cmdk-open），整个外壳轻微
-   缩放后退，配合浮层的全局蒙版做出「主界面退后一层、面板浮于其上」的层次感。
-   不再额外压暗外壳，避免绕过用户设置叠加第二层固定暗度。
-   面板本身 Portal 到 body、不在 .app-shell 内，故不受此缩放影响。
-   transform-origin 居中，缩放后四周露出 body 的深色背景渐变，纵深感更明确。 */
-.app-shell {
-  transform-origin: center center;
-  transition: transform 260ms cubic-bezier(0.2, 0.8, 0.2, 1);
-}
-
-/*
- * 满屏应用高度：旧版移动浏览器不认识 dvh，会忽略第二条并保留 100vh；
- * 支持动态视口单位的浏览器则用后声明的 100dvh，继续正确跟随地址栏收放。
- * AppShell 与登录/初始化/启动故障页共用，避免任一入口因高度声明失效而塌成空页。
- */
-.viewport-app-height {
-  height: calc(100vh - var(--keyboard-inset));
-  height: calc(100dvh - var(--keyboard-inset));
-}
-
-/*
- * 全屏覆盖层（灯箱）的高度：与 .viewport-app-height 同一个理由，做法却必须
- * 不同——覆盖层是 position: fixed，而 fixed 的包含块是**布局视口**，在移动
- * 浏览器上等于「地址栏收起后」的大视口。于是 `inset: 0` 的覆盖层底边落在
- * 屏幕之外，贴着 bottom:0 的那条缩略图整条被藏到地址栏 / 工具栏底下（手机上
- * 实测：灯箱底部的小图预览一直看不见）。
- *
- * 改成 top:0 + 动态视口高度，底边就落在**可见**视口的底边上。再加
- * --vp-overshoot：iOS 独立 App 形态下要向下多铺一截盖住底部黑条（见该变量
- * 处的长注释），加进高度里与原来的负 bottom 等价。
- *
- * 不减 --keyboard-inset：灯箱上没有输入框，弹起软键盘时它该保持满屏。
- */
-.viewport-overlay-height {
-  height: calc(100vh + var(--vp-overshoot));
-  height: calc(100dvh + var(--vp-overshoot));
-}
-
-body.cmdk-open .app-shell {
-  transform: scale(0.978);
-}
-
-/*
- * —— 移动端顶栏 ——
- * 不做成实心 header 色块，而是与 PageNav 同一套「向下渐隐的雾」：顶边最浓、
- * 到底部完全化开。这样「新任务」这类大图直出的氛围页不会被一条硬边框拦腰截断，
- * 而密集内容页向上滚动时文字又能被雾压住、不糊在一起。
- * 顶部内边距吃安全区，刘海屏上图标不会被状态栏压住。
- */
-.mobile-topbar {
-  padding-top: var(--safe-top);
-  /* 横屏刘海：顶栏是 absolute 铺满全宽的浮层，不吃主区的安全区内边距，
-     左右要自己让开，否则汉堡/搜索会缩进刘海或圆角里。 */
-  padding-left: var(--safe-left);
-  padding-right: var(--safe-right);
-  background: linear-gradient(
-    180deg,
-    rgba(9, 11, 16, 0.86) 0%,
-    rgba(9, 11, 16, 0.6) 58%,
-    rgba(9, 11, 16, 0) 100%
-  );
-  backdrop-filter: blur(14px);
-  mask-image: linear-gradient(180deg, #000 0%, #000 62%, transparent 100%);
-  -webkit-mask-image: linear-gradient(180deg, #000 0%, #000 62%, transparent 100%);
-}
-
-/*
- * 移动端主区让位：顶栏是浮在内容之上的 absolute 雾层，主区必须自己空出
- * 「安全区 + 顶栏」这一段，否则页面第一屏会被压在汉堡和字标下面。
- * 两条横向内边距同理吃安全区（横屏刘海）。
- *
- * 收口在这一条规则里、而不是逐页写 pt-14：全站十几个路由页都是
- * 「外层 h-full + 内层 overflow-y-auto」的同一形状，主区的内边距会自然
- * 传导给每一个页面，新增路由无需登记、不会漏。
- *
- * 注意：底部**不在这里让位**。主区整体抬高 safe-bottom 会把滚动视口在
- * Home 指示条上方截断——内容被硬裁一刀、下面露出一条空底「黑边」
- * （iPhone 全面屏 PWA 实测）。原生 App 的做法是内容一直滚到屏幕物理底边、
- * 从指示条下方穿过，只在滚动内容末尾留出安全区高度的空白，
- * 由页面级滚动容器的 .scroll-safe 承担（见下方）。
- */
-@media (max-width: 767px) {
-  .app-shell > main {
-    padding-top: calc(var(--safe-top) + var(--mobile-topbar-h));
-    padding-right: var(--safe-right);
-    padding-left: var(--safe-left);
-  }
-
-  /*
-   * 详情类页面自带 PageNav（返回 + 标题 + 页面操作），外壳的全局顶栏这时不渲染
-   * （见 lib/page-chrome.tsx），主区就不该再为它空出那 52px——否则页面顶上会
-   * 留一段莫名其妙的空白，返回键也被推离屏幕上沿。窄屏于是只有一条顶栏。
-   *
-   * 连**安全区也不在这里让位**：主区若整体下压 safe-top，页面（含 PageNav
-   * 的吸顶雾层）就从状态栏下沿才开始，状态栏那一条永远露着底图，雾层顶边
-   * 在屏幕上横切出一道硬边——再叠上页面容器的圆角，就成了「顶上贴了一块
-   * 圆角卡片」，完全不是原生 App 的样子。原生的做法是顶栏背景一直铺到屏幕
-   * 物理顶边、从状态栏底下穿过，只把**图标那一行**让到安全区以下。
-   * 因此 safe-top 改由 PageNav 自己作为内边距承担（见 components/page-nav.tsx），
-   * 与全局顶栏 .mobile-topbar 的做法完全一致。
-   */
-  .app-shell[data-topbar="false"] > main {
-    padding-top: 0;
-  }
-}
-
-/*
- * —— 移动端抽屉式侧栏 ——
- * 覆盖式浮层（不是挤压布局）：主区宽度不变，抽屉从左侧滑入盖住内容。
- * 作为 .app-shell 的兄弟节点固定定位，不受外壳缩放/裁剪影响。
- * 宽度取视口的 86%（上限 320px），留出右侧一条可点关闭的空白，
- * 符合移动端「侧滑菜单」的肌肉记忆。
- */
-.mobile-drawer {
-  position: fixed;
-  z-index: 60;
-  top: 0;
-  /* 抽屉是通栏浮层，底边同样铺到屏幕物理底边 */
-  bottom: calc(-1 * var(--vp-overshoot));
-  left: 0;
-  width: 86vw;
-  max-width: 320px;
-  /* 底部内边距把 --vp-overshoot 一并算进去：抽屉的面板铺到了屏幕物理底边，
-     但内容仍要停在视口内，否则最后一项会被 Home 指示条压住 */
-  padding: calc(var(--safe-top) + 10px) 0
-    calc(var(--safe-bottom) + var(--vp-overshoot) + 10px) calc(var(--safe-left) + 10px);
-  transition: transform 280ms cubic-bezier(0.2, 0.8, 0.2, 1);
-  will-change: transform;
-}
-.mobile-drawer[data-open="false"] {
-  transform: translateX(-104%);
-  /* 关闭状态彻底不可交互：抽屉里仍挂着 WebGL 玻璃面板，不能让它拦截主区触摸 */
-  pointer-events: none;
-}
-.mobile-drawer[data-open="true"] {
-  transform: translateX(0);
-}
-.mobile-drawer-scrim {
-  position: fixed;
-  inset: 0 0 calc(-1 * var(--vp-overshoot)) 0;
-  z-index: 55;
-  background: rgba(4, 6, 10, 0.55);
-  backdrop-filter: blur(2px);
-  animation: page-scrim-in 200ms ease both;
-}
-
-/* 搜索命令面板（components/search-command.tsx）：纯 CSS 深色实心浮层
-   （Raycast/Spotlight 式），非 WebGL 玻璃。遮罩与全站 .page-scrim 共用颜色、
-   暗度和模糊度，因此会同步响应「外观」中的蒙版设置；面板入场 160ms 下落
-   + 缩放，退出即时卸载（对齐 Raycast 的干脆手感，不做出场动画）。 */
-@keyframes search-palette-fade-in {
-  from {
-    opacity: 0;
-  }
-}
-@keyframes search-palette-pop-in {
-  from {
-    opacity: 0;
-    transform: translateY(-10px) scale(0.985);
-  }
-}
-.search-palette-overlay {
-  animation: search-palette-fade-in 140ms ease-out;
-}
-.search-palette-panel {
-  animation: search-palette-pop-in 160ms cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 
 /* 品牌 / 头像徽标：银玻璃渐变 + 顶部高光 */
@@ -650,12 +620,8 @@ body.cmdk-open .app-shell {
 
 /* —— 搜索等待态：骨架 shimmer 与进度条扫光（见 components/search-results.tsx） —— */
 @keyframes search-shimmer {
-  from {
-    background-position: 200% 0;
-  }
-  to {
-    background-position: -200% 0;
-  }
+  from { background-position: 200% 0; }
+  to { background-position: -200% 0; }
 }
 .skeleton-block {
   display: inline-block;
@@ -663,20 +629,12 @@ body.cmdk-open .app-shell {
   background-image: linear-gradient(100deg, transparent 35%, rgba(255, 255, 255, 0.13) 50%, transparent 65%);
   background-size: 220% 100%;
   animation: search-shimmer 1.8s linear infinite;
-  /* 各骨架行通过 --stagger 错峰，扫光斜向依次掠过，比整片同步呼吸更有"加载中"的动感 */
   animation-delay: var(--stagger, 0ms);
 }
-/* 扫光动画走 transform 而非 left：left 是布局属性，每帧都要重排重绘；
-   transform 在合成器上执行，搜索期间常驻的动画不该持续占用主线程。
-   translateX 以自身宽度（父宽 40%）为基准：-100% 自身 = 原 left:-40%，
-   250% 自身 = 原 left:100%。 */
+/* 扫光走 transform（合成器线程）：-100% 自身 = 原 left:-40%，250% 自身 = 原 left:100%。 */
 @keyframes search-progress-sweep {
-  from {
-    transform: translateX(-100%);
-  }
-  to {
-    transform: translateX(250%);
-  }
+  from { transform: translateX(-100%); }
+  to { transform: translateX(250%); }
 }
 .progress-sweep {
   left: 0;

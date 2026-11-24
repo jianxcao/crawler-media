@@ -168,23 +168,51 @@ pub(crate) async fn pause(State(state): State<ApiState>) -> Response {
 }
 
 pub(crate) async fn resume(State(state): State<ApiState>) -> Response {
-    state.probe.set_background_paused_flag(false);
+    if let Err(response) = state
+        .require_writable()
+        .and_then(|()| state.require_write_admitted())
+    {
+        return response;
+    }
+    let epoch = state.probe.pause_epoch();
     let worker_state = state.clone();
-    if let Err(error) = state
+    match state
         .http_work
         .run_to_completion(move || {
-            if let Err(err) = crate::scan_probe_dispatch::dispatch_obligations_sync(
-                &worker_state.store,
-                &worker_state.probe,
-            ) {
+            let admitted = super::store_wait::with_foreground_store(&worker_state, |store| {
+                worker_state.require_writable()?;
+                worker_state.require_write_admitted()?;
+                if worker_state.probe.pause_epoch() != epoch {
+                    return Ok::<bool, Response>(false);
+                }
+                store.library_write(|_| Ok(())).map_err(store_error)?;
+                worker_state.require_writable()?;
+                worker_state.require_write_admitted()?;
+                Ok(worker_state.probe.pause_epoch() == epoch)
+            });
+            let resumed = match admitted {
+                Ok(Ok(true)) => worker_state.probe.resume_background_if_epoch(epoch),
+                Ok(Ok(false)) => false,
+                Ok(Err(response)) | Err(response) => return Err(response),
+            };
+            if resumed
+                && let Err(err) = crate::scan_probe_dispatch::dispatch_obligations_sync(
+                    &worker_state.store,
+                    &worker_state.probe,
+                )
+            {
                 tracing::warn!(%err, "恢复后台探测时派发待办义务失败，等待后台重试");
             }
-            worker_state.probe.resume_background();
+            Ok(())
         })
         .await
     {
-        tracing::warn!(%error, "恢复后台探测即时补充窗口繁忙，交由后台调度器跟进");
-        state.probe.wake_dispatch();
+        Ok(Ok(())) => {}
+        Ok(Err(response)) => return response,
+        Err(error) => {
+            tracing::warn!(%error, "恢复后台探测即时补充窗口繁忙");
+            return super::store_wait::busy_response();
+        }
     }
     tracing::info!("后台批量媒体探测队列已手动恢复执行");
     build_status_response(&state).await
@@ -213,16 +241,29 @@ pub(crate) async fn cancel(State(state): State<ApiState>, body: Bytes) -> Respon
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
     let global_cancel = library_id.is_none();
-    let result = super::store_wait::store_write(&state, move |store| {
-        store
-            .library_write(|db| db.cancel_queued_probe_work(library_id.as_deref(), "manual_cancel"))
-    })
-    .await;
+    let worker = state.clone();
+    let metrics = media_server::query_metrics::QueryMetrics::current()
+        .filter(media_server::query_metrics::QueryMetrics::diagnostic);
+    let result = state
+        .http_work
+        .run_to_completion(move || {
+            let outcome = super::store_wait::with_foreground_store(&worker, |store| {
+                super::store_wait::observe_store_work(store, metrics, |store| {
+                    store.library_write(|db| {
+                        db.cancel_queued_probe_work(library_id.as_deref(), "manual_cancel")
+                    })
+                })
+            });
+            if let Ok(Ok(summary)) = &outcome {
+                worker
+                    .probe
+                    .purge_cancelled_seen(&summary.cancelled_file_ids, global_cancel);
+            }
+            outcome
+        })
+        .await;
     match result {
-        Ok(Ok(summary)) => {
-            state
-                .probe
-                .purge_cancelled_seen(&summary.cancelled_file_ids, global_cancel);
+        Ok(Ok(Ok(summary))) => {
             tracing::info!(
                 cancelled_units = summary.cancelled_units,
                 cleared_obligations = summary.cleared_obligations,
@@ -235,7 +276,9 @@ pub(crate) async fn cancel(State(state): State<ApiState>, body: Bytes) -> Respon
             }))
             .into_response()
         }
-        Ok(Err(error)) => store_error(error),
-        Err(response) => response,
+        Ok(Ok(Err(error))) => store_error(error),
+        Ok(Err(response)) => response,
+        Err(crate::blocking_budget::BlockingError::Busy) => super::store_wait::busy_response(),
+        Err(error) => super::store_wait::StoreCallError::Worker(error.to_string()).response(),
     }
 }

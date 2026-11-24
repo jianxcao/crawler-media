@@ -107,6 +107,10 @@ export function SubscriptionAdjustDialog({
       detail.media.kind,
       libraryId,
       detail.media.tmdb_id ?? null,
+      {
+        title: detail.media.title,
+        year: detail.media.year ?? null,
+      },
     )
       .then((p) => {
         if (!cancelled) setPreview(p);
@@ -115,7 +119,14 @@ export function SubscriptionAdjustDialog({
     return () => {
       cancelled = true;
     };
-  }, [canManageSubscriptions, detail.media.kind, detail.media.tmdb_id, libraryId]);
+  }, [
+    canManageSubscriptions,
+    detail.media.kind,
+    detail.media.title,
+    detail.media.tmdb_id,
+    detail.media.year,
+    libraryId,
+  ]);
 
   const toggleSeason = (n: number) => setSelectedSeasons(new Set([n]));
 
@@ -140,9 +151,22 @@ export function SubscriptionAdjustDialog({
       library: canManageSubscriptions && isLibraryDirty(initialLibraryId, libraryId),
     };
   }, [canManageSubscriptions, detailSeasons, initialLibraryId, isMovie, libraryId, selectedSeasons]);
+  const hasDefaultLibrary = useMemo(
+    () => libraries.some((l) => l.is_default),
+    [libraries],
+  );
+  const missingRequiredLibrary =
+    canManageSubscriptions && libraryId === null && !hasDefaultLibrary;
   const dirty = changed.seasons || changed.library;
+  const saveDisabled =
+    busy ||
+    !dirty ||
+    (!isMovie && selectedSeasons.size === 0) ||
+    missingRequiredLibrary ||
+    preview?.ok === false;
 
   const save = async () => {
+    if (saveDisabled) return;
     setBusy(true);
     setError(null);
     // 本次被移出范围的季——清理追问的范围。保存前算好：保存后季状态已经变了
@@ -263,9 +287,15 @@ export function SubscriptionAdjustDialog({
                 onChange={(e) =>
                   setLibraryId(e.target.value === "" ? null : e.target.value)
                 }
-                className="w-full rounded-xl border border-white/[0.08] bg-white/[0.04] px-3.5 py-2.5 text-ui text-white/90 outline-none focus:border-white/25 [&>option]:bg-[#181c28]"
+                className="w-full rounded-xl border border-white/[0.08] bg-white/[0.04] px-3.5 py-2.5 text-ui text-white/90 outline-none focus:border-white/25"
               >
-                <option value="">（按默认库路由）</option>
+                {hasDefaultLibrary ? (
+                  <option value="">（按默认库路由）</option>
+                ) : initialLibraryId === null ? (
+                  <option value="" disabled>
+                    （当前默认库不可用，请选择目标媒体库）
+                  </option>
+                ) : null}
                 {libraries.map((l) => (
                   <option key={l.id} value={l.id}>
                     {l.name}
@@ -276,10 +306,32 @@ export function SubscriptionAdjustDialog({
               {preview &&
                 (preview.ok ? (
                   <p className="mt-1.5 text-caption leading-relaxed text-[var(--text-faint)]">
-                    {preview.mode === "watch"
-                      ? `将投递到自动入库的监听目录 ${preview.path ?? ""}，下载完成后自动整理入库`
-                      : // 条目目录由后端按命名模板渲染，前端不自己拼名字
-                        `将直接下载到库内目录 ${preview.entry_dir ?? preview.path ?? ""}，完成后自动入账`}
+                    {preview.mode === "watch" ? (
+                      preview.staging_path ? (
+                        <span>
+                          将投递到自动入库的监听目录{" "}
+                          <span className="font-mono">{preview.path ?? ""}</span>
+                          ，下载完成后整理到{" "}
+                          <span className="font-mono">{preview.staging_path}</span>
+                          ，文件进入媒体库根目录后自动入账
+                        </span>
+                      ) : (
+                        <span>
+                          将投递到自动入库的监听目录{" "}
+                          <span className="font-mono">{preview.path ?? ""}</span>
+                          ，下载完成后自动整理入库
+                        </span>
+                      )
+                    ) : (
+                      // 条目目录由后端按命名模板渲染，前端不自己拼名字
+                      <span>
+                        将直接下载到库内目录{" "}
+                        <span className="font-mono">
+                          {(preview.entry_dir ?? preview.path ?? "").replace(/\/+$/, "")}
+                        </span>
+                        ，完成后自动入账
+                      </span>
+                    )}
                   </p>
                 ) : (
                   <p className="mt-1.5 rounded-lg border border-amber-400/25 bg-amber-500/10 px-3 py-2 text-caption leading-relaxed text-amber-200">
@@ -298,7 +350,7 @@ export function SubscriptionAdjustDialog({
         </button>
         <button
           type="button"
-          disabled={busy || !dirty || (!isMovie && selectedSeasons.size === 0)}
+          disabled={saveDisabled}
           onClick={() => void save()}
           className="btn-accent h-9 rounded-full px-5 text-ui font-semibold disabled:opacity-40"
         >

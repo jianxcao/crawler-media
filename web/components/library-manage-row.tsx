@@ -221,7 +221,7 @@ function LibraryThumb({ library, Icon }: { library: MediaLibrary; Icon: typeof M
     ? `${publicEnv.apiBaseUrl}${library.cover_url}`
     : `${publicEnv.apiBaseUrl}/libraries/${library.id}/cover?t=${library.stats.item_count}`;
   return (
-    <div className="relative h-11 w-[72px] shrink-0 overflow-hidden rounded-lg border border-white/[0.08] bg-[#0c0f17]">
+    <div className="dark-media-surface relative h-11 w-[72px] shrink-0 overflow-hidden rounded-lg border border-white/[0.08] bg-[#0c0f17]">
       {showImage ? (
         <ArtworkImage
           src={coverSrc}
@@ -331,7 +331,7 @@ function RowMenu({
               <DropdownMenu.Separator className="my-1 h-px bg-white/[0.07]" />
               <DropdownMenu.Item
                 onSelect={() => actions.onDelete(library)}
-                className="glass-row nav-item cursor-pointer px-3 py-2 text-ui font-medium text-red-400 outline-none data-[highlighted]:!bg-red-500/20 data-[highlighted]:!text-red-300"
+                className="glass-row nav-item cursor-pointer px-3 py-2 text-ui font-medium !text-[var(--danger)] outline-none hover:!bg-[var(--danger)]/10 hover:!text-[var(--danger)] data-[highlighted]:!bg-[var(--danger)]/10 data-[highlighted]:!text-[var(--danger)]"
               >
                 删除媒体库
               </DropdownMenu.Item>

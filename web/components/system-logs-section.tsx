@@ -15,10 +15,10 @@ import { useToast, useConfirm } from "@/components/feedback";
 
 const LOG_LEVELS = [
   { id: "ALL", label: "全部级别" },
-  { id: "ERROR", label: "ERROR", badgeColor: "bg-red-500/20 text-red-300 border-red-500/30" },
-  { id: "WARN", label: "WARN", badgeColor: "bg-amber-500/20 text-amber-300 border-amber-500/30" },
-  { id: "INFO", label: "INFO", badgeColor: "bg-blue-500/20 text-blue-300 border-blue-500/30" },
-  { id: "DEBUG", label: "DEBUG", badgeColor: "bg-zinc-500/20 text-zinc-300 border-zinc-500/30" },
+  { id: "ERROR", label: "ERROR", badgeColor: "bg-[var(--danger)]/15 text-[var(--danger)] border-[var(--danger)]/30" },
+  { id: "WARN", label: "WARN", badgeColor: "bg-[var(--warn)]/15 text-[var(--warn)] border-[var(--warn)]/30" },
+  { id: "INFO", label: "INFO", badgeColor: "bg-[var(--info)]/15 text-[var(--info)] border-[var(--info)]/30" },
+  { id: "DEBUG", label: "DEBUG", badgeColor: "bg-[var(--glass-fill)] text-[var(--text-muted)] border-[var(--line)]" },
 ];
 
 const MODULE_OPTIONS = [
@@ -102,15 +102,18 @@ export function SystemLogsSection() {
     count: filteredLogs.length,
     getScrollElement: () => parentRef.current,
     estimateSize: () => 28,
+    getItemKey: (index) => filteredLogs[index]?.id ?? index,
     overscan: 20,
   });
+
+  const tailLogId = filteredLogs[filteredLogs.length - 1]?.id ?? null;
 
   // Auto-scroll to bottom when new logs arrive if enabled
   useEffect(() => {
     if (autoScroll && filteredLogs.length > 0) {
       rowVirtualizer.scrollToIndex(filteredLogs.length - 1, { align: "end" });
     }
-  }, [filteredLogs.length, autoScroll, rowVirtualizer]);
+  }, [filteredLogs.length, tailLogId, autoScroll, rowVirtualizer]);
 
   const handleClear = async () => {
     const ok = await confirm({
@@ -166,7 +169,7 @@ export function SystemLogsSection() {
             className="input-glass cursor-pointer rounded-lg px-2.5 py-1 text-ui font-medium text-[var(--text)]"
           >
             {LOG_LEVELS.map((item) => (
-              <option key={item.id} value={item.id} className="bg-zinc-900 text-zinc-100">
+              <option key={item.id} value={item.id}>
                 {item.label}
               </option>
             ))}
@@ -179,7 +182,7 @@ export function SystemLogsSection() {
             className="input-glass cursor-pointer rounded-lg px-2.5 py-1 text-ui font-medium text-[var(--text)]"
           >
             {MODULE_OPTIONS.map((item) => (
-              <option key={item.id} value={item.id} className="bg-zinc-900 text-zinc-100">
+              <option key={item.id} value={item.id}>
                 {item.label}
               </option>
             ))}
@@ -202,11 +205,11 @@ export function SystemLogsSection() {
             type="button"
             onClick={() => setAutoScroll(!autoScroll)}
             className={`btn-glass px-2.5 py-1 text-sub ${
-              autoScroll ? "text-emerald-400 font-semibold" : "text-[var(--text-muted)]"
+              autoScroll ? "btn-glass--ok font-semibold" : "btn-glass--muted"
             }`}
             title="新日志进入时自动滚到底部"
           >
-            <span className={`inline-block size-2 rounded-full mr-1.5 ${autoScroll ? "bg-emerald-400 animate-pulse" : "bg-zinc-500"}`} />
+            <span className={`inline-block size-2 rounded-full mr-1.5 ${autoScroll ? "bg-[var(--ok)] animate-pulse" : "bg-zinc-500"}`} />
             自动滚动
           </button>
 
@@ -214,7 +217,7 @@ export function SystemLogsSection() {
           <button
             type="button"
             onClick={handleExport}
-            className="btn-glass px-2.5 py-1 text-sub text-[var(--text)] hover:text-white"
+            className="btn-glass px-2.5 py-1 text-sub"
           >
             导出日志
           </button>
@@ -223,7 +226,7 @@ export function SystemLogsSection() {
           <button
             type="button"
             onClick={handleClear}
-            className="btn-glass px-2.5 py-1 text-sub text-red-400 hover:text-red-300"
+            className="btn-glass btn-glass--danger px-2.5 py-1 text-sub"
           >
             清空
           </button>
@@ -233,9 +236,9 @@ export function SystemLogsSection() {
       {/* 日志控制台主视窗 (虚拟滚动) */}
       <div className="css-glass rounded-2xl relative overflow-hidden flex flex-col h-[600px]">
         {/* 控制台顶栏状态说明 */}
-        <div className="flex items-center justify-between border-b border-white/5 bg-black/40 px-4 py-2 text-sub text-[var(--text-muted)] font-mono">
+        <div className="code-well flex items-center justify-between !border-x-0 !border-t-0 px-4 py-2 text-sub text-[var(--text-muted)] font-mono">
           <div className="flex items-center gap-2">
-            <span className="size-2.5 rounded-full bg-emerald-500/80" />
+            <span className="size-2.5 rounded-full bg-[var(--ok)]" />
             <span>实时日志流已接入</span>
           </div>
           <div className="flex items-center gap-3">
@@ -273,12 +276,12 @@ export function SystemLogsSection() {
                 const isInfo = item.level === "INFO";
 
                 const levelBadgeClass = isErr
-                  ? "text-red-400 font-bold"
+                  ? "text-[var(--danger)] font-bold"
                   : isWarn
-                  ? "text-amber-400 font-medium"
+                  ? "text-[var(--warn)] font-medium"
                   : isInfo
-                  ? "text-sky-400"
-                  : "text-zinc-500";
+                  ? "text-[var(--info)]"
+                  : "text-[var(--text-faint)]";
 
                 return (
                   <div
@@ -290,16 +293,16 @@ export function SystemLogsSection() {
                       transform: `translateY(${virtualRow.start}px)`,
                     }}
                   >
-                    <span className="shrink-0 text-zinc-500 select-none">
+                    <span className="shrink-0 text-[var(--text-faint)] select-none">
                       {timeStr}
                     </span>
                     <span className={`w-12 shrink-0 select-none font-semibold ${levelBadgeClass}`}>
                       {item.level}
                     </span>
-                    <span className="shrink-0 rounded bg-white/[0.06] px-1.5 py-0.2 text-[11px] text-zinc-400 select-none max-w-[150px] truncate">
+                    <span className="shrink-0 rounded bg-white/[0.06] px-1.5 py-0.2 text-[11px] text-[var(--text-muted)] select-none max-w-[150px] truncate">
                       {item.target}
                     </span>
-                    <span className={`flex-1 break-all ${isErr ? "text-red-200" : isWarn ? "text-amber-100" : "text-zinc-200"}`}>
+                    <span className={`flex-1 break-all ${isErr ? "text-[var(--danger)]" : isWarn ? "text-[var(--warn)]" : "text-[var(--text)]"}`}>
                       {item.message}
                     </span>
                   </div>

@@ -45,7 +45,7 @@ function BrandBadge({ brand }: { brand: BrandStripItem }) {
     return (
       <span
         title={brand.name}
-        className="inline-flex h-7 items-center rounded-md border border-white/[0.1] bg-black/45 px-2.5 py-1 backdrop-blur-sm"
+        className="dark-media-surface inline-flex h-7 items-center rounded-md border border-white/[0.1] bg-[#182030]/82 px-2.5 py-1 backdrop-blur-sm"
       >
         <ArtworkImage
           src={resolvedLogo}

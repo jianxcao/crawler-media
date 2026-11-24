@@ -113,7 +113,7 @@ export function WallIndexBar({
           指尖压着的字母本身被手指挡住，没有它滑选等于盲选 */}
       {preview && previewIdx >= 0 && (
         <div
-          className="pointer-events-none absolute right-full mr-3 flex -translate-y-1/2 items-center gap-2 rounded-xl border border-white/[0.14] bg-[rgba(16,18,26,0.92)] px-3.5 py-2 shadow-[0_8px_28px_rgba(0,0,0,0.5)]"
+          className="popover-surface pointer-events-none absolute right-full mr-3 flex -translate-y-1/2 items-center gap-2 rounded-xl px-3.5 py-2"
           style={{ top: `${((previewIdx + 0.5) / slots.length) * 100}%` }}
         >
           <span className="text-title-lg font-bold text-white">{preview}</span>

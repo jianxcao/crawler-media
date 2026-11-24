@@ -4,7 +4,7 @@ import { useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 
-import { useConfirm } from "@/components/feedback";
+import { useConfirm, useToast } from "@/components/feedback";
 import { ChevronDownIcon, MoreIcon } from "@/components/icons";
 import {
   BoostReadout,
@@ -27,7 +27,7 @@ import { formatBytes } from "@/lib/format";
 
 const STATUS_META = {
   enabled: { label: "已接入", color: "var(--ok)" },
-  disabled: { label: "已停用", color: "#c0c4cc" },
+  disabled: { label: "已停用", color: "var(--text-muted)" },
 } as const;
 
 /* —— 站点行：一行一站，P0 常驻 + P1 条件徽章；点击展开详情 —— */
@@ -57,9 +57,14 @@ export function SiteRow({
   onError,
 }: SiteRowProps) {
   const confirm = useConfirm();
+  const toast = useToast();
   const [busy, setBusy] = useState(false);
   const [editingAuth, setEditingAuth] = useState(false);
   const [boostModal, setBoostModal] = useState<"enable" | "adjust" | null>(null);
+  const [actionStatus, setActionStatus] = useState<{
+    tone: "ok" | "danger";
+    text: string;
+  } | null>(null);
   const meta = STATUS_META[site.enabled ? "enabled" : "disabled"];
   const boosting = boost?.boost.enabled === true;
 
@@ -69,6 +74,23 @@ export function SiteRow({
       await fn();
     } catch (e) {
       onError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function runCheckIn() {
+    setBusy(true);
+    setActionStatus(null);
+    try {
+      const res = await checkInSite(site.id);
+      onChanged(res);
+      setActionStatus({ tone: "ok", text: "已触发签到" });
+      toast.success(`「${site.name}」签到成功`);
+    } catch (e) {
+      const errMsg = (e as Error).message || "签到失败";
+      setActionStatus({ tone: "danger", text: errMsg });
+      toast.error(`「${site.name}」签到失败：${errMsg}`);
     } finally {
       setBusy(false);
     }
@@ -90,7 +112,7 @@ export function SiteRow({
   }
 
   return (
-    <div className={site.enabled ? "" : "opacity-60"}>
+    <div>
       <div
         role="button"
         tabIndex={0}
@@ -108,7 +130,11 @@ export function SiteRow({
       >
         <div className="flex min-w-0 flex-1 items-center gap-2.5">
           <SiteBadge item={item} />
-          <span className="truncate text-ui font-semibold text-[var(--text)]">
+          <span
+            className={`truncate text-ui font-semibold ${
+              site.enabled ? "text-[var(--text)]" : "text-[var(--text-muted)]"
+            }`}
+          >
             {site.name}
           </span>
           <span
@@ -121,9 +147,13 @@ export function SiteRow({
             <span className="size-1.5 rounded-full" style={{ background: meta.color }} />
             {meta.label}
           </span>
-          {!site.enabled && (
-            <span className="shrink-0 rounded-full bg-white/[0.08] px-2 py-0.5 text-caption font-medium text-[var(--text-muted)]">
-              已停用
+          {actionStatus && (
+            <span
+              className={`truncate text-caption font-medium ${
+                actionStatus.tone === "ok" ? "text-[var(--ok)]" : "text-[var(--danger)]"
+              }`}
+            >
+              {actionStatus.text}
             </span>
           )}
         </div>
@@ -155,9 +185,7 @@ export function SiteRow({
               onOpen();
               setEditingAuth(true);
             }}
-            onCheckIn={() =>
-              void guard(async () => onChanged(await checkInSite(site.id)))
-            }
+            onCheckIn={() => void runCheckIn()}
             onReverify={() =>
               void guard(async () => onChanged(await reverifySite(site.id)))
             }
@@ -443,7 +471,7 @@ function SiteActionsMenu({
           <DropdownMenu.Item
             onSelect={onDelete}
             disabled={busy}
-            className={`${itemClass} !text-[#ff6b6b] data-[highlighted]:!bg-[#ff6b6b]/10`}
+            className={`${itemClass} !text-[var(--danger)] data-[highlighted]:!bg-[var(--danger)]/10`}
           >
             删除配置
           </DropdownMenu.Item>

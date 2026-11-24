@@ -575,6 +575,7 @@ function MobileTopBar({
               <ArtworkImage
                 src="/logo-mark.svg"
                 alt={publicEnv.appName}
+                loading="eager"
                 width={30}
                 height={30}
                 className="size-7 object-contain"
@@ -584,6 +585,7 @@ function MobileTopBar({
                 <ArtworkImage
                   src="/logo-mark.svg"
                   alt=""
+                  loading="eager"
                   width={26}
                   height={26}
                   className="size-[26px] object-contain"

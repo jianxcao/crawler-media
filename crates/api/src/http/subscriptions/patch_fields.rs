@@ -2,7 +2,7 @@ use std::str::FromStr;
 
 use axum::http::StatusCode;
 use axum::response::Response;
-use domain::{Coverage, FetchMode, Subscribe};
+use domain::{Coverage, FetchMode, Subscribe, UserId};
 
 use crate::http::err;
 use crate::store::Store;
@@ -12,6 +12,7 @@ use super::types::PatchSubscriptionInput;
 pub(super) fn apply_patch_fields(
     store: &Store,
     subscribe: &mut Subscribe,
+    user_id: UserId,
     body: PatchSubscriptionInput,
 ) -> Result<(), Response> {
     apply_mode_and_flags(subscribe, &body)?;
@@ -22,7 +23,7 @@ pub(super) fn apply_patch_fields(
     )?;
     update_downloader(store, subscribe, body.downloader_id.as_deref())?;
     update_tracking_fields(subscribe, &body)?;
-    update_library_id(store, subscribe, body.library_id)?;
+    update_library_id(store, subscribe, user_id, body.library_id)?;
     update_coverage(subscribe, body.coverage)?;
     subscribe
         .coverage
@@ -153,6 +154,7 @@ fn update_downloader(
 fn update_library_id(
     store: &Store,
     subscribe: &mut Subscribe,
+    user_id: UserId,
     library_id: Option<Option<String>>,
 ) -> Result<(), Response> {
     let Some(maybe_id) = library_id else {
@@ -174,7 +176,8 @@ fn update_library_id(
                 "订阅关联的影视不存在",
             )
         })?;
-    subscribe.library_id = super::library_target::resolve(store, maybe_id.as_deref(), media.kind)?;
+    subscribe.library_id =
+        super::library_target::resolve(store, maybe_id.as_deref(), media.kind, user_id)?;
     Ok(())
 }
 

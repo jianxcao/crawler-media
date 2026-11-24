@@ -406,3 +406,63 @@ async fn transfers_unicode_casefold_search_and_removing_library_exclusion() {
     assert_eq!(groups.len(), 1);
     assert_eq!(groups[0]["media_title"], "Élite");
 }
+
+#[tokio::test]
+async fn transfers_file_row_mode_matches_mode_filter_and_summary_counts() {
+    let dir = tempfile::tempdir_in("/tmp").unwrap();
+    let store = Store::open(dir.path().join("data")).unwrap();
+    let movie_root = dir.path().join("movies");
+    std::fs::create_dir_all(&movie_root).unwrap();
+    store
+        .create_library(
+            MediaKind::Movie,
+            "Movies",
+            &[movie_root.to_str().unwrap()],
+            "everyone",
+            true,
+            &[],
+        )
+        .unwrap();
+
+    // Single-link (`nlink == 1`) file recorded with `transfer_mode = "hardlink"`
+    // (e.g. after downloader removed source torrent or cross-device transfer).
+    let hl_media = insert_media(&store, MediaKind::Movie, "Single Link Hardlink");
+    let hl_path = movie_root.join("Single.Link.2160p.mkv");
+    std::fs::write(&hl_path, b"single-link-bytes").unwrap();
+    publish_item(&store, hl_media, &hl_path, Some("hardlink"), None);
+
+    let copy_media = insert_media(&store, MediaKind::Movie, "Explicit Copy");
+    let copy_path = movie_root.join("Explicit.Copy.1080p.mkv");
+    std::fs::write(&copy_path, b"explicit-copy-bytes").unwrap();
+    publish_item(&store, copy_media, &copy_path, Some("copy"), None);
+
+    let state = ApiState::new(
+        store,
+        "transfers-test".into(),
+        ProfileSet::load(None).unwrap(),
+        Arc::new(NoFetch),
+        Arc::new(MemoryDownloader::new(dir.path().join("stage"))),
+    )
+    .unwrap();
+
+    let hl_page = get_json(
+        state.clone(),
+        "/api/v1/ledger/transfers?view=files&mode=hardlink",
+    )
+    .await;
+    assert_eq!(hl_page["summary"]["hardlink_count"], 1);
+    assert_eq!(hl_page["summary"]["copy_count"], 1);
+    assert_eq!(hl_page["filtered_total"], 1);
+    assert_eq!(hl_page["items"].as_array().unwrap().len(), 1);
+    assert_eq!(hl_page["items"][0]["media_title"], "Single Link Hardlink");
+    assert_eq!(
+        hl_page["items"][0]["transfer_mode"], "hardlink",
+        "?mode=hardlink rows must report transfer_mode == 'hardlink' matching SQL filter and summary"
+    );
+
+    let copy_page = get_json(state, "/api/v1/ledger/transfers?view=files&mode=copy").await;
+    assert_eq!(copy_page["filtered_total"], 1);
+    assert_eq!(copy_page["items"].as_array().unwrap().len(), 1);
+    assert_eq!(copy_page["items"][0]["media_title"], "Explicit Copy");
+    assert_eq!(copy_page["items"][0]["transfer_mode"], "copy");
+}

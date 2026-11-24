@@ -94,6 +94,13 @@ pub(super) fn request_next(
     stable_intro: bool,
 ) -> Result<bool, store::StoreError> {
     let mut requested = false;
+    let claim_unit_exempt = claim.participants.iter().any(|p| {
+        let job_id = &p.dispatch().job_id;
+        let lid = &p.dispatch().ledger_id;
+        manager.is_unit_paused_exempt(job_id, lid)
+            || manager.was_unit_promoted(job_id, lid)
+            || manager.job_has_unit_exemption_or_promotion(job_id)
+    });
     // Validate every participant before any pending transition can launch IO.
     let plans = claim
         .participants
@@ -145,15 +152,7 @@ pub(super) fn request_next(
             }
         }
         if changed {
-            if !manager.store.request_probe_analysis_capture(
-                claim,
-                participant.dispatch(),
-                &serde_json::to_string(&plan)?,
-            )? {
-                return Err(store::StoreError::Protected(
-                    "pending capture claim changed".into(),
-                ));
-            }
+            request_participant_followup(manager, claim, participant, &plan, claim_unit_exempt)?;
             requested = true;
         } else if terminal
             && !manager.store.put_probe_sampling_plan(
@@ -168,6 +167,38 @@ pub(super) fn request_next(
         }
     }
     Ok(requested)
+}
+
+fn request_participant_followup(
+    manager: &ProbeManager,
+    claim: &store::ProbeAnalysisClaim,
+    participant: &store::ProbeAnalysisParticipant,
+    plan: &super::capture::CapturePlan,
+    claim_unit_exempt: bool,
+) -> Result<(), store::StoreError> {
+    let id = &participant.dispatch().ledger_id;
+    if !manager.store.request_probe_analysis_capture(
+        claim,
+        participant.dispatch(),
+        &serde_json::to_string(plan)?,
+    )? {
+        return Err(store::StoreError::Protected(
+            "pending capture claim changed".into(),
+        ));
+    }
+    let job_id = &participant.dispatch().job_id;
+    if manager.background_is_paused()
+        && !manager.is_job_paused_exempt(job_id)
+        && (claim_unit_exempt || manager.job_has_unit_exemption_or_promotion(job_id))
+    {
+        manager.mark_unit_paused_exempt(job_id.clone(), id.clone());
+        manager.mark_unit_promoted(job_id.clone(), id.clone());
+        if !manager.should_defer_remote_dispatch(&participant.context().target.file.path) {
+            manager.dispatch_promoted_unit(job_id, id, store::ProbeDispatchStage::Fingerprint);
+        }
+        manager.wake.notify_waiters();
+    }
+    Ok(())
 }
 fn load_plan(
     manager: &ProbeManager,

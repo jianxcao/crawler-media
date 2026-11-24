@@ -42,7 +42,7 @@ export function SettingsSidebar({ active, onSelect, onBack }: SettingsSidebarPro
   // 与工作台侧栏共用同一份用户偏好（透明度/明暗）；外观分区拖动滑杆时，
   // 这块面板就是实时预览的对象。
   const { prefs } = useUiPrefs();
-  const glass = sidebarGlass(prefs.sidebar);
+  const glass = sidebarGlass(prefs.sidebar, prefs.theme);
   // 有可用更新时给「更新与维护」分区行点一颗小蓝点：从别的入口进了设置，
   // 也能一眼看出更新在哪一栏（与侧栏更新入口同一份快照数据）
   return (
@@ -61,7 +61,7 @@ export function SettingsSidebar({ active, onSelect, onBack }: SettingsSidebarPro
         <button
           type="button"
           onClick={onBack}
-          className="btn-glass px-3.5 py-1.5 text-sub font-medium text-[var(--text-muted)] hover:text-[var(--text)]"
+          className="btn-glass btn-glass--muted px-3.5 py-1.5 text-sub font-medium"
         >
           <ArrowLeftIcon className="size-4" />
           <span>返回工作台</span>
@@ -217,7 +217,7 @@ function AppearanceSection() {
         <p className="mb-3 text-sub leading-6 text-[var(--text-muted)]">
           主题会保存到你的账号，并在此设备和其他设备间同步。
         </p>
-        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+        <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
           {THEMES.map((theme) => {
             const selected = prefs.theme === theme.id;
             return (
@@ -227,9 +227,7 @@ function AppearanceSection() {
                 aria-pressed={selected}
                 disabled={loading}
                 onClick={() => void selectTheme(theme.id)}
-                className={`css-glass flex min-h-28 items-center gap-4 p-4 text-left transition disabled:cursor-wait disabled:opacity-60 ${
-                  selected ? "border-[var(--accent)]/55 bg-[var(--accent-soft)]" : "hover:bg-[var(--glass-fill-hover)]"
-                }`}
+                className="css-glass flex min-h-28 items-center gap-4 p-4 text-left transition disabled:cursor-wait disabled:opacity-60"
               >
                 <span
                   aria-hidden="true"
@@ -359,7 +357,7 @@ function WatchHistoryCard() {
         type="button"
         onClick={() => void clearAll()}
         disabled={busy}
-        className="btn-glass h-9 shrink-0 px-4 text-ui font-medium !text-[#ff9f9f] disabled:opacity-40"
+        className="btn-glass btn-glass--danger h-9 shrink-0 px-4 text-ui font-medium"
       >
         {busy ? "清空中…" : "清空"}
       </button>

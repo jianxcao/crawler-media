@@ -26,6 +26,59 @@ pub(crate) struct ArrivalSnapshot {
     pub(crate) episodes: Vec<media::SeasonEpisode>,
 }
 
+fn resolve_effective_target_library(
+    store: &crate::Store,
+    subscribe: &domain::Subscribe,
+    media_kind: domain::MediaKind,
+    user_id: domain::UserId,
+    admin: bool,
+) -> Result<Option<domain::LibraryId>, crate::store::StoreError> {
+    match subscribe.library_id {
+        Some(target_id) => {
+            let id_str = target_id.to_string();
+            let Some(library) = store.get_library(&id_str)? else {
+                return Ok(None);
+            };
+            if library.kind != media_kind
+                || !store.library_accepts_work(&id_str)?
+                || !crate::http::routing_preview::user_can_target_library(
+                    &library,
+                    Some(user_id),
+                    admin,
+                )
+            {
+                return Ok(None);
+            }
+            Ok(Some(target_id))
+        }
+        None => {
+            let Some(default_lib) = store.default_library(media_kind)? else {
+                return Ok(None);
+            };
+            let owner_admin = if subscribe.user_id == user_id {
+                admin
+            } else {
+                store.user_role(subscribe.user_id)? == "admin"
+            };
+            if !store.library_accepts_work(&default_lib.id)?
+                || !crate::http::routing_preview::user_can_auto_route_library(
+                    &default_lib,
+                    Some(subscribe.user_id),
+                    owner_admin,
+                )
+                || !crate::http::routing_preview::user_can_target_library(
+                    &default_lib,
+                    Some(user_id),
+                    admin,
+                )
+            {
+                return Ok(None);
+            }
+            Ok(default_lib.id.parse().ok())
+        }
+    }
+}
+
 /// 只在持有 Store 锁时读取/Clone；DB 错误向上传播（handler 记 500，不静默空集合）。
 pub(crate) fn load_arrivals(
     store: &crate::Store,
@@ -38,40 +91,60 @@ pub(crate) fn load_arrivals(
     } else {
         store.list_subscribes_for_user(user_id)?
     };
-    let visible = crate::visible_scope::VisibleLibraries::load(store, Some(user_id))?;
-    let mut rows_by_media: HashMap<domain::MediaId, Vec<domain::FileCoverage>> = HashMap::new();
-    let media_ids: Vec<domain::MediaId> = subscribes.iter().map(|s| s.media_id).collect();
-    for coverage in store.file_coverage_for_media_batch(&media_ids)? {
-        if coverage.file.publication != domain::FilePublication::Published
-            || coverage.file.presence == domain::FilePresence::Missing
-            || visible.get(&coverage.file.library_id).is_none()
-        {
-            continue;
-        }
-        rows_by_media
-            .entry(coverage.file.media_id)
-            .or_default()
-            .push(coverage);
-    }
-    let mut snapshots = Vec::with_capacity(subscribes.len());
+    let mut resolved = Vec::with_capacity(subscribes.len());
+    let mut coverage_media_ids = Vec::new();
     for subscribe in subscribes {
         let Some(media) = store.get_media(subscribe.media_id)? else {
             continue;
         };
+        let target_lib =
+            resolve_effective_target_library(store, &subscribe, media.kind, user_id, admin)?;
+        if target_lib.is_some() {
+            coverage_media_ids.push(subscribe.media_id);
+        }
+        resolved.push((subscribe, media, target_lib));
+    }
+    let mut rows_by_media: HashMap<domain::MediaId, Vec<domain::FileCoverage>> = HashMap::new();
+    if !coverage_media_ids.is_empty() {
+        for coverage in store.file_coverage_for_media_batch(&coverage_media_ids)? {
+            if coverage.file.publication != domain::FilePublication::Published
+                || coverage.file.presence == domain::FilePresence::Missing
+            {
+                continue;
+            }
+            rows_by_media
+                .entry(coverage.file.media_id)
+                .or_default()
+                .push(coverage);
+        }
+    }
+    let mut snapshots = Vec::with_capacity(resolved.len());
+    for (subscribe, media, target_lib) in resolved {
         let pending = store.load_pending(subscribe.id)?;
         let facts = if media.kind == domain::MediaKind::Tv {
             store.load_subscribe_facts(subscribe.id)?
         } else {
             domain::SubscribeFacts::default()
         };
-        let mut rows = rows_by_media
-            .get(&subscribe.media_id)
-            .cloned()
-            .unwrap_or_default();
-        if let Some(target_lib) = subscribe.library_id {
-            rows.retain(|coverage| coverage.file.library_id == target_lib);
-        }
-        let episodes = super::catalog_facts::adopted_episodes(store, &subscribe, &rows)?;
+        let rows = match target_lib {
+            Some(target_lib) => rows_by_media
+                .get(&subscribe.media_id)
+                .map(|rows| {
+                    rows.iter()
+                        .filter(|coverage| coverage.file.library_id == target_lib)
+                        .cloned()
+                        .collect()
+                })
+                .unwrap_or_default(),
+            None => Vec::new(),
+        };
+        let episodes = if let Some(target_lib) = target_lib {
+            let mut scoped = subscribe.clone();
+            scoped.library_id = Some(target_lib);
+            super::catalog_facts::adopted_episodes(store, &scoped, &rows)?
+        } else {
+            Vec::new()
+        };
         snapshots.push(ArrivalSnapshot {
             episodes,
             subscribe,
@@ -200,7 +273,11 @@ fn push_grabbed_arrivals(
             .clone()
             .unwrap_or_else(|| release::parse(&pd.torrent.title));
         let grabbed_at = pd.submitted_at.map(crate::store::rfc3339_from_secs);
-        let season = parsed.season.or(default_season);
+        let season = if parsed.season_inferred {
+            default_season.or(parsed.season)
+        } else {
+            parsed.season.or(default_season)
+        };
         if let (Some(s), Some(ep_from)) = (season, parsed.episode) {
             let ep_to = parsed
                 .episode_to
@@ -398,3 +475,7 @@ pub(crate) async fn today_arrivals(
         ),
     }
 }
+
+#[cfg(test)]
+#[path = "arrivals_tests.rs"]
+mod tests;

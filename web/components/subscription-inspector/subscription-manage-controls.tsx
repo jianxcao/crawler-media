@@ -99,7 +99,7 @@ export function SubscriptionManageMenu({
             <DropdownMenu.Item
               onSelect={onRemove}
               disabled={busy}
-              className={`${itemClass} !text-[#ff8b8b] data-[highlighted]:!bg-[#ff6b6b]/10`}
+              className={`${itemClass} !text-[var(--danger)] data-[highlighted]:!bg-[var(--danger)]/10`}
             >
               取消订阅
             </DropdownMenu.Item>
@@ -181,7 +181,7 @@ export function SubscriptionManageSheet({
               type="button"
               disabled={busy}
               onClick={onRemove}
-              className={`${rowClass} border-t border-white/[0.07] !text-[#ff8b8b] hover:!bg-[#ff6b6b]/10`}
+              className={`${rowClass} border-t border-white/[0.07] !text-[var(--danger)] hover:!bg-[var(--danger)]/10`}
             >
               <span>取消订阅</span>
             </button>

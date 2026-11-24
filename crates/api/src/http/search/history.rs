@@ -315,9 +315,12 @@ pub(crate) async fn search_history(
     }
 }
 
+const MAX_PRESETS_COUNT: usize = 64;
+const MAX_PRESETS_BYTES: usize = 64 * 1024;
+
 fn normalize_presets(
     body: Result<Json<Value>, axum::extract::rejection::JsonRejection>,
-) -> Result<Value, Response> {
+) -> Result<(Value, String), Response> {
     let Ok(Json(body)) = body else {
         return Err(err(
             StatusCode::BAD_REQUEST,
@@ -336,6 +339,13 @@ fn normalize_presets(
             "presets 必须是数组",
         ));
     };
+    if items.len() > MAX_PRESETS_COUNT {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "search.invalid_presets",
+            "presets 数量不能超过 64 个",
+        ));
+    }
     let mut seen_ids = std::collections::HashSet::with_capacity(items.len());
     let mut normalized = Vec::with_capacity(items.len());
     for entry in items {
@@ -360,7 +370,16 @@ fn normalize_presets(
         }
         normalized.push(entry.clone());
     }
-    Ok(Value::Array(normalized))
+    let value = Value::Array(normalized);
+    let serialized = value.to_string();
+    if serialized.len() > MAX_PRESETS_BYTES {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "search.invalid_presets",
+            "presets 总大小不能超过 64 KiB",
+        ));
+    }
+    Ok((value, serialized))
 }
 
 pub(crate) async fn get_presets(
@@ -406,26 +425,28 @@ pub(crate) async fn put_presets(
     axum::Extension(user_id): axum::Extension<domain::UserId>,
     body: Result<Json<Value>, axum::extract::rejection::JsonRejection>,
 ) -> Response {
-    let presets = match normalize_presets(body) {
+    let (presets, value) = match normalize_presets(body) {
         Ok(presets) => presets,
         Err(response) => return response,
     };
     let key = user_setting_key("search.presets", user_id);
-    let value = presets.to_string();
     match store_write(
         &state,
         move |store| -> Result<(), crate::store::StoreError> {
-            let is_admin = store.user_role(user_id)? == "admin";
-            store.put_setting(&key, &value)?;
-            if is_admin {
-                store.put_setting(crate::settings_keys::SEARCH_PRESETS, &value)?;
-            }
-            Ok(())
+            store.writers().with_app(|app| {
+                let is_admin = app.user_role(user_id)? == "admin";
+                app.put_setting(&key, &value)?;
+                if is_admin {
+                    app.put_setting(crate::settings_keys::SEARCH_PRESETS, &value)?;
+                }
+                Ok(())
+            })
         },
     )
     .await
     {
         Ok(Ok(())) => ok(json!({ "presets": presets })).into_response(),
+        Ok(Err(store::StoreError::WriteBusy)) => crate::http::store_wait::busy_response(),
         Ok(Err(error)) => err(
             StatusCode::INTERNAL_SERVER_ERROR,
             "store.error",
@@ -544,5 +565,112 @@ pub(crate) async fn clear_search_history_route(
             )
         }
         Err(response) => response,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_presets;
+    use axum::Json;
+    use axum::http::StatusCode;
+    use serde_json::json;
+
+    #[test]
+    fn normalize_presets_caps_count_and_serialized_byte_size() {
+        let too_many: Vec<_> = (0..65)
+            .map(|i| json!({ "id": format!("p-{i}"), "name": format!("Preset {i}") }))
+            .collect();
+        let res = normalize_presets(Ok(Json(json!({ "presets": too_many }))));
+        assert_eq!(res.unwrap_err().status(), StatusCode::BAD_REQUEST);
+
+        let huge_blob = "x".repeat(70 * 1024);
+        let res_bytes = normalize_presets(Ok(Json(json!({
+            "presets": [{ "id": "p-1", "payload": huge_blob }]
+        }))));
+        assert_eq!(res_bytes.unwrap_err().status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn put_presets_rechecks_admin_role_inside_app_writer() {
+        use std::sync::{Arc, mpsc};
+        use std::time::Duration;
+
+        struct NoFetch;
+        impl indexer::Fetcher for NoFetch {
+            fn fetch(&self, _: &indexer::FetchRequest) -> Result<String, indexer::IndexerError> {
+                Err(indexer::IndexerError::Fetch("offline".into()))
+            }
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Arc::new(crate::Store::open(tmp.path().join("data")).unwrap());
+        let user_id = domain::UserId::new();
+        store
+            .insert_user_with_password(
+                &domain::User {
+                    id: user_id,
+                    login: "demoted-admin".into(),
+                    enabled: true,
+                    role: domain::UserRole::Admin,
+                },
+                "secret",
+            )
+            .unwrap();
+        store
+            .put_setting(crate::settings_keys::SEARCH_PRESETS, r#"[{"id":"global"}]"#)
+            .unwrap();
+
+        let state = crate::ApiState::new_arc(
+            store.clone(),
+            "management-secret".into(),
+            indexer::ProfileSet::load(None).unwrap(),
+            Arc::new(NoFetch),
+            Arc::new(downloader::MemoryDownloader::new(tmp.path().join("stage"))),
+        )
+        .unwrap();
+
+        let (writer_held_tx, writer_held_rx) = mpsc::channel();
+        let (role_read_tx, role_read_rx) = mpsc::channel();
+        let app_pool = store.reader_pool(store::Db::App);
+        app_pool.set_query_progress_observer(Some(Arc::new(move || {
+            let _ = role_read_tx.send(());
+        })));
+
+        let demoter_store = store.clone();
+        let demoter = std::thread::spawn(move || {
+            demoter_store
+                .writers()
+                .with_app(|app| {
+                    writer_held_tx.send(()).unwrap();
+                    let _ = role_read_rx.recv_timeout(Duration::from_millis(80));
+                    app.save_user(&domain::User {
+                        id: user_id,
+                        login: "demoted-admin".into(),
+                        enabled: true,
+                        role: domain::UserRole::Member,
+                    })?;
+                    Ok(())
+                })
+                .unwrap();
+        });
+        writer_held_rx.recv().unwrap();
+
+        let resp = super::put_presets(
+            axum::extract::State(state),
+            axum::Extension(user_id),
+            Ok(Json(json!({ "presets": [{ "id": "member-only" }] }))),
+        )
+        .await;
+        app_pool.set_query_progress_observer(None);
+        demoter.join().unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            store
+                .get_setting(crate::settings_keys::SEARCH_PRESETS)
+                .unwrap()
+                .as_deref(),
+            Some(r#"[{"id":"global"}]"#),
+            "demoted user must not overwrite global SEARCH_PRESETS after App writer acquisition"
+        );
     }
 }

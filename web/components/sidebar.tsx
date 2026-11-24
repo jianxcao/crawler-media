@@ -102,7 +102,7 @@ export function Sidebar({
   // 透明度/明暗/厚度来自「设置 → 外观」的用户偏好（ui.preferences.sidebar），
   // 基底为 LiquidGlassCard 同款材质；设置页拖动滑杆时经预览草稿实时生效。
   const { prefs } = useUiPrefs();
-  const glass = sidebarGlass(prefs.sidebar);
+  const glass = sidebarGlass(prefs.sidebar, prefs.theme);
   const { canSearch } = usePermissions();
   // 个人排序：prefs 已含设置页的未保存草稿，因此在设置页拖动时这里即时跟随
   const visibleNavItems = useVisibleNavItems();
@@ -118,6 +118,7 @@ export function Sidebar({
             <ArtworkImage
               src="/logo-mark.svg"
               alt={publicEnv.appName}
+              loading="eager"
               width={32}
               height={32}
               className="size-8 object-contain drop-shadow-[0_2px_8px_rgba(236,72,153,0.3)]"
@@ -133,11 +134,12 @@ export function Sidebar({
               <ArtworkImage
                 src="/logo-mark.svg"
                 alt=""
+                loading="eager"
                 width={30}
                 height={30}
                 className="size-[30px] shrink-0 object-contain drop-shadow-[0_2px_8px_rgba(236,72,153,0.3)]"
               />
-              <span className="font-semibold tracking-[-0.03em] text-white text-[17px] font-sans">
+              <span className="font-semibold tracking-[-0.03em] text-[var(--text)] text-[17px] font-sans">
                 Crawler<span className="text-transparent bg-clip-text bg-gradient-to-r from-pink-500 to-orange-400 font-bold ml-1">Media</span>
               </span>
             </div>

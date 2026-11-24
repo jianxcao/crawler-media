@@ -307,7 +307,7 @@ export function wantedPresentation(
     if (w.upgrade?.active) {
       return {
         label: "洗版中",
-        color: "#2dd4bf",
+        color: "var(--info)",
         note: `当前 ${w.upgrade.current_label} → 目标 ${w.upgrade.target_label}`,
       };
     }
@@ -399,7 +399,7 @@ export function wantedPresentation(
   if (!w.last_search_at && due.getTime() - now.getTime() > 60 * 60 * 1000) {
     return {
       label: "待搜索",
-      color: "#f5c451",
+      color: "var(--warn)",
       note: `档期未到，${formatDateTime(w.next_search_at)} 起兜底搜索`,
     };
   }

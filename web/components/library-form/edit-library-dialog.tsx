@@ -420,7 +420,7 @@ export function EditLibraryDialog({
                 onChange={(e) => setName(e.target.value)}
                 placeholder="请输入媒体库名称"
                 autoComplete="off"
-                className="w-full rounded-xl border border-white/20 bg-black/40 px-3.5 py-2.5 text-ui font-medium text-white outline-none transition focus:border-amber-400 focus:bg-black/60 focus:ring-1 focus:ring-amber-400/50"
+                className="w-full rounded-xl border border-[var(--line)] bg-[var(--surface-inset)] px-3.5 py-2.5 text-ui font-medium text-[var(--text)] outline-none transition focus:border-[var(--accent)] focus:ring-1 focus:ring-[var(--accent-ring)]"
               />
             </div>
             <div>
@@ -436,11 +436,11 @@ export function EditLibraryDialog({
               <select
                 value={defaultFilterId}
                 onChange={(e) => setDefaultFilterId(e.target.value)}
-                className="w-full rounded-xl border border-white/20 bg-black/40 px-3.5 py-2 text-ui font-medium text-white outline-none transition focus:border-amber-400 focus:bg-black/60 focus:ring-1 focus:ring-amber-400/50"
+                className="w-full rounded-xl border border-[var(--line)] bg-[var(--surface-inset)] px-3.5 py-2 text-ui font-medium text-[var(--text)] outline-none transition focus:border-[var(--accent)] focus:ring-1 focus:ring-[var(--accent-ring)]"
               >
-                <option value="" className="bg-[#1c1d22] text-white">使用系统全局默认规则</option>
+                <option value="">使用系统全局默认规则</option>
                 {ruleSets.map((rs) => (
-                  <option key={rs.id} value={String(rs.id)} className="bg-[#1c1d22] text-white">
+                  <option key={rs.id} value={String(rs.id)}>
                     {rs.name} {rs.is_default ? "（全局默认）" : ""}
                   </option>
                 ))}

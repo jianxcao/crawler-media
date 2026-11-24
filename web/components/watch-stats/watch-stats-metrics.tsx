@@ -231,14 +231,14 @@ export function TrendChart({ stats, metric }: { stats: PlaybackWatchStats; metri
                   x2={width - PAD.right}
                   y1={yy}
                   y2={yy}
-                  stroke={i === 0 ? "rgba(255,255,255,0.16)" : "rgba(255,255,255,0.07)"}
+                  stroke={i === 0 ? "var(--line-strong)" : "var(--line)"}
                 />
                 <text
                   x={PAD.left - 8}
                   y={yy + 3.5}
                   textAnchor="end"
                   fontSize={10}
-                  fill="rgba(255,255,255,0.4)"
+                  fill="var(--text-faint)"
                   className="tnum"
                 >
                   {metric.axis(v)}
@@ -253,7 +253,7 @@ export function TrendChart({ stats, metric }: { stats: PlaybackWatchStats; metri
               y={CHART_HEIGHT - 8}
               textAnchor={i === 0 ? "start" : i === count - 1 ? "end" : "middle"}
               fontSize={10}
-              fill="rgba(255,255,255,0.4)"
+              fill="var(--text-faint)"
             >
               {dayLabel(buckets[i][0].date)}
             </text>
@@ -285,7 +285,7 @@ export function TrendChart({ stats, metric }: { stats: PlaybackWatchStats; metri
                 y={PAD.top}
                 width={slot}
                 height={innerHeight}
-                fill="rgba(255,255,255,0.05)"
+                fill="var(--glass-fill-hover)"
               />
               {showPrevious && (
                 <circle
@@ -293,7 +293,7 @@ export function TrendChart({ stats, metric }: { stats: PlaybackWatchStats; metri
                   cy={y(previous[hover])}
                   r={3.5}
                   fill={PREVIOUS_COLOR}
-                  stroke="rgba(10,12,18,0.9)"
+                  stroke="var(--bg)"
                   strokeWidth={1.5}
                 />
               )}
@@ -303,7 +303,7 @@ export function TrendChart({ stats, metric }: { stats: PlaybackWatchStats; metri
       )}
       {width > 0 && current.every((v) => v <= 0) && (
         <p className="pointer-events-none absolute inset-x-0 top-[44px] text-center">
-          <span className="rounded-full bg-[#0b0d13]/85 px-3 py-1 text-caption text-white/50 ring-1 ring-white/[0.08]">
+          <span className="popover-surface inline-block rounded-full px-3 py-1 text-caption text-[var(--text-muted)]">
             本周期没有播放{showPrevious ? "，虚线是上一周期" : ""}
           </span>
         </p>

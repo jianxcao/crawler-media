@@ -23,16 +23,25 @@ impl ProbeManager {
 
     pub fn enqueue_marker_refresh_with_policy(
         &self,
-        mut units: Vec<ProbeUnit>,
+        units: Vec<ProbeUnit>,
         capture_policy: crate::fingerprint_job::CapturePolicy,
     ) -> usize {
+        self.enqueue_marker_refresh_job_with_policy(units, capture_policy)
+            .1
+    }
+
+    pub(crate) fn enqueue_marker_refresh_job_with_policy(
+        &self,
+        mut units: Vec<ProbeUnit>,
+        capture_policy: crate::fingerprint_job::CapturePolicy,
+    ) -> (bool, usize) {
         let reuse = capture_policy == crate::fingerprint_job::CapturePolicy::ReuseValid;
         let Some(first) = units.first() else {
-            return 0;
+            return (false, 0);
         };
         let media_id = first.row.file.media_id;
         let Ok((season, _)) = super::require_episode_coordinates(&first.row) else {
-            return 0;
+            return (false, 0);
         };
         if units.iter().any(|unit| {
             unit.row.file.media_id != media_id
@@ -40,7 +49,7 @@ impl ProbeManager {
                 || single_season_opt(&unit.row) != Some(season)
         }) {
             tracing::error!(%media_id, season, "拒绝创建跨媒体或跨季的片头片尾刷新批次");
-            return 0;
+            return (false, 0);
         }
 
         let id = self.next_marker_refresh_id.fetch_add(1, Ordering::Relaxed);
@@ -66,7 +75,7 @@ impl ProbeManager {
             .collect::<Vec<_>>();
         if !self.persist_marker_refresh_job(&job_id, media_id, season, &scope, &ledger_ids, &specs)
         {
-            return 0;
+            return (false, 0);
         }
         self.mark_job_paused_exempt(job_id.clone());
 
@@ -82,13 +91,15 @@ impl ProbeManager {
             if self.should_defer_remote_dispatch(&unit.row.file.path) {
                 tracing::info!(job_id, ledger_id = %unit.row.file.file_id, "远程读取已暂停，刷新单元保持数据库排队");
             } else {
-                self.seen.lock().insert(unit.row.file.file_id.to_string());
-                if self.queue_metadata(unit.clone()).is_ok() {
-                    queued += 1;
-                } else {
-                    overflowed = true;
-                    self.seen.lock().remove(&unit.row.file.file_id.to_string());
-                    tracing::info!(job_id, ledger_id = %unit.row.file.file_id, "刷新窗口已满，单元保持数据库排队");
+                let ledger_id = unit.row.file.file_id.to_string();
+                if self.try_insert_seen(ledger_id.clone(), job_id.clone()) {
+                    if self.queue_metadata(unit.clone()).is_ok() {
+                        queued += 1;
+                    } else {
+                        overflowed = true;
+                        self.remove_seen_if_job(&ledger_id, &job_id);
+                        tracing::info!(job_id, ledger_id, "刷新窗口已满，单元保持数据库排队");
+                    }
                 }
             }
         }
@@ -98,7 +109,7 @@ impl ProbeManager {
         tracing::info!(%media_id, season, refresh_id = id, job_id, episodes = episode_count, queued,
             elapsed_ms = started_at.elapsed().as_millis() as u64,
             "【片头片尾】已启动强制刷新，旧标记保持可见直到整季探测完成");
-        queued
+        (true, queued)
     }
 
     fn persist_marker_refresh_job(
@@ -116,7 +127,7 @@ impl ProbeManager {
         }
         let paused = self.background_is_paused();
         let exempt_jobs = if paused {
-            self.paused_exempt_jobs_snapshot()
+            self.paused_exempt_jobs_for_ledgers(ledger_ids)
         } else {
             HashSet::new()
         };
@@ -153,12 +164,7 @@ impl ProbeManager {
             });
         match outcome {
             Ok(cancelled) => {
-                if !cancelled.is_empty() {
-                    let mut seen = self.seen.lock();
-                    for id in cancelled {
-                        seen.remove(&id);
-                    }
-                }
+                self.finish_superseding_cancelled_units(&cancelled);
                 true
             }
             Err(RefreshPersistErr::Conflict) => {
@@ -241,13 +247,15 @@ impl ProbeManager {
                 if self.should_defer_remote_dispatch(&unit.row.file.path) {
                     tracing::info!(job_id = %batch.job_id, ledger_id = %unit.row.file.file_id, "远程读取已暂停，整条目单元保持数据库排队");
                 } else {
-                    self.seen.lock().insert(unit.row.file.file_id.to_string());
-                    if self.queue_metadata(unit.clone()).is_ok() {
-                        queued += 1;
-                    } else {
-                        overflowed = true;
-                        self.seen.lock().remove(&unit.row.file.file_id.to_string());
-                        tracing::info!(job_id = %batch.job_id, ledger_id = %unit.row.file.file_id, "整条目窗口已满，单元保持数据库排队");
+                    let ledger_id = unit.row.file.file_id.to_string();
+                    if self.try_insert_seen(ledger_id.clone(), batch.job_id.clone()) {
+                        if self.queue_metadata(unit.clone()).is_ok() {
+                            queued += 1;
+                        } else {
+                            overflowed = true;
+                            self.remove_seen_if_job(&ledger_id, &batch.job_id);
+                            tracing::info!(job_id = %batch.job_id, ledger_id, "整条目窗口已满，单元保持数据库排队");
+                        }
                     }
                 }
             }
@@ -272,8 +280,17 @@ impl ProbeManager {
         admitted: impl FnOnce() -> Result<(), ProbeEnqueueError>,
     ) -> Result<(), ProbeEnqueueError> {
         let paused = self.background_is_paused();
+        let target_ids: Vec<String> = batches
+            .iter()
+            .flat_map(|batch| {
+                batch
+                    .units
+                    .iter()
+                    .map(|unit| unit.row.file.file_id.to_string())
+            })
+            .collect();
         let exempt_jobs = if paused {
-            self.paused_exempt_jobs_snapshot()
+            self.paused_exempt_jobs_for_ledgers(&target_ids)
         } else {
             HashSet::new()
         };
@@ -291,15 +308,6 @@ impl ProbeManager {
                 admitted()?;
                 store.with_write_tx(map_store_err, |store| {
                     let cancelled = if paused {
-                        let target_ids: Vec<String> = batches
-                            .iter()
-                            .flat_map(|batch| {
-                                batch
-                                    .units
-                                    .iter()
-                                    .map(|unit| unit.row.file.file_id.to_string())
-                            })
-                            .collect();
                         store
                             .cancel_dormant_queued_units_for_ledgers(
                                 &target_ids,
@@ -361,12 +369,7 @@ impl ProbeManager {
                     Ok(cancelled)
                 })
             })?;
-        if !cancelled.is_empty() {
-            let mut seen = self.seen.lock();
-            for id in cancelled {
-                seen.remove(&id);
-            }
-        }
+        self.finish_superseding_cancelled_units(&cancelled);
         Ok(())
     }
 }

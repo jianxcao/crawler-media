@@ -52,7 +52,7 @@ export function ItemActionsMenu({
         <button
           type="button"
           aria-label="更多操作"
-          className={`${PAGE_NAV_BUTTON_CLASS} relative data-[state=open]:bg-black/55 data-[state=open]:text-white`}
+          className={`${PAGE_NAV_BUTTON_CLASS} relative`}
         >
           <MoreIcon className="size-[18px] max-md:size-[22px]" />
         </button>
@@ -117,7 +117,7 @@ export function ItemActionsMenu({
               <DropdownMenu.Separator className="my-1 h-px bg-white/[0.07]" />
               <DropdownMenu.Item
                 onSelect={onDelete}
-                className={`${itemClass} !text-[#ff9f9f] data-[highlighted]:!bg-[rgba(255,90,90,0.16)] data-[highlighted]:!text-[#ffb4b4]`}
+                className={`${itemClass} !text-[var(--danger)] data-[highlighted]:!bg-[var(--danger)]/15 data-[highlighted]:!text-[var(--danger)]`}
               >
                 删除影片
               </DropdownMenu.Item>

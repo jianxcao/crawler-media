@@ -4,8 +4,37 @@ import type { LiquidGlassSettings } from "./types";
 
 type Uniforms = Record<string, WebGLUniformLocation | null>;
 
+const DEFAULT_BACKDROP_URL = "/backdrop-default.jpg";
+const MAX_IMAGE_CACHE_ENTRIES = 6;
 const imageCache = new Map<string, HTMLImageElement>();
 const isVideoUrl = (url: string) => /\.(mp4|webm|mov)(?:$|[?#])/i.test(url);
+
+function getCachedImage(url: string): HTMLImageElement | undefined {
+  const cached = imageCache.get(url);
+  if (!cached) return undefined;
+  imageCache.delete(url);
+  imageCache.set(url, cached);
+  return cached;
+}
+
+function setCachedImage(url: string, image: HTMLImageElement): void {
+  if (imageCache.has(url)) {
+    imageCache.delete(url);
+  } else {
+    while (imageCache.size >= MAX_IMAGE_CACHE_ENTRIES) {
+      let victim: string | undefined;
+      for (const key of imageCache.keys()) {
+        if (key !== DEFAULT_BACKDROP_URL) {
+          victim = key;
+          break;
+        }
+      }
+      if (victim === undefined) break;
+      imageCache.delete(victim);
+    }
+  }
+  imageCache.set(url, image);
+}
 
 /**
  * 各上下文的 WEBGL_lose_context 扩展缓存。必须在上下文健康时取好存下——
@@ -28,7 +57,10 @@ const guardedCanvases = new WeakSet<HTMLCanvasElement>();
 export class LiquidGlassRenderer {
   private gl: WebGLRenderingContext;
   private uniforms: Uniforms = {};
-  private texture!: WebGLTexture;
+  private program: WebGLProgram | null = null;
+  private quad: WebGLBuffer | null = null;
+  private texture: WebGLTexture | null = null;
+  private currentUrl = "";
   private image: HTMLImageElement;
   private imageAbort: AbortController | null = null;
   private video: HTMLVideoElement | null = null;
@@ -59,20 +91,21 @@ private sampleBackground = 0;
   private lastViewport = { width: 0, height: 0 };
   private lastScroll = { x: Number.NaN, y: Number.NaN };
   private lastRect = { left: Number.NaN, top: Number.NaN, width: Number.NaN, height: Number.NaN };
+  private lastDpr = 0;
   private handleImageLoad = () => {
-    if (this.disposed) return;
+    if (this.disposed || this.gl.isContextLost() || !this.texture) return;
     const { gl } = this;
     gl.bindTexture(gl.TEXTURE_2D, this.texture);
     gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, this.image);
     this.ready = true;
-    this.draw();
+    this.requestDraw();
   };
   private handleVideoReady = () => {
     if (this.disposed || !this.video) return;
     this.ready = true;
     void this.video.play().catch(() => {});
-    this.draw();
+    this.requestDraw();
   };
 
   /**
@@ -142,12 +175,24 @@ private sampleBackground = 0;
     }
     this.image = new Image();
     this.loadSource(imageUrl);
-    this.watchPosition();
+    this.positionFrame = window.requestAnimationFrame(this.watchPosition);
   }
 
   /** 创建全部 GL 资源。构造时调用一次；上下文丢失后恢复时会再次调用重建。 */
   private initGL() {
     const { gl } = this;
+    if (this.texture) {
+      gl.deleteTexture(this.texture);
+      this.texture = null;
+    }
+    if (this.quad) {
+      gl.deleteBuffer(this.quad);
+      this.quad = null;
+    }
+    if (this.program) {
+      gl.deleteProgram(this.program);
+      this.program = null;
+    }
     // 趁上下文健康缓存 WEBGL_lose_context（丢失态下 getExtension 只会返回 null）
     if (!loseContextExt.has(gl)) {
       loseContextExt.set(gl, gl.getExtension("WEBGL_lose_context"));
@@ -160,6 +205,7 @@ private sampleBackground = 0;
       if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
         const stage = type === gl.VERTEX_SHADER ? "vertex" : "fragment";
         const details = gl.getShaderInfoLog(shader)?.trim();
+        gl.deleteShader(shader);
         throw new Error(
           details || `Liquid Glass ${stage} shader compilation failed (context lost: ${gl.isContextLost()}).`
         );
@@ -168,12 +214,29 @@ private sampleBackground = 0;
     };
     const program = gl.createProgram();
     if (!program) throw new Error("Unable to create WebGL program.");
-    gl.attachShader(program, compile(gl.VERTEX_SHADER, vertexShader));
-    gl.attachShader(program, compile(gl.FRAGMENT_SHADER, fragmentShader));
+    const vs = compile(gl.VERTEX_SHADER, vertexShader);
+    let fs: WebGLShader;
+    try {
+      fs = compile(gl.FRAGMENT_SHADER, fragmentShader);
+    } catch (err) {
+      gl.deleteShader(vs);
+      gl.deleteProgram(program);
+      throw err;
+    }
+    gl.attachShader(program, vs);
+    gl.attachShader(program, fs);
     gl.linkProgram(program);
-    if (!gl.getProgramParameter(program, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(program) ?? "Shader link failed.");
+    gl.deleteShader(vs);
+    gl.deleteShader(fs);
+    if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+      const info = gl.getProgramInfoLog(program) ?? "Shader link failed.";
+      gl.deleteProgram(program);
+      throw new Error(info);
+    }
+    this.program = program;
     gl.useProgram(program);
     const quad = gl.createBuffer();
+    this.quad = quad;
     gl.bindBuffer(gl.ARRAY_BUFFER, quad);
     gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1,1,-1,-1,1,1,1]), gl.STATIC_DRAW);
     const position = gl.getAttribLocation(program, "a_pos");
@@ -200,6 +263,7 @@ private sampleBackground = 0;
   }
 
   private loadSource(url: string) {
+    this.currentUrl = url;
     this.image.removeEventListener("load", this.handleImageLoad);
     this.imageAbort?.abort();
     this.imageAbort = null;
@@ -228,7 +292,7 @@ private sampleBackground = 0;
       }
       return;
     }
-    const cachedImage = imageCache.get(url);
+    const cachedImage = getCachedImage(url);
     if (cachedImage) {
       this.image = cachedImage;
       this.handleImageLoad();
@@ -241,7 +305,7 @@ private sampleBackground = 0;
     const image = this.image;
     image.addEventListener("load", () => {
       // Only completed bitmaps may outlive their owner's abort controller.
-      imageCache.set(url, image);
+      setCachedImage(url, image);
       this.handleImageLoad();
     }, { once: true, signal: this.imageAbort.signal });
     request.load(url);
@@ -250,6 +314,12 @@ private sampleBackground = 0;
   private watchPosition = () => {
     if (this.disposed) return;
     const rect = this.canvas.getBoundingClientRect();
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const layoutWidth = this.canvas.clientWidth || rect.width;
+    const layoutHeight = this.canvas.clientHeight || rect.height;
+    if (dpr !== this.lastDpr && layoutWidth > 0 && layoutHeight > 0) {
+      this.resize(layoutWidth, layoutHeight);
+    }
     const viewport = {
       width: window.innerWidth,
       height: window.innerHeight
@@ -295,7 +365,7 @@ private sampleBackground = 0;
   }
 
   setImage(url: string) {
-    if (this.video?.currentSrc === url || this.video?.src === url || this.image.currentSrc === url || this.image.src === url) return;
+    if (this.currentUrl === url) return;
     this.loadSource(url);
   }
   setSettings(settings: LiquidGlassSettings) { this.settings = settings; this.size = { width: settings.lensWidth, height: settings.lensHeight }; this.requestDraw(); }
@@ -339,7 +409,18 @@ private sampleBackground = 0;
     this.video?.removeEventListener("loadeddata", this.handleVideoReady);
     this.canvas.removeEventListener("webglcontextlost", this.handleContextLost);
     this.canvas.removeEventListener("webglcontextrestored", this.handleContextRestored);
-    this.gl.deleteTexture(this.texture);
+    if (this.texture) {
+      this.gl.deleteTexture(this.texture);
+      this.texture = null;
+    }
+    if (this.quad) {
+      this.gl.deleteBuffer(this.quad);
+      this.quad = null;
+    }
+    if (this.program) {
+      this.gl.deleteProgram(this.program);
+      this.program = null;
+    }
     this.gl.clearColor(0, 0, 0, 0);
     this.gl.clear(this.gl.COLOR_BUFFER_BIT);
     // 本项目改动：主动归还上下文名额。浏览器对每页活跃 WebGL 上下文数量有硬上限
@@ -351,6 +432,7 @@ private sampleBackground = 0;
   }
   resize(width: number, height: number) {
     const deviceScale = window.devicePixelRatio || 1;
+    this.lastDpr = Math.min(deviceScale, 2);
     // 超采样只对小控件有意义（边缘占比大，锯齿明显）；大面板（侧栏/登录面板）
     // 边缘只占极小比例，高倍率的视觉收益有限而像素成本按平方增长，压到 1.5。
     const compactSupersampling = height <= 80 ? 3 : height <= 140 ? 2.5 : 1.5;
@@ -375,7 +457,7 @@ private sampleBackground = 0;
   }
   draw() {
     // 上下文丢失期间 GL 调用全是无效操作，直接跳过，等 restored 回调重建后再画
-    if (!this.ready || this.gl.isContextLost()) return;
+    if (!this.ready || this.gl.isContextLost() || !this.texture) return;
     const { gl, canvas, settings: s } = this;
     const source = this.video ?? this.image;
     if (this.video) {
@@ -388,8 +470,11 @@ private sampleBackground = 0;
     const rect = canvas.getBoundingClientRect();
     const backgroundElement = canvas.ownerDocument.querySelector<HTMLElement>("[data-liquid-glass-background]");
     const measuredBackgroundRect = backgroundElement?.getBoundingClientRect();
-    const backgroundRect = measuredBackgroundRect && measuredBackgroundRect.width > 0 && measuredBackgroundRect.height > 0
-      ? measuredBackgroundRect
+    const hasMeasuredBackground = Boolean(
+      measuredBackgroundRect && measuredBackgroundRect.width > 0 && measuredBackgroundRect.height > 0
+    );
+    const backgroundRect = hasMeasuredBackground
+      ? measuredBackgroundRect!
       : {
           left: 0,
           top: 0,
@@ -406,7 +491,12 @@ private sampleBackground = 0;
     const viewRatio = viewportWidth / viewportHeight;
     const bg = imageRatio > viewRatio
       ? { sx: viewRatio / imageRatio, sy: 1, ox: (1 - viewRatio / imageRatio) / 2, oy: 0 }
-      : { sx: 1, sy: imageRatio / viewRatio, ox: 0, oy: (1 - imageRatio / viewRatio) / 2 };
+      : {
+          sx: 1,
+          sy: imageRatio / viewRatio,
+          ox: 0,
+          oy: hasMeasuredBackground ? (1 - imageRatio / viewRatio) / 2 : 1 - imageRatio / viewRatio
+        };
     const localScaleX = rect.width / viewportWidth;
     const localScaleY = rect.height / viewportHeight;
     const localOffsetX = (rect.left - backgroundRect.left) / viewportWidth;

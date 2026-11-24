@@ -203,7 +203,7 @@ export function HeroBanner({ items, fullBleed = false }: { items: MediaItem[]; f
   const next = (index + 1) % items.length;
   return (
     <div
-      className={`group relative h-[46vh] min-h-[320px] w-full overflow-hidden max-md:h-[38vh] max-md:min-h-[230px] ${
+      className={`dark-media-surface group relative h-[46vh] min-h-[320px] w-full overflow-hidden max-md:h-[38vh] max-md:min-h-[230px] ${
         fullBleed
           ? ""
           : "rounded-2xl shadow-[0_24px_70px_-18px_rgba(0,0,0,0.62)] ring-1 ring-white/10"

@@ -32,6 +32,7 @@ mod lifecycle;
 mod markers;
 mod media_info;
 pub(crate) use media_info::MediaInfoRefreshError;
+mod pause_exemptions;
 pub mod policy;
 mod presence;
 mod probe;
@@ -102,8 +103,8 @@ pub struct ProbeManager {
     fingerprint_tx: mpsc::Sender<(store::ProbeDispatchId, probe::FingerprintWork)>,
     metadata_overflowed: AtomicBool,
     fingerprint_overflowed: AtomicBool,
-    /// 幂等去重：窗口内或执行中的 ledger_id，不是全量积压。
-    seen: Mutex<HashSet<String>>,
+    /// 幂等去重：窗口内或执行中的 `ledger_id -> job_id`，不是全量积压。
+    seen: Mutex<HashMap<String, String>>,
     last_failure: Mutex<HashMap<String, Instant>>,
     next_marker_refresh_id: AtomicU64,
     pub(crate) metadata_pending: Arc<AtomicUsize>,
@@ -122,7 +123,11 @@ pub struct ProbeManager {
     pub assessments: AtomicUsize,
     workers_started: AtomicBool,
     background_paused: AtomicBool,
+    pause_epoch: AtomicU64,
+    pause_state_lock: Mutex<()>,
     paused_exempt_jobs: std::sync::Mutex<HashSet<String>>,
+    paused_exempt_units: Mutex<HashSet<(String, String)>>,
+    promoted_units: Mutex<HashSet<(String, String)>>,
     obligation_wake: Arc<Notify>,
     probe_settings: Mutex<crate::probe_settings::ProbeSettings>,
     remote_reads_paused: Mutex<bool>,
@@ -266,7 +271,7 @@ impl ProbeManager {
             fingerprint_tx: channels.fingerprint_tx,
             metadata_overflowed: AtomicBool::new(false),
             fingerprint_overflowed: AtomicBool::new(false),
-            seen: Mutex::new(HashSet::new()),
+            seen: Mutex::new(HashMap::new()),
             last_failure: Mutex::new(HashMap::new()),
             next_marker_refresh_id: AtomicU64::new(1),
             metadata_pending: Arc::new(AtomicUsize::new(0)),
@@ -285,7 +290,11 @@ impl ProbeManager {
             assessments: AtomicUsize::new(0),
             workers_started: AtomicBool::new(false),
             background_paused: AtomicBool::new(initial_background_paused),
+            pause_epoch: AtomicU64::new(0),
+            pause_state_lock: Mutex::new(()),
             paused_exempt_jobs: std::sync::Mutex::new(HashSet::new()),
+            paused_exempt_units: Mutex::new(HashSet::new()),
+            promoted_units: Mutex::new(HashSet::new()),
             obligation_wake: Arc::new(Notify::new()),
             probe_settings: Mutex::new(settings),
             remote_reads_paused: Mutex::new(remote_reads.paused),
@@ -480,85 +489,86 @@ impl ProbeManager {
     }
 
     pub fn pause_background(&self) {
-        self.background_paused.store(true, Ordering::Release);
-        self.clear_paused_exempt_jobs();
+        {
+            let _guard = self.pause_state_lock.lock();
+            self.pause_epoch.fetch_add(1, Ordering::AcqRel);
+            self.background_paused.store(true, Ordering::Release);
+            self.clear_paused_exempt_jobs();
+        }
+        self.analysis_schedule.lock().clear_unstarted();
         self.drain_buffered_dispatch();
     }
 
+    pub(crate) fn pause_epoch(&self) -> u64 {
+        self.pause_epoch.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn resume_background_if_epoch(&self, epoch: u64) -> bool {
+        {
+            let _guard = self.pause_state_lock.lock();
+            if self.pause_epoch.load(Ordering::Acquire) != epoch {
+                return false;
+            }
+            self.background_paused.store(false, Ordering::Release);
+            self.clear_paused_exempt_jobs();
+        }
+        self.finish_resume_after_epoch(epoch)
+    }
+
+    #[cfg(test)]
     pub(crate) fn set_background_paused_flag(&self, paused: bool) {
         self.background_paused.store(paused, Ordering::Release);
     }
 
     pub fn resume_background(&self) {
-        self.background_paused.store(false, Ordering::Release);
+        let epoch = {
+            let _guard = self.pause_state_lock.lock();
+            self.background_paused.store(false, Ordering::Release);
+            self.clear_paused_exempt_jobs();
+            self.pause_epoch.load(Ordering::Acquire)
+        };
+        let _ = self.finish_resume_after_epoch(epoch);
+    }
+
+    fn finish_resume_after_epoch(&self, epoch: u64) -> bool {
         self.fill_dispatch_windows();
+        if self.pause_epoch() != epoch && self.background_is_paused() {
+            self.drain_buffered_dispatch();
+            self.refill_drained_windows();
+            if self.has_paused_exempt_work() {
+                self.wake.notify_waiters();
+            }
+            return false;
+        }
         self.wake.notify_waiters();
         self.obligation_wake.notify_waiters();
+        true
     }
 
-    pub(super) fn mark_job_paused_exempt(&self, job_id: String) -> bool {
-        self.paused_exempt_jobs
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(job_id)
+    pub(super) fn has_seen(&self, ledger_id: &str) -> bool {
+        self.seen.lock().contains_key(ledger_id)
     }
 
-    pub(super) fn unmark_job_paused_exempt(&self, job_id: &str) {
-        self.paused_exempt_jobs
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(job_id);
-    }
-
-    pub(super) fn is_job_paused_exempt(&self, job_id: &str) -> bool {
-        self.paused_exempt_jobs
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .contains(job_id)
-    }
-
-    pub(super) fn has_paused_exempt_jobs(&self) -> bool {
-        !self
-            .paused_exempt_jobs
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .is_empty()
-    }
-
-    pub(super) fn paused_exempt_job_ids(&self) -> Vec<String> {
-        self.paused_exempt_jobs
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .iter()
-            .cloned()
-            .collect()
-    }
-
-    pub(super) fn paused_exempt_jobs_snapshot(&self) -> HashSet<String> {
-        self.paused_exempt_jobs
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
-    }
-
-    pub(super) fn prune_inactive_exempt_jobs(&self, checked: &[String], active: &[String]) {
-        let active_set: HashSet<&str> = active.iter().map(String::as_str).collect();
-        let mut guard = self
-            .paused_exempt_jobs
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        for job_id in checked {
-            if !active_set.contains(job_id.as_str()) {
-                guard.remove(job_id);
-            }
+    pub(super) fn try_insert_seen(&self, ledger_id: String, job_id: String) -> bool {
+        let mut seen = self.seen.lock();
+        if seen.contains_key(&ledger_id) {
+            return false;
         }
+        seen.insert(ledger_id, job_id);
+        true
     }
 
-    pub(super) fn clear_paused_exempt_jobs(&self) {
-        self.paused_exempt_jobs
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clear();
+    pub(super) fn set_seen(&self, ledger_id: String, job_id: String) {
+        self.seen.lock().insert(ledger_id, job_id);
+    }
+
+    pub(super) fn remove_seen_if_job(&self, ledger_id: &str, job_id: &str) -> bool {
+        let mut seen = self.seen.lock();
+        remove_seen_entry_if_job(&mut seen, ledger_id, job_id)
+    }
+
+    pub(super) fn remove_seen_any(&self, ledger_id: &str) -> bool {
+        self.seen.lock().remove(ledger_id).is_some()
     }
 
     pub(crate) fn obligation_wake(&self) -> Arc<Notify> {
@@ -566,18 +576,20 @@ impl ProbeManager {
     }
 
     pub(crate) fn purge_cancelled_seen(&self, file_ids: &[String], global_cancel: bool) {
-        if global_cancel {
-            self.drain_buffered_dispatch();
-        }
-        {
-            let mut seen = self.seen.lock();
-            for file_id in file_ids {
-                seen.remove(file_id);
-            }
-        }
-        if !self.background_is_paused() || self.has_paused_exempt_jobs() {
-            self.wake.notify_waiters();
-        }
+        self.purge_cancelled_seen_inner(file_ids, global_cancel);
+    }
+}
+
+pub(super) fn remove_seen_entry_if_job(
+    seen: &mut HashMap<String, String>,
+    ledger_id: &str,
+    job_id: &str,
+) -> bool {
+    if seen.get(ledger_id).is_some_and(|active| active == job_id) {
+        seen.remove(ledger_id);
+        true
+    } else {
+        false
     }
 }
 

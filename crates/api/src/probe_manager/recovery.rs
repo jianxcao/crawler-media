@@ -157,7 +157,7 @@ impl ProbeManager {
                     self.recovery_deferred.store(true, Ordering::SeqCst);
                     return;
                 }
-                self.seen.lock().remove(&file);
+                self.remove_seen_if_job(&file, &job);
                 previous_batch.insert((job, file));
             }
         }
@@ -216,9 +216,21 @@ impl ProbeManager {
             self.recovery_deferred.store(true, Ordering::SeqCst);
             return;
         }
-        self.seen.lock().remove(file);
+        self.remove_seen_if_job(file, job);
     }
     pub(super) fn recover_completed_jobs(&self) {
+        self.prune_stale_promoted_units_from_store();
+        match self.store.incomplete_marker_refresh_job_ids(64) {
+            Ok(job_ids) => {
+                for job_id in job_ids {
+                    let _ = self.fail_refresh_if_capture_failed(&job_id);
+                }
+            }
+            Err(error) => {
+                tracing::error!(%error, "读取采集残缺的片头片尾刷新任务失败");
+                self.recovery_deferred.store(true, Ordering::SeqCst);
+            }
+        }
         let jobs = match self.store.active_completed_probe_jobs(64) {
             Ok(jobs) => jobs,
             Err(error) => {
@@ -237,5 +249,6 @@ impl ProbeManager {
                 tracing::error!(%error,job_id=%job.id,"恢复探测终态失败");
             }
         }
+        self.reconcile_terminal_active_timings();
     }
 }

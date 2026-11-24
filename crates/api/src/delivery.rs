@@ -217,8 +217,8 @@ impl<'a> RoutedDownloader<'a> {
         let _ =
             crate::directory::transfer_plan_for_library(&store, media.kind, library_id.as_deref())
                 .map_err(error)?;
-        let target_library = match library_id {
-            Some(id) => id.parse::<domain::LibraryId>().map_err(error)?,
+        let target_library = match subscribe.library_id {
+            Some(id) => id,
             None => store
                 .default_library(media.kind)
                 .map_err(error)?
@@ -236,50 +236,7 @@ impl<'a> RoutedDownloader<'a> {
             )
             .map_err(error)?
         {
-            let path = coverage.file.path.as_path();
-            let Some(source) = coverage.file.source_path.as_deref() else {
-                continue;
-            };
-            let mut file_quality = release::parse(
-                path.file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or_default(),
-            );
-            if coverage.file.resolution.is_some() {
-                file_quality.resolution = coverage.file.resolution.clone();
-            }
-            if coverage.file.codec.is_some() {
-                file_quality.codec = coverage.file.codec.clone();
-            }
-            if coverage.file.hdr.is_some() {
-                file_quality.hdr = coverage.file.hdr.clone();
-            }
-            let transfer_pending = store
-                .transfer_pending(coverage.file.path.to_string_lossy().as_ref())
-                .map_err(error)?;
-            for unit in &coverage.units {
-                let mut slots = Vec::new();
-                if let Some((from, to)) = file_quality.episode_span() {
-                    for ep in from..=to {
-                        slots.push((file_quality.season, Some(ep)));
-                    }
-                }
-                if slots.is_empty() {
-                    slots.push(match unit.episode_coordinates() {
-                        Some((season, episode)) => (Some(season), Some(episode)),
-                        None => (None, None),
-                    });
-                }
-                let mut mapping =
-                    subscribe::collection_destinations::DestinationMapping::with_slots_and_quality(
-                        source.to_string_lossy().into_owned(),
-                        path,
-                        slots,
-                        Some(file_quality.clone()),
-                    );
-                mapping.transfer_pending = transfer_pending;
-                sources.push(mapping);
-            }
+            append_coverage_destinations(&store, &coverage, &mut sources)?;
         }
         Ok(sources)
     }
@@ -298,6 +255,58 @@ impl<'a> RoutedDownloader<'a> {
         self.clients.lock().insert(id, client.clone());
         Ok(client)
     }
+}
+
+fn append_coverage_destinations(
+    store: &crate::Store,
+    coverage: &domain::FileCoverage,
+    sources: &mut Vec<subscribe::collection_destinations::DestinationMapping>,
+) -> Result<(), DownloaderError> {
+    let path = coverage.file.path.as_path();
+    let Some(source) = coverage.file.source_path.as_deref() else {
+        return Ok(());
+    };
+    let mut file_quality = release::parse(
+        path.file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default(),
+    );
+    if coverage.file.resolution.is_some() {
+        file_quality.resolution = coverage.file.resolution.clone();
+    }
+    if coverage.file.codec.is_some() {
+        file_quality.codec = coverage.file.codec.clone();
+    }
+    if coverage.file.hdr.is_some() {
+        file_quality.hdr = coverage.file.hdr.clone();
+    }
+    let transfer_pending = store
+        .transfer_pending(coverage.file.path.to_string_lossy().as_ref())
+        .map_err(error)?;
+    for unit in &coverage.units {
+        let mut slots = Vec::new();
+        if let Some((from, to)) = file_quality.episode_span() {
+            for ep in from..=to {
+                slots.push((file_quality.season, Some(ep)));
+            }
+        }
+        if slots.is_empty() {
+            slots.push(match unit.episode_coordinates() {
+                Some((season, episode)) => (Some(season), Some(episode)),
+                None => (None, None),
+            });
+        }
+        let mut mapping =
+            subscribe::collection_destinations::DestinationMapping::with_slots_and_quality(
+                source.to_string_lossy().into_owned(),
+                path,
+                slots,
+                Some(file_quality.clone()),
+            );
+        mapping.transfer_pending = transfer_pending;
+        sources.push(mapping);
+    }
+    Ok(())
 }
 
 impl Downloader for RoutedDownloader<'_> {

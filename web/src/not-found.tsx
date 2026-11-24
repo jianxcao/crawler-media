@@ -4,9 +4,9 @@
  */
 export function NotFound() {
   return (
-    <div className="flex h-dvh w-full flex-col items-center justify-center gap-2 bg-[#0a0b10] text-white">
+    <div className="relative z-10 flex h-dvh w-full flex-col items-center justify-center gap-2 bg-[var(--bg)] text-[var(--text)]">
       <div className="text-5xl font-semibold">404</div>
-      <div className="text-white/60">页面不存在或已被移动</div>
+      <div className="text-[var(--text-muted)]">页面不存在或已被移动</div>
     </div>
   );
 }

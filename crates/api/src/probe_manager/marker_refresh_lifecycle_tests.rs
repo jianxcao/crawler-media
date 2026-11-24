@@ -273,7 +273,11 @@ async fn check_restored_presence() {
                 .unwrap()
         );
         for id in &ids {
-            assert!(store.start_probe_unit("presence-race", id, store::ProbeDispatchStage::Metadata).unwrap());
+            assert!(
+                store
+                    .start_probe_unit("presence-race", id, store::ProbeDispatchStage::Metadata)
+                    .unwrap()
+            );
         }
         restore_first_presence(store, &harness);
         assert!(
@@ -375,7 +379,14 @@ fn window1_queued_stage_cancellation_releases_scope() {
 
     harness
         .manager
-        .cancel_ledger_work(&harness.rows.iter().map(|row|row.file.file_id.to_string()).collect::<Vec<_>>(), "user_abort")
+        .cancel_ledger_work(
+            &harness
+                .rows
+                .iter()
+                .map(|row| row.file.file_id.to_string())
+                .collect::<Vec<_>>(),
+            "user_abort",
+        )
         .unwrap();
 
     let job = harness
@@ -400,43 +411,62 @@ fn window1_queued_stage_cancellation_releases_scope() {
     assert!(
         !harness
             .manager
-            .seen
-            .lock()
-            .contains(&first.row.file.file_id.to_string())
+            .has_seen(&first.row.file.file_id.to_string())
     );
 }
 
-fn pending_analysis_harness()->(RefreshHarness,String) {
-    let mut harness=RefreshHarness::new();
-    harness.manager=Arc::new(super::super::test_support::confirmed_absence_manager(harness.store.clone(),&harness.rows));
-    harness.manager.set_library_registry(harness.registry.clone());
-    harness.manager.enqueue_forced_item_refresh(harness.make_units()).unwrap();
-    let first=harness.manager.take_queued_for_test().unwrap();
-    let second=harness.manager.take_queued_for_test().unwrap();
-    super::super::test_support::handoff_cached(&harness.manager,&first);
-    super::super::test_support::handoff_cached(&harness.manager,&second);
-    (harness,first.job_id.unwrap())
+fn pending_analysis_harness() -> (RefreshHarness, String) {
+    let mut harness = RefreshHarness::new();
+    harness.manager = Arc::new(super::super::test_support::confirmed_absence_manager(
+        harness.store.clone(),
+        &harness.rows,
+    ));
+    harness
+        .manager
+        .set_library_registry(harness.registry.clone());
+    harness
+        .manager
+        .enqueue_forced_item_refresh(harness.make_units())
+        .unwrap();
+    let first = harness.manager.take_queued_for_test().unwrap();
+    let second = harness.manager.take_queued_for_test().unwrap();
+    super::super::test_support::handoff_cached(&harness.manager, &first);
+    super::super::test_support::handoff_cached(&harness.manager, &second);
+    (harness, first.job_id.unwrap())
 }
 
 #[test]
 fn window3_pre_publication_freeze_prevents_late_result() {
-    let (harness,job)=pending_analysis_harness();
-    harness.store.begin_library_removal(&harness.library_id).unwrap();
+    let (harness, job) = pending_analysis_harness();
+    harness
+        .store
+        .begin_library_removal(&harness.library_id)
+        .unwrap();
     harness.registry.cancel(&harness.library_id);
-    let restarted=Arc::new(ProbeManager::new(harness.store.clone()).unwrap());
-    super::super::test_support::drain_analysis(restarted,&job);
-    assert_eq!(harness.store.get_probe_job(&job).unwrap().unwrap().status,"cancelled");
+    let restarted = Arc::new(ProbeManager::new(harness.store.clone()).unwrap());
+    super::super::test_support::drain_analysis(restarted, &job);
+    assert_eq!(
+        harness.store.get_probe_job(&job).unwrap().unwrap().status,
+        "cancelled"
+    );
     harness.assert_old_markers_intact();
     assert!(!harness.registry.has_active_work());
 }
 
 #[test]
 fn window3_pre_publication_file_deleted_prevents_late_result() {
-    let (harness,job)=pending_analysis_harness();
+    let (harness, job) = pending_analysis_harness();
     std::fs::remove_file(&harness.rows[0].file.path).unwrap();
-    super::super::test_support::drain_analysis(harness.manager.clone(),&job);
-    let units=harness.store.probe_job_units(&job).unwrap();
-    assert_eq!(units.iter().find(|u|u.ledger_id==harness.rows[0].file.file_id.to_string()).unwrap().status,"cancelled");
+    super::super::test_support::drain_analysis(harness.manager.clone(), &job);
+    let units = harness.store.probe_job_units(&job).unwrap();
+    assert_eq!(
+        units
+            .iter()
+            .find(|u| u.ledger_id == harness.rows[0].file.file_id.to_string())
+            .unwrap()
+            .status,
+        "cancelled"
+    );
     assert_surviving_refresh_is_unresolved(&harness, &job, 0);
     harness.assert_old_markers_intact();
 }
@@ -501,12 +531,22 @@ fn window4_recovery_interrupted_with_frozen_library_cancels_cleanly() {
 }
 
 fn assert_recovery_cancels_after_member_deletion(deleted_index: usize) {
-    let (harness,job)=pending_analysis_harness();
+    let (harness, job) = pending_analysis_harness();
     std::fs::remove_file(&harness.rows[deleted_index].file.path).unwrap();
-    let restarted=Arc::new(super::super::test_support::confirmed_absence_manager(harness.store.clone(),&harness.rows));
-    super::super::test_support::drain_analysis(restarted,&job);
-    let units=harness.store.probe_job_units(&job).unwrap();
-    assert_eq!(units.iter().find(|u|u.ledger_id==harness.rows[deleted_index].file.file_id.to_string()).unwrap().status,"cancelled");
+    let restarted = Arc::new(super::super::test_support::confirmed_absence_manager(
+        harness.store.clone(),
+        &harness.rows,
+    ));
+    super::super::test_support::drain_analysis(restarted, &job);
+    let units = harness.store.probe_job_units(&job).unwrap();
+    assert_eq!(
+        units
+            .iter()
+            .find(|u| u.ledger_id == harness.rows[deleted_index].file.file_id.to_string())
+            .unwrap()
+            .status,
+        "cancelled"
+    );
     assert_surviving_refresh_is_unresolved(&harness, &job, deleted_index);
     harness.assert_old_markers_intact();
 }

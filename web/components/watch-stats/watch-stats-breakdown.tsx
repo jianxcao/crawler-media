@@ -112,7 +112,7 @@ export function BreakdownPanel({
                       background: row.selected
                         ? "var(--ok)"
                         : row.muted
-                          ? "rgba(255,255,255,0.22)"
+                          ? "var(--line-strong)"
                           : SERIES_COLOR,
                       opacity: row.selected || row.muted ? 1 : 0.9,
                     }}
@@ -182,7 +182,7 @@ export function HourHeatmap({ matrix }: { matrix: number[][] }) {
                       background:
                         v > 0
                           ? `rgba(127,176,255,${(0.18 + (v / max) * 0.82).toFixed(2)})`
-                          : "rgba(255,255,255,0.04)",
+                          : "var(--glass-fill)",
                     }}
                   />
                 ))}

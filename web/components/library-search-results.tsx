@@ -103,7 +103,7 @@ export function LibrarySearchResults({
             <p className="text-on-image text-body-lg font-semibold text-white">
               {error ? "媒体库搜索出错" : "媒体库中没有找到相关影片"}
             </p>
-            <p className="text-on-image mt-1.5 text-sub text-[rgba(243,245,249,0.7)]">
+            <p className="text-on-image mt-1.5 text-sub text-[var(--text-muted)]">
               {error ?? "已入库条目按标题和演职员匹配；库里还没有的片子，去影视条目里找。"}
             </p>
             {onSwitchToMedia && (
@@ -141,7 +141,7 @@ export function LibrarySearchResults({
 function LibraryHitRow({ hit }: { hit: LibraryHit }) {
   return (
     <li>
-      <Link to={`/library/${hit.library_id}/item/${hit.media_item_id}`} className="flex items-center gap-3 rounded-2xl border border-white/[0.06] bg-[rgba(16,18,25,0.82)] px-4 py-3">
+      <Link to={`/library/${hit.library_id}/item/${hit.media_item_id}`} className="card-row-surface card-row-surface--interactive flex items-center gap-3 rounded-2xl px-4 py-3 transition-all">
         <span className="shrink-0 rounded-md bg-white/[0.06] px-1.5 py-0.5 text-micro font-medium text-[var(--accent-2)]">
           {LIBRARY_KIND_LABELS[hit.kind] ?? hit.kind}
         </span>

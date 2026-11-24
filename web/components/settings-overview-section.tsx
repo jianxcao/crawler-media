@@ -138,7 +138,7 @@ export function NetworkProxyHealthPanel() {
           {hasIssues && (
             <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-[var(--danger)]/30 bg-[var(--danger)]/10 p-4">
               <div>
-                <p className="text-ui font-semibold text-[#fee2e2]">部分外部元数据服务网络连接失败或超时</p>
+                <p className="text-ui font-semibold text-[var(--danger)]">部分外部元数据服务网络连接失败或超时</p>
                 <p className="mt-0.5 text-sub text-white/70">
                   可能受本地网络 DNS 污染或防火墙阻断影响，建议配置专用的元数据网络代理（支持 SOCKS5 / HTTP）。
                 </p>
@@ -160,7 +160,7 @@ export function NetworkProxyHealthPanel() {
               <span
                 className={`rounded-md px-2 py-0.5 font-medium ${
                   data.active_proxy
-                    ? "bg-[#38bdf8]/15 text-[#38bdf8]"
+                    ? "bg-[var(--info)]/15 text-[var(--info)]"
                     : "bg-white/10 text-white/80"
                 }`}
               >
@@ -191,7 +191,7 @@ export function NetworkProxyHealthPanel() {
                     <span
                       className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium ${
                         item.is_proxied
-                          ? "bg-[#38bdf8]/15 text-[#38bdf8]"
+                          ? "bg-[var(--info)]/15 text-[var(--info)]"
                           : "bg-emerald-500/15 text-emerald-400"
                       }`}
                     >

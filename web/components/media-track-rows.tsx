@@ -81,7 +81,7 @@ export function MediaTrackRows({
           aria-label="选择视频文件"
           value={selectedFile.file_id}
           onChange={(event) => onSelectedFileIdChange(event.target.value)}
-          className="w-full rounded-xl border border-white/[0.08] bg-white/[0.055] px-3.5 py-2 text-sub text-white/90 outline-none transition focus:border-white/25 focus:bg-white/[0.08] [&>option]:bg-[#181c28]"
+          className="w-full rounded-xl border border-white/[0.08] bg-white/[0.055] px-3.5 py-2 text-sub text-white/90 outline-none transition focus:border-white/25 focus:bg-white/[0.08]"
         >
           {availableFiles.map((file) => (
             <option key={file.file_id} value={file.file_id}>

@@ -598,12 +598,13 @@ export function FavoritesView() {
                 title={gallery ? "回到海报墙" : "图床浏览"}
                 aria-label={gallery ? "回到海报墙" : "图床浏览"}
                 aria-pressed={gallery}
+                data-active={gallery ? "true" : undefined}
                 onClick={() => {
                   // 两种模式的灯箱翻的不是同一份列表，下标不能沿用
                   setLightboxIndex(null);
                   setGalleryMode(!gallery);
                 }}
-                className={`${PAGE_NAV_BUTTON_CLASS} ${gallery ? "bg-black/55 text-white" : ""}`}
+                className={PAGE_NAV_BUTTON_CLASS}
               >
                 {gallery ? (
                   <PosterGridIcon className="size-[18px] max-md:size-[22px]" />
@@ -618,7 +619,7 @@ export function FavoritesView() {
                     <button
                       type="button"
                       aria-label="浏览设置"
-                      className={`${PAGE_NAV_BUTTON_CLASS} data-[state=open]:bg-black/55 data-[state=open]:text-white`}
+                      className={PAGE_NAV_BUTTON_CLASS}
                     >
                       <MoreIcon className="size-[18px] max-md:size-[22px]" />
                     </button>

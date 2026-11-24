@@ -39,6 +39,28 @@ function formatCountdown(targetTimestamp: number | string | null, currentMs: num
   return `${hours} 小时 ${mins} 分后`;
 }
 
+function expectedMaintenancePayload(job: JobView): Record<string, unknown> {
+  if (job.payload_token) {
+    try {
+      const parsed: unknown = JSON.parse(job.payload_token);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        return parsed as Record<string, unknown>;
+      }
+    } catch {
+      // Fall back to job.payload when payload_token is not valid JSON.
+    }
+  }
+  return job.payload || {};
+}
+
+function clampScheduleSecs(raw: string, job: JobView): number {
+  const floor = isMaintenanceJob(job) ? 3600 : 5;
+  const ceiling = isMaintenanceJob(job) ? 31536000 : 86400 * 7;
+  const parsed = parseInt(raw, 10);
+  if (!Number.isFinite(parsed)) return floor;
+  return Math.min(ceiling, Math.max(floor, parsed));
+}
+
 export function ScheduledJobsView({ embedded = false }: { embedded?: boolean } = {}) {
   const toast = useToast();
   const [jobs, setJobs] = useState<JobView[]>([]);
@@ -78,7 +100,7 @@ export function ScheduledJobsView({ embedded = false }: { embedded?: boolean } =
 
   const [togglingId, setTogglingId] = useState<string | null>(null);
   const [editingScheduleId, setEditingScheduleId] = useState<string | null>(null);
-  const [scheduleSecs, setScheduleSecs] = useState<number>(30);
+  const [scheduleSecs, setScheduleSecs] = useState<string>("30");
   const [updatingSchedule, setUpdatingSchedule] = useState(false);
   const [settingsJobId, setSettingsJobId] = useState<string | null>(null);
   const [maintenanceError, setMaintenanceError] = useState<string | null>(null);
@@ -89,7 +111,8 @@ export function ScheduledJobsView({ embedded = false }: { embedded?: boolean } =
       const targetJob = jobs.find((j) => j.id === jobId);
       if (targetJob && isMaintenanceJob(targetJob)) {
         const draft = targetJob.payload || {};
-        await updateMaintenanceConfig(jobId, draft, draft, secs);
+        const expectedPayload = expectedMaintenancePayload(targetJob);
+        await updateMaintenanceConfig(jobId, draft, expectedPayload, secs);
       } else {
         await updateJobSchedule(jobId, secs);
       }
@@ -204,7 +227,7 @@ export function ScheduledJobsView({ embedded = false }: { embedded?: boolean } =
                         type="button"
                         onClick={() => {
                           setEditingScheduleId(editingScheduleId === job.id ? null : job.id);
-                          setScheduleSecs(job.schedule ? job.schedule.interval_secs : 30);
+                          setScheduleSecs(String(job.schedule ? job.schedule.interval_secs : 30));
                         }}
                         title="点击调整调度周期"
                         className="inline-flex cursor-pointer items-center gap-1 rounded bg-white/10 px-2 py-0.5 text-xs text-white/90 transition hover:bg-white/20"
@@ -291,10 +314,10 @@ export function ScheduledJobsView({ embedded = false }: { embedded?: boolean } =
                         <button
                           key={preset.secs}
                           type="button"
-                          onClick={() => setScheduleSecs(preset.secs)}
+                          onClick={() => setScheduleSecs(String(preset.secs))}
                           className={`rounded px-2 py-1 text-xs transition ${
-                            scheduleSecs === preset.secs
-                              ? "bg-sky-500 font-medium text-white"
+                            scheduleSecs.trim() !== "" && Number(scheduleSecs) === preset.secs
+                              ? "bg-sky-700 font-medium text-[#ffffff] hover:bg-sky-600"
                               : "bg-white/10 text-white/70 hover:bg-white/20"
                           }`}
                         >
@@ -310,16 +333,22 @@ export function ScheduledJobsView({ embedded = false }: { embedded?: boolean } =
                         max={isMaintenanceJob(job) ? 31536000 : 86400 * 7}
                         value={scheduleSecs}
                         onChange={(e) => {
-                          const floor = isMaintenanceJob(job) ? 3600 : 5;
-                          setScheduleSecs(Math.max(floor, parseInt(e.target.value, 10) || floor));
+                          setScheduleSecs(e.target.value);
                         }}
-                        className="w-24 rounded border border-white/20 bg-black/40 px-2 py-1 text-xs text-white"
+                        onBlur={() => {
+                          setScheduleSecs(String(clampScheduleSecs(scheduleSecs, job)));
+                        }}
+                        className="w-24 rounded border border-[var(--line)] bg-[var(--surface-inset)] px-2 py-1 text-xs text-[var(--text)]"
                       />
                       <button
                         type="button"
                         disabled={updatingSchedule}
-                        onClick={() => void handleUpdateSchedule(job.id, scheduleSecs)}
-                        className="rounded bg-sky-500 px-3 py-1 text-xs font-semibold text-white transition hover:bg-sky-600 disabled:opacity-50"
+                        onClick={() => {
+                          const clamped = clampScheduleSecs(scheduleSecs, job);
+                          setScheduleSecs(String(clamped));
+                          void handleUpdateSchedule(job.id, clamped);
+                        }}
+                        className="rounded bg-sky-700 px-3 py-1 text-xs font-semibold text-[#ffffff] transition hover:bg-sky-600 disabled:opacity-50"
                       >
                         {updatingSchedule ? "保存中..." : "保存周期"}
                       </button>
@@ -353,12 +382,12 @@ export function ScheduledJobsView({ embedded = false }: { embedded?: boolean } =
                   </>
                 )}
 
-                <div className="mt-4 space-y-1.5 rounded-lg bg-black/20 p-3 font-mono text-xs text-white/80">
+                <div className="code-well mt-4 space-y-1.5 rounded-lg p-3 font-mono text-xs text-white/80">
                   <div className="flex justify-between">
                     <span className="font-sans text-[var(--text-muted)]">下次计划执行:</span>
                     <span
                       className={`font-sans font-bold ${
-                        job.enabled ? "text-sky-400" : "text-white/40"
+                        job.enabled ? "text-[var(--info)]" : "text-[var(--text-faint)]"
                       }`}
                     >
                       {countdownLabel}
@@ -382,8 +411,8 @@ export function ScheduledJobsView({ embedded = false }: { embedded?: boolean } =
                     </div>
                   )}
                   {job.last_status === "failed" && job.last_error && (
-                    <div className="mt-2 break-all rounded border border-red-500/20 bg-red-500/10 p-2 font-sans text-red-300">
-                      <div className="font-semibold text-red-400">失败原因:</div>
+                    <div className="mt-2 break-all rounded border border-[var(--danger)]/20 bg-[var(--danger)]/10 p-2 font-sans text-[var(--danger)]">
+                      <div className="font-semibold">失败原因:</div>
                       <div>{job.last_error}</div>
                     </div>
                   )}
@@ -395,7 +424,7 @@ export function ScheduledJobsView({ embedded = false }: { embedded?: boolean } =
                   type="button"
                   onClick={() => void handleRunNow(job)}
                   disabled={isRunning}
-                  className="rounded-lg bg-sky-500/20 px-3.5 py-1.5 text-xs font-semibold text-sky-300 transition hover:bg-sky-500/30 disabled:opacity-50"
+                  className="rounded-lg bg-[var(--info)]/15 px-3.5 py-1.5 text-xs font-semibold text-[var(--info)] transition hover:bg-[var(--info)]/25 disabled:opacity-50"
                 >
                   {isRunning ? "正在执行..." : "立即执行"}
                 </button>

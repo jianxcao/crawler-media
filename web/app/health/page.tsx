@@ -70,17 +70,17 @@ export default function HealthPage() {
 
   return (
     <div className="grid gap-6 lg:grid-cols-[0.78fr_1.22fr]">
-      <section className="rounded-[32px] border border-[var(--line)] bg-[#111111] p-8 text-white shadow-[var(--shadow)]">
-        <p className="text-sub font-semibold tracking-[0.24em] text-[#ffb89e] uppercase">
+      <section className="css-glass rounded-[32px] p-8 text-[var(--text)]">
+        <p className="text-sub font-semibold tracking-[0.24em] text-[var(--accent)] uppercase">
           Live contract check
         </p>
         <h1 className="mt-5 text-3xl font-semibold">Backend health status</h1>
-        <p className="mt-4 max-w-xl text-body leading-7 text-white/72">
+        <p className="mt-4 max-w-xl text-body leading-7 text-[var(--text-muted)]">
           This page validates the base frontend contract: the web console talks to FastAPI through
           the shared client layer instead of calling ad hoc endpoints from the UI.
         </p>
-        <div className="mt-8 rounded-[24px] border border-white/10 bg-white/6 p-5">
-          <p className="text-body text-white/60">State</p>
+        <div className="card-row-surface mt-8 rounded-[24px] p-5">
+          <p className="text-body text-[var(--text-muted)]">State</p>
           <p className="mt-2 text-2xl font-semibold">
             {state.status === "loading" && "Loading"}
             {state.status === "success" && "Healthy"}
@@ -89,26 +89,26 @@ export default function HealthPage() {
         </div>
       </section>
 
-      <section className="rounded-[32px] border border-[var(--line)] bg-[var(--panel-strong)] p-8 shadow-[var(--shadow)]">
+      <section className="css-glass rounded-[32px] p-8 text-[var(--text)]">
         {state.status === "loading" ? (
           <div className="space-y-4">
-            <div className="h-4 w-24 animate-pulse rounded-full bg-black/8" />
-            <div className="h-16 animate-pulse rounded-[24px] bg-black/8" />
+            <div className="skeleton-block h-4 w-24 rounded-full" />
+            <div className="skeleton-block h-16 w-full rounded-[24px]" />
             <div className="grid gap-3 sm:grid-cols-3">
-              <div className="h-24 animate-pulse rounded-[24px] bg-black/8" />
-              <div className="h-24 animate-pulse rounded-[24px] bg-black/8" />
-              <div className="h-24 animate-pulse rounded-[24px] bg-black/8" />
+              <div className="skeleton-block h-24 rounded-[24px]" />
+              <div className="skeleton-block h-24 rounded-[24px]" />
+              <div className="skeleton-block h-24 rounded-[24px]" />
             </div>
           </div>
         ) : null}
 
         {state.status === "error" ? (
-          <div className="rounded-[24px] border border-[color:rgba(153,27,27,0.14)] bg-[color:rgba(153,27,27,0.06)] p-6">
+          <div className="rounded-[24px] border border-[var(--danger)]/25 bg-[var(--danger)]/10 p-6">
             <p className="text-body font-semibold uppercase tracking-[0.18em] text-[var(--danger)]">
               Request failed
             </p>
-            <p className="mt-3 text-body leading-7 text-[var(--foreground)]">{state.error}</p>
-            <p className="mt-4 text-body text-[var(--muted)]">
+            <p className="mt-3 text-body leading-7 text-[var(--text)]">{state.error}</p>
+            <p className="mt-4 text-body text-[var(--text-muted)]">
               Check whether FastAPI is running on port `8000`, or override the frontend env if the
               API lives elsewhere.
             </p>
@@ -118,33 +118,33 @@ export default function HealthPage() {
         {state.status === "success" ? (
           <div className="space-y-5">
             <div className="flex items-center gap-3">
-              <span className="inline-flex rounded-full bg-[color:rgba(22,101,52,0.1)] px-3 py-1 text-body font-semibold text-[var(--success)]">
+              <span className="inline-flex rounded-full bg-[var(--ok)]/15 px-3 py-1 text-body font-semibold text-[var(--ok)]">
                 {state.data.status}
               </span>
-              <span className="text-body text-[var(--muted)]">
+              <span className="text-body text-[var(--text-muted)]">
                 Backend contract from `/api/v1/health`
               </span>
             </div>
 
             <div className="grid gap-4 sm:grid-cols-3">
-              <article className="rounded-[24px] border border-[var(--line)] bg-white/80 p-5">
-                <p className="text-body text-[var(--muted)]">Version</p>
-                <p className="mt-2 text-xl font-semibold">
+              <article className="card-row-surface rounded-[24px] p-5">
+                <p className="text-body text-[var(--text-muted)]">Version</p>
+                <p className="mt-2 text-xl font-semibold text-[var(--text)]">
                   {state.data.version ?? "—"}
                   {state.data.commit ? (
-                    <span className="ml-2 font-mono text-sm text-[var(--muted)]">
+                    <span className="ml-2 font-mono text-sm text-[var(--text-muted)]">
                       {state.data.commit.slice(0, 8)}
                     </span>
                   ) : null}
                 </p>
               </article>
-              <article className="rounded-[24px] border border-[var(--line)] bg-white/80 p-5">
-                <p className="text-body text-[var(--muted)]">Environment</p>
-                <p className="mt-2 text-xl font-semibold">{state.data.environment}</p>
+              <article className="card-row-surface rounded-[24px] p-5">
+                <p className="text-body text-[var(--text-muted)]">Environment</p>
+                <p className="mt-2 text-xl font-semibold text-[var(--text)]">{state.data.environment}</p>
               </article>
-              <article className="rounded-[24px] border border-[var(--line)] bg-white/80 p-5">
-                <p className="text-body text-[var(--muted)]">Protocol</p>
-                <p className="mt-2 text-xl font-semibold">HTTP JSON</p>
+              <article className="card-row-surface rounded-[24px] p-5">
+                <p className="text-body text-[var(--text-muted)]">Protocol</p>
+                <p className="mt-2 text-xl font-semibold text-[var(--text)]">HTTP JSON</p>
               </article>
             </div>
           </div>

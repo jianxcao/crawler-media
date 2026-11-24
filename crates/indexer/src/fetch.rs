@@ -31,6 +31,7 @@ pub fn effective_base_url(site: &Site, profile: &Profile) -> String {
 
 pub(crate) fn uses_html_cookie_fallback(site: &Site, profile: &Profile) -> bool {
     profile.framework == Framework::Api
+        && profile.effective_auth_types().contains(&"cookie")
         && site.api_key.as_deref().is_none_or(|k| k.trim().is_empty())
         && site.cookie.as_deref().is_some_and(|c| !c.trim().is_empty())
         && !profile.list.item.is_empty()
@@ -85,13 +86,27 @@ pub fn search_request_page_categories(
             ),
         }
     };
+    let auth_types = profile.effective_auth_types();
+    let supports_cookie = auth_types.contains(&"cookie");
+    let cookie = if !supports_cookie || (profile.framework == Framework::Api && !html_fallback) {
+        None
+    } else {
+        site.cookie.clone()
+    };
+    let supports_api_key =
+        profile.framework != Framework::Nexusphp && auth_types.contains(&"apikey");
+    let api_key = if html_fallback || !supports_api_key {
+        None
+    } else {
+        site.api_key.clone()
+    };
     FetchRequest {
         key: format!("search:{}", site.id),
         url,
         method,
         body,
-        cookie: site.cookie.clone(),
-        api_key: site.api_key.clone(),
+        cookie,
+        api_key,
         proxy: site.proxy.clone(),
         cdp_url: site.cdp_url.clone(),
     }
@@ -208,14 +223,26 @@ fn hdarea_v1_search_url(
     url
 }
 
-pub fn rss_request(site: &Site, _profile: &Profile) -> FetchRequest {
+pub fn rss_request(site: &Site, profile: &Profile) -> FetchRequest {
+    let auth_types = profile.effective_auth_types();
+    let supports_cookie = auth_types.contains(&"cookie");
+    let supports_api_key =
+        profile.framework != Framework::Nexusphp && auth_types.contains(&"apikey");
     FetchRequest {
         key: format!("rss:{}", site.id),
         url: site.rss_url.clone().unwrap_or_else(|| site.url.clone()),
         method: FetchMethod::Get,
         body: None,
-        cookie: site.cookie.clone(),
-        api_key: site.api_key.clone(),
+        cookie: if supports_cookie {
+            site.cookie.clone()
+        } else {
+            None
+        },
+        api_key: if supports_api_key {
+            site.api_key.clone()
+        } else {
+            None
+        },
         proxy: site.proxy.clone(),
         cdp_url: site.cdp_url.clone(),
     }
@@ -232,12 +259,21 @@ pub fn download_token_request(site: &Site, profile: &Profile, id: &str) -> Optio
     let method_str = dl_cfg.method.as_deref().unwrap_or("post_form");
     let param = dl_cfg.id_param.as_deref().unwrap_or("id");
 
+    let html_fallback = uses_html_cookie_fallback(site, profile);
+    let cookie = if profile.framework == Framework::Api && !html_fallback {
+        None
+    } else {
+        site.cookie.clone()
+    };
     let (method, body) = match method_str.to_lowercase().as_str() {
         "post_json" => (
             FetchMethod::PostJson,
             Some(serde_json::json!({ param: id }).to_string()),
         ),
-        _ => (FetchMethod::PostForm, Some(format!("{param}={id}"))),
+        _ => (
+            FetchMethod::PostForm,
+            Some(format!("{}={}", url_encode(param), url_encode(id))),
+        ),
     };
 
     Some(FetchRequest {
@@ -245,7 +281,7 @@ pub fn download_token_request(site: &Site, profile: &Profile, id: &str) -> Optio
         url: format!("{base}{path}"),
         method,
         body,
-        cookie: site.cookie.clone(),
+        cookie,
         api_key: site.api_key.clone(),
         proxy: site.proxy.clone(),
         cdp_url: None,
@@ -257,7 +293,7 @@ pub fn mteam_download_request(site: &Site, id: &str) -> FetchRequest {
         key: format!("download:{}:{id}", site.id),
         url: format!("{}/api/torrent/genDlToken", site.url.trim_end_matches('/')),
         method: FetchMethod::PostForm,
-        body: Some(format!("id={id}")),
+        body: Some(format!("id={}", url_encode(id))),
         cookie: None,
         api_key: site.api_key.clone(),
         proxy: site.proxy.clone(),
@@ -296,4 +332,81 @@ fn url_encode(value: &str) -> String {
         }
     }
     encoded
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::profile::ProfileSet;
+    use domain::SiteId;
+
+    #[test]
+    fn post_form_download_token_request_url_encodes_param_and_id() {
+        let profiles = ProfileSet::load(None).unwrap();
+        let mut profile = profiles.get("hdarea").unwrap().clone();
+        if let Some(dl) = profile.download.as_mut() {
+            dl.method = Some("post_form".into());
+            dl.id_param = Some("torrent id".into());
+        }
+        let site = Site {
+            id: SiteId::new(),
+            name: "HDArea".into(),
+            url: "https://hdarea.club".into(),
+            profile_id: "hdarea".into(),
+            cookie: Some("stale=1".into()),
+            api_key: Some("valid".into()),
+            rss_url: None,
+            proxy: None,
+            rate_limit_per_minute: None,
+            cdp_url: None,
+            downloader_id: None,
+            enabled: true,
+            maintenance_via: domain::MaintenanceVia::Http,
+        };
+        let req = download_token_request(&site, &profile, "469752&inject=1").unwrap();
+        assert_eq!(req.method, FetchMethod::PostForm);
+        assert_eq!(req.cookie, None);
+        assert_eq!(
+            req.body.as_deref(),
+            Some("torrent%20id=469752%26inject%3D1")
+        );
+    }
+
+    #[test]
+    fn apikey_only_profile_disables_html_cookie_fallback_and_rss_cookie() {
+        let profiles = ProfileSet::load(None).unwrap();
+        let mut apikey_only = profiles.get("hdarea").unwrap().clone();
+        apikey_only.auth_types = vec!["apikey".into()];
+
+        let site = Site {
+            id: SiteId::new(),
+            name: "ApiOnly".into(),
+            url: "https://hdarea.club".into(),
+            profile_id: "hdarea".into(),
+            cookie: Some("c_secure_uid=stale".into()),
+            api_key: None,
+            rss_url: Some("https://hdarea.club/torrentrss.php".into()),
+            proxy: None,
+            rate_limit_per_minute: None,
+            cdp_url: None,
+            downloader_id: None,
+            enabled: true,
+            maintenance_via: domain::MaintenanceVia::Http,
+        };
+
+        assert!(!uses_html_cookie_fallback(&site, &apikey_only));
+        let search_req = search_request_page_categories(&site, &apikey_only, "dune", 1, &[]);
+        assert!(search_req.url.contains("/api/v1/torrents"));
+        assert_eq!(search_req.cookie, None);
+
+        let rss_req = rss_request(&site, &apikey_only);
+        assert_eq!(rss_req.cookie, None);
+
+        let hybrid = profiles.get("hdarea").unwrap();
+        assert!(uses_html_cookie_fallback(&site, hybrid));
+        assert_eq!(
+            rss_request(&site, hybrid).cookie.as_deref(),
+            Some("c_secure_uid=stale")
+        );
+    }
 }

@@ -30,7 +30,7 @@ impl ProbeCounts {
 
 impl Store {}
 
-pub(super) fn reconcile_counts_in_transaction(
+pub(crate) fn reconcile_counts_in_transaction(
     tx: &rusqlite::Connection,
     job_id: &str,
 ) -> Result<(), StoreError> {

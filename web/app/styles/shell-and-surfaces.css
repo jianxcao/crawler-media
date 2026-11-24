@@ -498,3 +498,107 @@ html.immersive-route .page-solid {
   white-space: pre-wrap;
   word-break: break-word;
 }
+
+/* 命令面板层级：vendor 默认 z-index:8，但本应用外壳 (.app-shell) 是 z-10，
+   若不抬高，Portal 到 body 后的浮层仍会被外壳内容盖住。抬到 50 稳压全站之上。 */
+.lg-command-overlay {
+  z-index: 50;
+}
+
+/* 主界面后推纵深（Spotlight 式）：命令面板打开时（body.cmdk-open），整个外壳轻微
+   缩放后退，配合浮层的全局蒙版做出「主界面退后一层、面板浮于其上」的层次感。 */
+.app-shell {
+  transform-origin: center center;
+  transition: transform 260ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.viewport-app-height {
+  height: calc(100vh - var(--keyboard-inset));
+  height: calc(100dvh - var(--keyboard-inset));
+}
+
+.viewport-overlay-height {
+  height: calc(100vh + var(--vp-overshoot));
+  height: calc(100dvh + var(--vp-overshoot));
+}
+
+body.cmdk-open .app-shell {
+  transform: scale(0.978);
+}
+
+/* —— 移动端顶栏 —— */
+.mobile-topbar {
+  padding-top: var(--safe-top);
+  padding-left: var(--safe-left);
+  padding-right: var(--safe-right);
+  background: linear-gradient(
+    180deg,
+    rgba(9, 11, 16, 0.86) 0%,
+    rgba(9, 11, 16, 0.6) 58%,
+    rgba(9, 11, 16, 0) 100%
+  );
+  backdrop-filter: blur(14px);
+  mask-image: linear-gradient(180deg, #000 0%, #000 62%, transparent 100%);
+  -webkit-mask-image: linear-gradient(180deg, #000 0%, #000 62%, transparent 100%);
+}
+
+@media (max-width: 767px) {
+  .app-shell > main {
+    padding-top: calc(var(--safe-top) + var(--mobile-topbar-h));
+    padding-right: var(--safe-right);
+    padding-left: var(--safe-left);
+  }
+
+  .app-shell[data-topbar="false"] > main {
+    padding-top: 0;
+  }
+}
+
+/* —— 移动端抽屉式侧栏 —— */
+.mobile-drawer {
+  position: fixed;
+  z-index: 60;
+  top: 0;
+  bottom: calc(-1 * var(--vp-overshoot));
+  left: 0;
+  width: 86vw;
+  max-width: 320px;
+  padding: calc(var(--safe-top) + 10px) 0
+    calc(var(--safe-bottom) + var(--vp-overshoot) + 10px) calc(var(--safe-left) + 10px);
+  transition: transform 280ms cubic-bezier(0.2, 0.8, 0.2, 1);
+  will-change: transform;
+}
+.mobile-drawer[data-open="false"] {
+  transform: translateX(-104%);
+  pointer-events: none;
+}
+.mobile-drawer[data-open="true"] {
+  transform: translateX(0);
+}
+.mobile-drawer-scrim {
+  position: fixed;
+  inset: 0 0 calc(-1 * var(--vp-overshoot)) 0;
+  z-index: 55;
+  background: rgba(4, 6, 10, 0.55);
+  backdrop-filter: blur(2px);
+  animation: page-scrim-in 200ms ease both;
+}
+
+/* 搜索命令面板（components/search-command.tsx） */
+@keyframes search-palette-fade-in {
+  from {
+    opacity: 0;
+  }
+}
+@keyframes search-palette-pop-in {
+  from {
+    opacity: 0;
+    transform: translateY(-10px) scale(0.985);
+  }
+}
+.search-palette-overlay {
+  animation: search-palette-fade-in 140ms ease-out;
+}
+.search-palette-panel {
+  animation: search-palette-pop-in 160ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}

@@ -80,7 +80,7 @@ function EmptyArtwork({ variant }: { variant: ContentEmptyStateProps["variant"] 
           <span className="empty-state-emblem absolute left-1/2 top-1/2 z-10 grid size-[76px] -translate-x-1/2 -translate-y-1/2 place-items-center rounded-full border border-white/[0.16] bg-[#202530]/90 text-white/75 shadow-[0_18px_45px_rgba(0,0,0,0.45),inset_0_1px_0_rgba(255,255,255,0.12)] backdrop-blur-xl">
             <BookmarkIcon className="size-8" />
           </span>
-          <span className="absolute bottom-4 right-[72px] z-20 grid size-8 place-items-center rounded-full border border-white/15 bg-[#303743] text-white/70 shadow-lg">
+          <span className="absolute bottom-4 right-[72px] z-20 grid size-8 place-items-center rounded-full border border-[var(--line-strong)] bg-[var(--surface-raised)] text-[var(--text-muted)] shadow-lg">
             <BellIcon className="size-4" />
           </span>
           <span className="absolute bottom-[22px] right-[68px] z-30 size-2 animate-pulse rounded-full bg-[var(--text-faint)] shadow-[0_0_10px_var(--text-faint)] motion-reduce:animate-none" />

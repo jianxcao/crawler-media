@@ -152,7 +152,7 @@ export function LibraryCoverModal({
         </div>
 
         {/* 实时预览区 (16:9) */}
-        <div className="relative mt-4 aspect-video w-full overflow-hidden rounded-xl border border-white/10 bg-[#06080e]">
+        <div className="dark-media-surface relative mt-4 aspect-video w-full overflow-hidden rounded-xl border border-white/10 bg-[#06080e]">
           <ArtworkImage
             src={previewSrc || currentCoverSrc}
             alt="封面预览"
@@ -247,7 +247,7 @@ export function LibraryCoverModal({
                     setStyle(e.target.value);
                     setPreviewSrc(null);
                   }}
-                  className="w-full rounded-lg border border-white/10 bg-[#161a29] px-3 py-2 text-ui text-white outline-none focus:border-white/30"
+                  className="w-full rounded-lg border border-[var(--line)] bg-[var(--surface-inset)] px-3 py-2 text-ui text-[var(--text)] outline-none focus:border-white/30"
                 >
                   <option value="macaron_card_single">
                     单图倾斜微卡片 (Macaron Single)
@@ -267,7 +267,7 @@ export function LibraryCoverModal({
                     setBgMode(e.target.value);
                     setPreviewSrc(null);
                   }}
-                  className="w-full rounded-lg border border-white/10 bg-[#161a29] px-3 py-2 text-ui text-white outline-none focus:border-white/30"
+                  className="w-full rounded-lg border border-[var(--line)] bg-[var(--surface-inset)] px-3 py-2 text-ui text-[var(--text)] outline-none focus:border-white/30"
                 >
                   <option value="auto">自适应提取 (模糊底图 + 主色融合)</option>
                   <option value="gradient_dark">暗夜极光微光渐变</option>
@@ -298,7 +298,7 @@ export function LibraryCoverModal({
                   type="button"
                   onClick={() => handleGenerate(false)}
                   disabled={loading}
-                  className="rounded-lg bg-blue-600 px-4 py-2 text-ui font-medium text-white hover:bg-blue-500"
+                  className="rounded-lg bg-blue-600 px-4 py-2 text-ui font-medium text-[#ffffff] hover:bg-blue-500"
                 >
                   保存设为封面
                 </button>

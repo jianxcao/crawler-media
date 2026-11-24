@@ -134,7 +134,7 @@ export function WallRecallPill({ onJump, onDismiss }: { onJump: () => void; onDi
       aria-live="polite"
       className="pointer-events-none fixed inset-x-0 bottom-[calc(var(--safe-bottom)+18px)] z-[45] flex justify-center px-4"
     >
-      <div className="toast-item pointer-events-auto flex items-center gap-1 rounded-full border border-white/[0.12] bg-[rgba(16,18,26,0.92)] py-1 pl-1 pr-1.5 shadow-[0_18px_50px_rgba(0,0,0,0.55)] backdrop-blur-2xl">
+      <div className="popover-surface toast-item pointer-events-auto flex items-center gap-1 rounded-full py-1 pl-1 pr-1.5">
         <button
           type="button"
           onClick={onJump}

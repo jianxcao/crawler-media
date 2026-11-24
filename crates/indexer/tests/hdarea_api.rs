@@ -366,3 +366,81 @@ fn hdarea_cookie_without_apikey_falls_back_to_nexusphp_html_search() {
         "cookie fallback enclosure should not call API genDlToken"
     );
 }
+
+#[test]
+fn hdarea_resolve_torrent_download_short_circuits_existing_dl_token_and_passkey() {
+    struct PanicStub;
+    impl Fetcher for PanicStub {
+        fn fetch(&self, request: &FetchRequest) -> Result<String, IndexerError> {
+            panic!("unexpected genDlToken call to {}", request.url);
+        }
+    }
+
+    let indexer = Indexer::new(ProfileSet::load(None).unwrap(), Arc::new(PanicStub));
+    let site = hdarea_site("https://hdarea.club", Some("valid-key"), None);
+    let mut torrent = Torrent {
+        site_id: site.id,
+        title: "Knowing Bros S01E552".into(),
+        enclosure: "https://hdarea.club/download.php?id=469752&dl_token=searchtok".into(),
+        size_bytes: None,
+        seeders: None,
+        free: true,
+        hr: None,
+        imdb_id: None,
+        id: Some("469752".into()),
+        leechers: None,
+        snatched: None,
+        upload_time: None,
+        detail_url: None,
+        category: None,
+        poster_url: None,
+    };
+
+    assert_eq!(
+        indexer.resolve_torrent_download(&site, &torrent).unwrap(),
+        None,
+        "already-signed dl_token enclosure must be used directly without genDlToken"
+    );
+
+    torrent.enclosure = "https://hdarea.club/download.php?id=469752&passkey=pk123".into();
+    assert_eq!(
+        indexer.resolve_torrent_download(&site, &torrent).unwrap(),
+        None,
+        "already-signed passkey enclosure must be used directly without genDlToken"
+    );
+}
+
+#[test]
+fn hdarea_api_mode_omits_stale_cookie_in_search_and_download_requests() {
+    struct InspectCookieStub;
+    impl Fetcher for InspectCookieStub {
+        fn fetch(&self, request: &FetchRequest) -> Result<String, IndexerError> {
+            assert_eq!(
+                request.cookie, None,
+                "API mode request to {} must not send stale cookie alongside x-api-key",
+                request.url
+            );
+            if request.url.contains("genDlToken") {
+                Ok(r#"{"success":true,"code":0,"data":"https://hdarea.club/download.php?id=469753&dl_token=fresh"}"#.into())
+            } else {
+                Ok(LIVE_SEARCH_JSON.into())
+            }
+        }
+    }
+
+    let indexer = Indexer::new(ProfileSet::load(None).unwrap(), Arc::new(InspectCookieStub));
+    let site = hdarea_site(
+        "https://hdarea.club",
+        Some("0123456789abcdef0123456789abcdef"),
+        Some("c_secure_uid=stale"),
+    );
+
+    let outcome = indexer.search(std::slice::from_ref(&site), "dune");
+    assert!(outcome.failures.is_empty(), "{:?}", outcome.failures);
+
+    let unsigned = &outcome.torrents[1];
+    assert_eq!(
+        indexer.resolve_torrent_download(&site, unsigned).unwrap(),
+        Some("https://hdarea.club/download.php?id=469753&dl_token=fresh".into())
+    );
+}

@@ -77,7 +77,7 @@ export function LibraryActionsMenu({
           type="button"
           aria-label="更多操作"
           // 长在顶栏里，与返回键并排：共用顶栏控件形状，不再是页面里的胶囊按钮
-          className={`${PAGE_NAV_BUTTON_CLASS} relative data-[state=open]:bg-black/55 data-[state=open]:text-white`}
+          className={`${PAGE_NAV_BUTTON_CLASS} relative`}
         >
           <MoreIcon className="size-[18px] max-md:size-[22px]" />
         </button>
@@ -144,7 +144,7 @@ export function LibraryActionsMenu({
                 onSelect={() => {
                   setTimeout(() => onDelete(), 50);
                 }}
-                className="glass-row nav-item cursor-pointer px-3 py-2 text-ui font-medium text-red-400 outline-none hover:!bg-red-500/10 hover:!text-red-300"
+                className="glass-row nav-item cursor-pointer px-3 py-2 text-ui font-medium !text-[var(--danger)] outline-none hover:!bg-[var(--danger)]/10 hover:!text-[var(--danger)] data-[highlighted]:!bg-[var(--danger)]/10 data-[highlighted]:!text-[var(--danger)]"
               >
                 删除媒体库
               </DropdownMenu.Item>

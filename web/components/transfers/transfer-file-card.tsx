@@ -144,7 +144,7 @@ export function TransferFileCard({
         </div>
       </div>
 
-      <div className="mt-3.5 space-y-2 rounded-xl border border-white/[0.05] bg-black/25 p-3 font-mono text-xs">
+      <div className="code-well mt-3.5 space-y-2 rounded-xl p-3 font-mono text-xs">
         <div className="flex items-center justify-between gap-2">
           <div className="flex min-w-0 items-center gap-2">
             <span className="shrink-0 rounded bg-white/[0.07] px-1.5 py-0.5 font-sans text-[10px] font-medium text-white/60">

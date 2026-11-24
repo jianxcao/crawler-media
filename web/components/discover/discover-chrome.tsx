@@ -36,18 +36,15 @@ export function SourceSwitcher({
   compact?: boolean;
 }) {
   return (
-    <div className="flex shrink-0 rounded-full border border-white/10 bg-black/35 p-1 backdrop-blur-xl">
+    <div className="segmented-glass flex shrink-0 rounded-full p-1">
       {(["tmdb", "douban"] as const).map((source) => (
         <button
           key={source}
           type="button"
+          aria-pressed={value === source}
           onClick={() => onChange(source)}
-          className={`rounded-full font-semibold transition ${
+          className={`segmented-glass__item rounded-full font-semibold transition ${
             compact ? "px-1.5 py-2 text-micro" : "px-4 py-1.5 text-sub"
-          } ${
-            value === source
-              ? "bg-white/15 text-white shadow-sm"
-              : "text-[var(--text-muted)] hover:text-white"
           }`}
         >
           {source === "tmdb" ? "TMDB" : "豆瓣"}
@@ -67,7 +64,7 @@ export function MediaTypeSwitcher({
   const labels: Record<MediaType, string> = { movie: "电影", tv: "剧集" };
   return (
     <div
-      className="flex shrink-0 rounded-full border border-white/10 bg-black/35 p-1 backdrop-blur-xl"
+      className="segmented-glass flex shrink-0 rounded-full p-1"
       aria-label="内容类型"
     >
       {(["movie", "tv"] as const).map((type) => (
@@ -76,11 +73,7 @@ export function MediaTypeSwitcher({
           type="button"
           aria-pressed={value === type}
           onClick={() => onChange(type)}
-          className={`rounded-full px-1.5 py-2 text-micro font-semibold transition ${
-            value === type
-              ? "bg-white/15 text-white shadow-sm"
-              : "text-[var(--text-muted)] hover:text-white"
-          }`}
+          className="segmented-glass__item rounded-full px-1.5 py-2 text-micro font-semibold transition"
         >
           {labels[type]}
         </button>
@@ -158,7 +151,7 @@ export function DiscoverError({ error, onRetry }: { error: DiscoverErrorInfo; on
   const unreachable = error.code === "UPSTREAM_UNREACHABLE";
   return (
     <div className="flex flex-1 items-center justify-center px-6">
-      <div className="max-w-md rounded-2xl border border-white/[0.07] bg-[rgba(14,16,22,0.45)] p-8 text-center backdrop-blur-xl">
+      <div className="css-glass max-w-md rounded-2xl p-8 text-center">
         {unreachable && (
           <span className="icon-chip mx-auto mb-4 flex size-11 !rounded-2xl">
             <GlobeIcon className="size-5" />

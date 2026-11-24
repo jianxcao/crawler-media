@@ -139,7 +139,7 @@ function StartupStatus({
       <section
         role={failure ? "alert" : "status"}
         aria-live="polite"
-        className="w-full max-w-[420px] rounded-2xl border border-white/[0.1] bg-[rgba(13,15,21,0.88)] p-6 shadow-2xl backdrop-blur-xl"
+        className="dialog-surface w-full max-w-[420px] rounded-2xl p-6"
       >
         <p className="text-sub font-semibold uppercase tracking-[0.18em] text-[var(--text-faint)]">
           {publicEnv.appName}
@@ -156,7 +156,7 @@ function StartupStatus({
               <button
                 type="button"
                 onClick={onRetry}
-                className="btn-accent h-9 rounded-full px-5 text-ui font-semibold"
+                className="btn-glass h-9 rounded-full px-5 text-ui font-semibold"
               >
                 重新连接
               </button>

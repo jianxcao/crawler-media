@@ -1,0 +1,411 @@
+/*
+ * 「液态玻璃」主题（Optical Liquid Glass）：
+ *  - 灵感源自光学曲面透镜折射：深海极光焦散画布（#06101f + 青蓝/鸢尾紫多层光斑）提供充足色散光源；
+ *  - WebGL 侧栏切换至 dome 曲面透镜（bevel=1 + 高折射率 + 边缘色散），见 lib/glass.ts；
+ *  - 全站玻璃卡片、胶囊、导航选中态叠加「左上亮白受光脊 + 右下冰青折射反光」双内高光与高饱和背景模糊。
+ */
+html[data-theme="liquid"] {
+  color-scheme: dark;
+  --bg: #06101f;
+  --surface-sidebar: rgba(10, 24, 46, 0.44);
+  --surface-main: rgba(7, 17, 34, 0.34);
+  --surface-raised: rgba(14, 30, 56, 0.68);
+  --surface-inset: rgba(186, 230, 253, 0.075);
+  --poster-placeholder: #0c1d36;
+
+  --text: #f4f9ff;
+  --text-muted: rgba(232, 244, 255, 0.7);
+  --text-faint: rgba(214, 234, 255, 0.42);
+  --line: rgba(186, 230, 253, 0.16);
+  --line-strong: rgba(224, 242, 254, 0.3);
+
+  --accent: #7dd3fc;
+  --accent-strong: #f0f9ff;
+  --accent-2: #bae6fd;
+  --accent-ink: #071426;
+  --accent-soft: rgba(125, 211, 252, 0.16);
+  --accent-ring: rgba(125, 211, 252, 0.62);
+
+  --tooltip-bg: rgba(10, 23, 44, 0.96);
+  --tooltip-stroke: rgba(186, 230, 253, 0.2);
+  --row-fade-bg: rgba(10, 24, 46, 0.96);
+
+  --glass-fill: rgba(186, 230, 253, 0.06);
+  --glass-fill-hover: rgba(186, 230, 253, 0.12);
+  --glass-fill-active: rgba(125, 211, 252, 0.2);
+
+  --ok: #34d399;
+  --ok-ink: #07120c;
+  --info: #38bdf8;
+  --warn: #fbbf24;
+  --danger: #fb7185;
+  --danger-solid: #e11d48;
+  --danger-solid-hover: #f43f5e;
+
+  --radius-lg: 0.875rem;
+  --radius-xl: 1.05rem;
+  --radius-2xl: 1.3rem;
+
+  --page-fog: linear-gradient(
+    180deg,
+    rgba(6, 16, 31, 0.78) 0%,
+    rgba(6, 16, 31, 0.48) 46%,
+    rgba(6, 16, 31, 0) 100%
+  );
+}
+
+/* 深海极光焦散底：为上层高透液态玻璃提供冰青、群青与鸢尾紫的折射色源 */
+html[data-theme="liquid"] body::before {
+  background:
+    radial-gradient(56% 48% at 14% 10%, rgba(56, 189, 248, 0.3), transparent 62%),
+    radial-gradient(50% 44% at 88% 14%, rgba(139, 92, 246, 0.26), transparent 60%),
+    radial-gradient(48% 46% at 46% 52%, rgba(45, 212, 191, 0.14), transparent 64%),
+    radial-gradient(64% 58% at 82% 92%, rgba(99, 102, 241, 0.25), transparent 64%),
+    linear-gradient(180deg, rgba(6, 16, 31, 0.26) 0%, rgba(4, 11, 24, 0.56) 100%),
+    var(--backdrop-image, url("/backdrop-default.jpg")) center top / cover no-repeat;
+  background-color: var(--bg);
+}
+
+html[data-theme="liquid"] .page-scrim,
+html[data-theme="liquid"] .search-palette-overlay {
+  background: rgb(6 16 31 / calc(var(--scrim-dark, 0.69) * 0.78));
+  backdrop-filter: blur(calc(var(--scrim-blur, 13px) * 1.35)) saturate(1.65);
+}
+
+html[data-theme="liquid"] .detail-ambient {
+  background-image: linear-gradient(
+    180deg,
+    rgba(6, 16, 31, 0) 0,
+    rgba(6, 16, 31, 0) var(--detail-ambient-top),
+    rgba(6, 16, 31, 0.2) calc(var(--detail-ambient-top) + 42px),
+    rgba(6, 16, 31, 0.42) calc(var(--detail-ambient-top) + 78px),
+    rgba(6, 16, 31, 0.64) calc(var(--detail-ambient-top) + 120px),
+    rgba(6, 16, 31, 0.82) calc(var(--detail-ambient-top) + 165px),
+    rgba(6, 16, 31, 0.94) calc(var(--detail-ambient-top) + 225px),
+    #06101f calc(var(--detail-ambient-top) + 295px),
+    #06101f 100%
+  );
+}
+@media (max-width: 767px) {
+  html[data-theme="liquid"] .detail-ambient.detail-ambient--hero {
+    background: #06101f;
+  }
+}
+html[data-theme="liquid"] .detail-mobile-hero-fade {
+  background: linear-gradient(
+    180deg,
+    rgba(6, 16, 31, 0) 0%,
+    rgba(6, 16, 31, 0.58) 52%,
+    #06101f 100%
+  );
+}
+
+html[data-theme="liquid"] .mobile-topbar {
+  background: linear-gradient(
+    180deg,
+    rgba(6, 16, 31, 0.88) 0%,
+    rgba(6, 16, 31, 0.6) 58%,
+    rgba(6, 16, 31, 0) 100%
+  );
+}
+
+html[data-theme="liquid"] .panel--sidebar {
+  background: rgb(8 20 38 / calc(0.58 * var(--glass-fallback, 1)));
+}
+html[data-theme="liquid"] .panel--main {
+  background: rgba(7, 17, 34, 0.52);
+}
+
+html[data-theme="liquid"] .glass-panel {
+  box-shadow:
+    0 26px 72px -16px rgb(2 8 20 / calc(0.68 * var(--glass-fallback, 1))),
+    0 8px 26px -8px rgb(14 116 144 / calc(0.2 * var(--glass-fallback, 1)));
+}
+
+html[data-theme="liquid"] .glass-panel__content::before {
+  box-shadow:
+    inset 0 1px 0.5px rgba(255, 255, 255, calc(var(--glass-hairline, 0.18) * 1.9)),
+    inset 1px 0 0.5px rgba(255, 255, 255, var(--glass-hairline, 0.16)),
+    inset 0 -1px 0.5px rgba(125, 211, 252, var(--glass-hairline, 0.16));
+}
+
+/* —— 液态玻璃浮层、卡片与光学边缘高光 —— */
+html[data-theme="liquid"] .css-glass {
+  border-color: rgba(186, 230, 253, 0.18);
+  background:
+    linear-gradient(
+      135deg,
+      rgba(255, 255, 255, 0.15) 0%,
+      rgba(255, 255, 255, 0.04) 38%,
+      rgba(56, 189, 248, 0.04) 72%,
+      rgba(196, 181, 253, 0.08) 100%
+    ),
+    rgba(12, 28, 52, 0.34);
+  box-shadow:
+    inset 0 1px 0.5px rgba(255, 255, 255, 0.38),
+    inset 1px 0 0.5px rgba(255, 255, 255, 0.12),
+    inset 0 -1px 0.5px rgba(125, 211, 252, 0.18),
+    0 16px 40px -14px rgba(2, 8, 22, 0.52);
+  backdrop-filter: blur(28px) saturate(1.85) brightness(1.06);
+}
+html[data-theme="liquid"] button.css-glass:hover:not(:disabled) {
+  border-color: rgba(224, 242, 254, 0.32);
+  background:
+    linear-gradient(
+      135deg,
+      rgba(255, 255, 255, 0.2) 0%,
+      rgba(255, 255, 255, 0.06) 38%,
+      rgba(56, 189, 248, 0.08) 72%,
+      rgba(196, 181, 253, 0.12) 100%
+    ),
+    rgba(16, 36, 66, 0.44);
+}
+html[data-theme="liquid"] .css-glass[aria-pressed="true"],
+html[data-theme="liquid"] button.css-glass[aria-pressed="true"]:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--accent) 58%, transparent);
+  background:
+    linear-gradient(
+      135deg,
+      rgba(255, 255, 255, 0.24) 0%,
+      rgba(125, 211, 252, 0.16) 55%,
+      rgba(196, 181, 253, 0.16) 100%
+    ),
+    rgba(14, 34, 64, 0.5);
+  box-shadow:
+    inset 0 1px 0.5px rgba(255, 255, 255, 0.5),
+    inset 0 -1px 0.5px rgba(56, 189, 248, 0.28),
+    0 16px 40px -12px rgba(2, 12, 28, 0.58);
+}
+
+html[data-theme="liquid"] .surface-raised,
+html[data-theme="liquid"] .menu-surface,
+html[data-theme="liquid"] .notice-surface {
+  background:
+    linear-gradient(
+      145deg,
+      rgba(24, 48, 84, 0.84) 0%,
+      rgba(10, 23, 44, 0.88) 100%
+    );
+  box-shadow:
+    0 22px 52px rgba(2, 8, 22, 0.62),
+    inset 0 1px 0.5px rgba(255, 255, 255, 0.34),
+    inset 0 0 0 1px rgba(186, 230, 253, 0.16);
+  backdrop-filter: blur(30px) saturate(1.8);
+}
+
+html[data-theme="liquid"] .dialog-surface,
+html[data-theme="liquid"] .popover-surface,
+html[data-theme="liquid"] .search-palette-panel,
+html[data-theme="liquid"] .toast-item {
+  border-color: rgba(186, 230, 253, 0.2);
+  background: linear-gradient(
+    145deg,
+    rgba(20, 42, 76, 0.9) 0%,
+    rgba(8, 20, 40, 0.94) 100%
+  );
+  box-shadow:
+    0 26px 72px rgba(2, 8, 22, 0.68),
+    inset 0 1px 0.5px rgba(255, 255, 255, 0.36),
+    inset 0 -1px 0.5px rgba(125, 211, 252, 0.16);
+  backdrop-filter: blur(34px) saturate(1.85);
+}
+
+html[data-theme="liquid"] .card-row-surface {
+  border-color: rgba(186, 230, 253, 0.15);
+  background: linear-gradient(
+    135deg,
+    rgba(18, 38, 68, 0.62) 0%,
+    rgba(9, 21, 41, 0.72) 100%
+  );
+  box-shadow:
+    inset 0 1px 0.5px rgba(255, 255, 255, 0.22),
+    0 12px 28px -12px rgba(2, 8, 22, 0.45);
+}
+html[data-theme="liquid"] .card-row-surface--interactive:hover {
+  border-color: rgba(186, 230, 253, 0.28);
+  background: linear-gradient(
+    135deg,
+    rgba(24, 50, 88, 0.72) 0%,
+    rgba(12, 27, 52, 0.82) 100%
+  );
+}
+html[data-theme="liquid"] .card-row-surface--danger {
+  border-color: color-mix(in srgb, var(--danger) 32%, transparent);
+}
+html[data-theme="liquid"] .card-row-surface--warn {
+  border-color: color-mix(in srgb, var(--warn) 34%, transparent);
+}
+
+html[data-theme="liquid"] .sub-hero-card {
+  background: #081529;
+  border-color: rgba(186, 230, 253, 0.18);
+  box-shadow:
+    0 24px 68px -16px rgba(2, 8, 22, 0.65),
+    inset 0 1px 0.5px rgba(255, 255, 255, 0.28);
+}
+html[data-theme="liquid"] .sub-hero-tint {
+  background: linear-gradient(
+    90deg,
+    rgba(6, 16, 31, 0.96) 0%,
+    rgba(8, 20, 40, 0.88) 54%,
+    rgba(12, 28, 54, 0.8) 100%
+  );
+}
+
+html[data-theme="liquid"] .page-nav-btn {
+  border-color: rgba(186, 230, 253, 0.22);
+  background: rgba(8, 20, 40, 0.56);
+  color: rgba(244, 249, 255, 0.92);
+  box-shadow: inset 0 1px 0.5px rgba(255, 255, 255, 0.28);
+  backdrop-filter: blur(16px) saturate(1.6);
+}
+html[data-theme="liquid"] .page-nav-btn:hover {
+  border-color: rgba(224, 242, 254, 0.36);
+  background: rgba(14, 32, 60, 0.74);
+  color: #ffffff;
+}
+html[data-theme="liquid"] .page-nav-btn[data-active="true"],
+html[data-theme="liquid"] .page-nav-btn[data-state="open"] {
+  border-color: rgba(224, 242, 254, 0.42);
+  background: rgba(18, 42, 78, 0.84);
+  color: #ffffff;
+}
+
+html[data-theme="liquid"] .input-glass {
+  border-color: rgba(186, 230, 253, 0.2);
+  background: rgba(8, 20, 40, 0.52);
+}
+html[data-theme="liquid"] .input-glass:focus {
+  border-color: var(--accent);
+}
+
+html[data-theme="liquid"] .arrival-calendar-surface {
+  border-color: rgba(186, 230, 253, 0.2);
+  background: linear-gradient(
+    135deg,
+    rgba(18, 40, 72, 0.62) 0%,
+    rgba(9, 22, 43, 0.52) 55%,
+    rgba(30, 27, 75, 0.48) 100%
+  );
+  box-shadow:
+    0 22px 56px -14px rgba(2, 8, 22, 0.56),
+    inset 0 1px 0.5px rgba(255, 255, 255, 0.38),
+    inset 0 -1px 0.5px rgba(125, 211, 252, 0.2);
+  backdrop-filter: blur(30px) saturate(1.85);
+}
+
+html[data-theme="liquid"] .section-sticky-bar {
+  border-color: rgba(186, 230, 253, 0.18);
+  background: linear-gradient(
+    135deg,
+    rgba(16, 36, 66, 0.78) 0%,
+    rgba(8, 20, 40, 0.72) 100%
+  );
+  box-shadow:
+    0 12px 30px -10px rgba(2, 8, 22, 0.5),
+    inset 0 1px 0.5px rgba(255, 255, 255, 0.32);
+  backdrop-filter: blur(26px) saturate(1.75);
+}
+
+html[data-theme="liquid"] .segmented-glass {
+  border-color: rgba(186, 230, 253, 0.18);
+  background: rgba(8, 20, 40, 0.46);
+  box-shadow:
+    inset 0 1px 2px rgba(2, 8, 20, 0.42),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.08);
+  backdrop-filter: blur(26px) saturate(1.75);
+}
+html[data-theme="liquid"] .segmented-glass__item:is([aria-pressed="true"], [aria-selected="true"], [aria-checked="true"]) {
+  background: linear-gradient(
+    135deg,
+    rgba(255, 255, 255, 0.24) 0%,
+    rgba(125, 211, 252, 0.18) 100%
+  );
+  color: #ffffff;
+  box-shadow:
+    inset 0 1px 0.5px rgba(255, 255, 255, 0.48),
+    0 4px 12px -2px rgba(8, 145, 178, 0.28);
+}
+
+html[data-theme="liquid"] select option,
+html[data-theme="liquid"] select optgroup {
+  background-color: #0b182e;
+  color: var(--text);
+}
+
+html[data-theme="liquid"] .code-well {
+  border-color: rgba(186, 230, 253, 0.11);
+  background: rgba(4, 12, 26, 0.42);
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.28);
+}
+
+/* —— 水滴胶囊选中态与流光按钮 —— */
+html[data-theme="liquid"] .nav-item[data-active="true"] {
+  background: linear-gradient(
+    135deg,
+    rgba(255, 255, 255, 0.24) 0%,
+    rgba(125, 211, 252, 0.14) 55%,
+    rgba(196, 181, 253, 0.16) 100%
+  );
+  border-color: rgba(224, 242, 254, 0.3);
+  box-shadow:
+    inset 0 1px 0.5px rgba(255, 255, 255, 0.52),
+    inset 0 -1px 0.5px rgba(56, 189, 248, 0.26),
+    0 8px 22px -6px rgba(2, 12, 28, 0.52);
+}
+
+html[data-theme="liquid"] .nav-item[data-active="true"] .icon-chip {
+  background: linear-gradient(135deg, #f0f9ff 0%, #7dd3fc 55%, #ddd6fe 100%);
+  color: #061224;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.9),
+    0 4px 12px rgba(56, 189, 248, 0.3);
+}
+
+html[data-theme="liquid"] .btn-glass {
+  border-color: rgba(186, 230, 253, 0.2);
+  background: linear-gradient(
+    135deg,
+    rgba(255, 255, 255, 0.12) 0%,
+    rgba(125, 211, 252, 0.06) 100%
+  );
+  box-shadow:
+    inset 0 1px 0.5px rgba(255, 255, 255, 0.3),
+    0 4px 14px -4px rgba(2, 8, 22, 0.4);
+  backdrop-filter: blur(20px) saturate(1.6);
+}
+html[data-theme="liquid"] .btn-glass:hover {
+  border-color: rgba(224, 242, 254, 0.34);
+  background: linear-gradient(
+    135deg,
+    rgba(255, 255, 255, 0.18) 0%,
+    rgba(125, 211, 252, 0.12) 100%
+  );
+}
+
+html[data-theme="liquid"] .btn-accent {
+  background: linear-gradient(135deg, #f0f9ff 0%, #bae6fd 50%, #ddd6fe 100%);
+  color: #071426;
+  box-shadow:
+    0 8px 24px -4px rgba(56, 189, 248, 0.35),
+    inset 0 1px 0.5px rgba(255, 255, 255, 0.92);
+}
+html[data-theme="liquid"] .btn-accent:disabled {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text-faint);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.09);
+  filter: none;
+  transform: none;
+  opacity: 1;
+  cursor: not-allowed;
+}
+html[data-theme="liquid"] .btn-glass:disabled {
+  background: rgba(255, 255, 255, 0.04);
+  border-color: rgba(255, 255, 255, 0.08);
+  color: var(--text-faint);
+  box-shadow: none;
+  filter: none;
+  transform: none;
+  opacity: 1;
+  cursor: not-allowed;
+}

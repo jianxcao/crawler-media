@@ -18,7 +18,7 @@ pub(super) struct SeasonAccess {
     pub(super) capture_engine: Arc<dyn FingerprintCaptureEngine>,
     pub(super) gate: MetadataPriorityGate,
     pub(super) timings: ProbeTimingLedger,
-    cancelled_dispatches: Mutex<Vec<String>>,
+    cancelled_dispatches: Mutex<Vec<(String, Option<String>)>>,
 }
 
 impl SeasonAccess {
@@ -40,13 +40,15 @@ impl SeasonAccess {
 
     pub(super) fn cancel_unit(&self, unit: &ProbeUnit, reason: &str) {
         let ledger_id = unit.row.file.file_id.to_string();
-        self.cancelled_dispatches.lock().push(ledger_id.clone());
+        self.cancelled_dispatches
+            .lock()
+            .push((ledger_id.clone(), unit.job_id.clone()));
         let Some(job_id) = unit.job_id.as_deref() else {
             return;
         };
         let result = self.store.library_write(|store| {
             let (job, _, all_done) = store.cancel_probe_unit(job_id, &ledger_id, reason)?;
-            if all_done && job.succeeded == 0 {
+            if all_done && job.succeeded == 0 && job.failed == 0 && job.partial == 0 {
                 store.cancel_probe_job(job_id, reason)?;
             }
             store.get_probe_job(job_id)
@@ -55,9 +57,11 @@ impl SeasonAccess {
             Ok(Some(job)) => {
                 if !job.is_active() {
                     if let Ok(units) = self.store.probe_job_units(job_id) {
-                        self.cancelled_dispatches
-                            .lock()
-                            .extend(units.into_iter().map(|unit| unit.ledger_id));
+                        self.cancelled_dispatches.lock().extend(
+                            units
+                                .into_iter()
+                                .map(|unit| (unit.ledger_id, Some(job_id.to_string()))),
+                        );
                     }
                     crate::probe_manager::timings::log_terminal_job(
                         &self.store_access(),
@@ -99,8 +103,12 @@ pub async fn run_adaptive_season_pipeline(
         .await
         .map_err(|error| format!("season worker failed: {error}"))?;
     let mut seen = manager.seen.lock();
-    for ledger_id in cancelled {
-        seen.remove(&ledger_id);
+    for (ledger_id, job_id) in cancelled {
+        if let Some(job_id) = job_id {
+            crate::probe_manager::remove_seen_entry_if_job(&mut seen, &ledger_id, &job_id);
+        } else {
+            seen.remove(&ledger_id);
+        }
     }
     result
 }

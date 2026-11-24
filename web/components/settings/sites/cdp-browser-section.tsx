@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import {
   fetchBrowserSettings,
@@ -13,6 +13,9 @@ import {
   updateBrowserSettings,
 } from "@/lib/api/browser-settings";
 import { HttpError } from "@/lib/http";
+
+const OBSCURA_POLL_INTERVAL_MS = 1000;
+const OBSCURA_POLL_MAX_ATTEMPTS = 10;
 
 const NOT_STARTED_REASON_LABELS: Record<string, string> = {
   switch_off: "Browser 开关未开启",
@@ -44,12 +47,72 @@ export function CdpBrowserSection() {
   const [incompatible, setIncompatible] = useState<Record<string, string>>({});
   const [syncResult, setSyncResult] = useState<SyncCdpData | null>(null);
 
+  const mountedRef = useRef(true);
+  const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pollTokenRef = useRef(0);
+
+  function stopObscuraPolling() {
+    pollTokenRef.current += 1;
+    if (pollTimerRef.current !== null) {
+      clearTimeout(pollTimerRef.current);
+      pollTimerRef.current = null;
+    }
+  }
+
+  function startObscuraPolling() {
+    stopObscuraPolling();
+    const token = pollTokenRef.current;
+    let attempts = 0;
+
+    const scheduleNext = () => {
+      if (!mountedRef.current || pollTokenRef.current !== token) return;
+      if (attempts >= OBSCURA_POLL_MAX_ATTEMPTS) return;
+      pollTimerRef.current = setTimeout(async () => {
+        pollTimerRef.current = null;
+        if (!mountedRef.current || pollTokenRef.current !== token) return;
+        attempts += 1;
+        try {
+          const next = await fetchObscuraStatus();
+          if (!mountedRef.current || pollTokenRef.current !== token) return;
+          if (next) {
+            setObscuraStatus(next);
+            if (next.running || (!next.downloading && Boolean(next.last_error))) {
+              return;
+            }
+          }
+        } catch {
+          if (!mountedRef.current || pollTokenRef.current !== token) return;
+        }
+        scheduleNext();
+      }, OBSCURA_POLL_INTERVAL_MS);
+    };
+
+    scheduleNext();
+  }
+
+  async function saveBrowserSettings() {
+    const data = await updateBrowserSettings({
+      cdp: { enabled: cdpEnabled, url: cdpUrl.trim() },
+      obscura: { install: obscuraInstall },
+      user_agent: userAgent,
+    });
+    if (data?.user_agent) setUserAgent(data.user_agent);
+    if (data?.managed_browser_sites !== undefined) {
+      setManagedBrowserSites(data.managed_browser_sites ?? null);
+    }
+    if (data?.incompatible_endpoints !== undefined) {
+      setIncompatible(data.incompatible_endpoints ?? {});
+    }
+    return data;
+  }
+
   async function loadData() {
     try {
       const [settings, status] = await Promise.all([
         fetchBrowserSettings(),
         fetchObscuraStatus(),
       ]);
+      if (!mountedRef.current) return { settings, status };
       if (settings) {
         setCdpEnabled(settings.cdp?.enabled ?? false);
         setCdpUrl(settings.cdp?.url ?? "");
@@ -63,29 +126,37 @@ export function CdpBrowserSection() {
       if (status) {
         setObscuraStatus(status);
       }
+      return { settings, status };
     } catch (e) {
-      setMsg({ tone: "error", text: `加载配置失败: ${errorText(e)}` });
+      if (mountedRef.current) {
+        setMsg({ tone: "error", text: `加载配置失败: ${errorText(e)}` });
+      }
+      return { settings: null, status: null };
     } finally {
-      setLoading(false);
+      if (mountedRef.current) setLoading(false);
     }
   }
 
   useEffect(() => {
-    loadData();
+    mountedRef.current = true;
+    void loadData();
+    return () => {
+      mountedRef.current = false;
+      stopObscuraPolling();
+    };
   }, []);
 
   async function handleSave() {
     setSaving(true);
     setMsg(null);
+    stopObscuraPolling();
     try {
-      const data = await updateBrowserSettings({
-        cdp: { enabled: cdpEnabled, url: cdpUrl.trim() },
-        obscura: { install: obscuraInstall },
-        user_agent: userAgent,
-      });
+      await saveBrowserSettings();
       setMsg({ tone: "success", text: "浏览器配置已保存，受管 Obscura 将按需在后台启停" });
-      if (data?.user_agent) setUserAgent(data.user_agent);
-      await loadData();
+      const { status } = await loadData();
+      if (cdpEnabled && cdpUrl.trim().length === 0 && !status?.running) {
+        startObscuraPolling();
+      }
     } catch (e) {
       setMsg({ tone: "error", text: errorText(e) || "保存失败" });
     } finally {
@@ -93,14 +164,41 @@ export function CdpBrowserSection() {
     }
   }
 
-  async function handleObscuraAction(action: "start" | "stop") {
+  async function handleStartObscura() {
     setObscuraActing(true);
     setMsg(null);
+    stopObscuraPolling();
     try {
-      const data = action === "start" ? await startObscura() : await stopObscura();
+      await saveBrowserSettings();
+      const data = await startObscura();
       setMsg({
         tone: "success",
-        text: action === "start" ? "已提交启动，Obscura 正在后台安装/启动" : "已停止 Obscura 浏览器服务",
+        text: "已提交启动，Obscura 正在后台安装/启动",
+      });
+      setObscuraStatus(data);
+      if (!data?.running) {
+        startObscuraPolling();
+      }
+    } catch (e) {
+      setMsg({ tone: "error", text: errorText(e) || "操作失败" });
+    } finally {
+      setObscuraActing(false);
+    }
+  }
+
+  async function handleObscuraAction(action: "start" | "stop") {
+    if (action === "start") {
+      await handleStartObscura();
+      return;
+    }
+    setObscuraActing(true);
+    setMsg(null);
+    stopObscuraPolling();
+    try {
+      const data = await stopObscura();
+      setMsg({
+        tone: "success",
+        text: "已停止 Obscura 浏览器服务",
       });
       setObscuraStatus(data);
     } catch (e) {
@@ -115,6 +213,7 @@ export function CdpBrowserSection() {
     setMsg(null);
     setSyncResult(null);
     try {
+      await saveBrowserSettings();
       const data = await syncCdp();
       setSyncResult(data);
       setMsg({
@@ -144,8 +243,8 @@ export function CdpBrowserSection() {
         <div
           className={`rounded-xl border px-4 py-3 text-body ${
             msg.tone === "success"
-              ? "border-[#51cf66]/30 bg-[#51cf66]/10 text-[#51cf66]"
-              : "border-[#ff6b6b]/30 bg-[#ff6b6b]/10 text-[#ff6b6b]"
+              ? "border-[var(--ok)]/30 bg-[var(--ok)]/10 text-[var(--ok)]"
+              : "border-[var(--danger)]/30 bg-[var(--danger)]/10 text-[var(--danger)]"
           }`}
         >
           {msg.text}
@@ -175,7 +274,7 @@ export function CdpBrowserSection() {
               onChange={(e) => setCdpEnabled(e.target.checked)}
               className="peer sr-only"
             />
-            <div className="peer h-6 w-11 rounded-full bg-white/10 after:absolute after:left-[2px] after:top-[2px] after:h-5 after:w-5 after:rounded-full after:bg-white after:transition-all after:content-[''] peer-checked:bg-[var(--accent)] peer-checked:after:translate-x-full" />
+            <div className="peer h-6 w-11 rounded-full bg-white/10 after:absolute after:left-[2px] after:top-[2px] after:h-5 after:w-5 after:rounded-full after:bg-[#ffffff] after:transition-all after:content-[''] peer-checked:bg-[var(--accent)] peer-checked:after:translate-x-full peer-checked:after:bg-[var(--accent-ink)]" />
           </label>
         </div>
 
@@ -241,13 +340,13 @@ export function CdpBrowserSection() {
               <span
                 className={`inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-caption font-medium ${
                   obscuraStatus.running
-                    ? "bg-[#51cf66]/10 text-[#51cf66]"
+                    ? "bg-[var(--ok)]/10 text-[var(--ok)]"
                     : "bg-white/10 text-[var(--text-muted)]"
                 }`}
               >
                 <span
                   className={`h-2 w-2 rounded-full ${
-                    obscuraStatus.running ? "bg-[#51cf66]" : "bg-white/30"
+                    obscuraStatus.running ? "bg-[var(--ok)]" : "bg-white/30"
                   }`}
                 />
                 {obscuraStatus.running
@@ -282,13 +381,13 @@ export function CdpBrowserSection() {
                 </div>
               )}
               {obscuraStatus?.last_error && (
-                <div className="text-[#ff6b6b]">
+                <div className="text-[var(--danger)]">
                   <span className="text-[var(--text-faint)]">最近错误: </span>
                   {obscuraStatus.last_error}
                 </div>
               )}
               {Object.entries(incompatible).map(([endpoint, reason]) => (
-                <div key={endpoint} className="text-[#ff6b6b]">
+                <div key={endpoint} className="text-[var(--danger)]">
                   <span className="text-[var(--text-faint)]">不兼容端点 {endpoint}: </span>
                   {reason}
                 </div>

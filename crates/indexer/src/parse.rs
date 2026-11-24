@@ -123,22 +123,29 @@ pub(crate) fn parse_html(
 pub(crate) fn parse_mteam_items(body: &str) -> Result<Vec<MTeamItem>, IndexerError> {
     let parsed: MTeamResponse =
         serde_json::from_str(body).map_err(|err| IndexerError::Parse(err.to_string()))?;
-    // M-Team signals rate limits and bad keys in the envelope rather than the
-    // HTTP status; surface its own message instead of an empty result list.
-    if let Some(code) = parsed.code.as_deref()
-        && code != "0"
-    {
-        return Err(IndexerError::Parse(format!(
-            "M-Team 返回错误 {code}：{}",
-            parsed.message.unwrap_or_else(|| "无描述".into())
-        )));
+    // M-Team signals rate limits and bad keys in the envelope rather than (or
+    // alongside) the HTTP status; surface its own message instead of an empty list.
+    check_mteam_envelope(
+        parsed.success,
+        parsed.code.as_deref(),
+        parsed.message.as_deref(),
+    )?;
+    match parsed.data {
+        None | Some(serde_json::Value::Null) => Ok(Vec::new()),
+        Some(payload) => serde_json::from_value::<MTeamData>(payload)
+            .map(MTeamData::into_items)
+            .map_err(|err| IndexerError::Parse(err.to_string())),
     }
-    Ok(parsed.data.map(|payload| payload.data).unwrap_or_default())
 }
 
 pub(crate) fn parse_mteam_download(body: &str) -> Result<String, IndexerError> {
     let parsed: MTeamDownloadResponse =
         serde_json::from_str(body).map_err(|err| IndexerError::Parse(err.to_string()))?;
+    check_mteam_envelope(
+        parsed.success,
+        parsed.code.as_deref(),
+        parsed.message.as_deref(),
+    )?;
     match parsed.data {
         Some(url) if !url.is_empty() => Ok(url),
         _ => Err(IndexerError::Parse(format!(
@@ -146,6 +153,23 @@ pub(crate) fn parse_mteam_download(body: &str) -> Result<String, IndexerError> {
             parsed.message.unwrap_or_else(|| "无描述".into())
         ))),
     }
+}
+
+fn check_mteam_envelope(
+    success: Option<bool>,
+    code: Option<&str>,
+    message: Option<&str>,
+) -> Result<(), IndexerError> {
+    let code = code.map(str::trim).filter(|c| !c.is_empty());
+    let code_failed = code.is_some_and(|c| c != "0");
+    if !code_failed && success != Some(false) {
+        return Ok(());
+    }
+    let msg = message.unwrap_or("无描述");
+    let label = code.filter(|c| *c != "0").unwrap_or("error");
+    Err(IndexerError::Parse(format!(
+        "M-Team 返回错误 {label}：{msg}"
+    )))
 }
 
 impl MTeamItem {
@@ -193,7 +217,12 @@ pub(crate) fn parse_hdarea_torrents(
         parsed.message.as_deref(),
     )?;
     let base = profile.effective_site_base_url(&site.url);
-    let items = parsed.data.map(HdareaData::into_items).unwrap_or_default();
+    let items = match parsed.data {
+        None | Some(serde_json::Value::Null) => Vec::new(),
+        Some(val) => serde_json::from_value::<HdareaData>(val)
+            .map(HdareaData::into_items)
+            .map_err(|err| IndexerError::Parse(err.to_string()))?,
+    };
     Ok(items
         .into_iter()
         .map(|item| item.into_torrent(site.id, &base))
@@ -235,6 +264,7 @@ fn check_hdarea_envelope(
     http_code: Option<u16>,
     message: Option<&str>,
 ) -> Result<(), IndexerError> {
+    let code = code.map(str::trim).filter(|c| !c.is_empty());
     let code_failed = code.is_some_and(|c| c != "0");
     if !code_failed && success != Some(false) {
         return Ok(());
@@ -246,7 +276,7 @@ fn check_hdarea_envelope(
             "HDArea API 认证失败（HTTP {status}）：{msg}"
         )));
     }
-    let label = code.unwrap_or("error");
+    let label = code.filter(|c| *c != "0").unwrap_or("error");
     Err(IndexerError::Parse(format!(
         "HDArea API 返回错误 {label}：{msg}"
     )))
@@ -459,20 +489,53 @@ where
     })
 }
 
-#[derive(Deserialize)]
-struct MTeamResponse {
-    #[serde(default)]
-    code: Option<String>,
-    #[serde(default)]
-    message: Option<String>,
-    #[serde(default)]
-    data: Option<MTeamData>,
+fn de_vec_or_null<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de>,
+{
+    Option::<Vec<T>>::deserialize(deserializer).map(Option::unwrap_or_default)
+}
+
+fn de_image_list<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(de_vec_or_null::<D, Option<String>>(deserializer)?
+        .into_iter()
+        .flatten()
+        .filter(|s| !s.trim().is_empty())
+        .collect())
 }
 
 #[derive(Deserialize)]
-struct MTeamData {
+struct MTeamResponse {
+    #[serde(default, deserialize_with = "de_opt_bool")]
+    success: Option<bool>,
+    #[serde(default, deserialize_with = "de_opt_string")]
+    code: Option<String>,
+    #[serde(default, deserialize_with = "de_opt_string")]
+    message: Option<String>,
     #[serde(default)]
-    data: Vec<MTeamItem>,
+    data: Option<serde_json::Value>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum MTeamData {
+    Envelope {
+        #[serde(default, deserialize_with = "de_vec_or_null")]
+        data: Vec<MTeamItem>,
+    },
+    Items(Vec<MTeamItem>),
+}
+
+impl MTeamData {
+    fn into_items(self) -> Vec<MTeamItem> {
+        match self {
+            Self::Envelope { data } | Self::Items(data) => data,
+        }
+    }
 }
 
 #[derive(Clone, Deserialize)]
@@ -492,7 +555,7 @@ pub(crate) struct MTeamItem {
     size: Option<String>,
     #[serde(default, alias = "createdDate", deserialize_with = "de_opt_string")]
     upload_time: Option<String>,
-    #[serde(default, rename = "imageList")]
+    #[serde(default, rename = "imageList", deserialize_with = "de_image_list")]
     image_list: Vec<String>,
     #[serde(default)]
     status: Option<MTeamStatus>,
@@ -514,7 +577,11 @@ struct MTeamStatus {
 
 #[derive(Deserialize)]
 struct MTeamDownloadResponse {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_opt_bool")]
+    success: Option<bool>,
+    #[serde(default, deserialize_with = "de_opt_string")]
+    code: Option<String>,
+    #[serde(default, deserialize_with = "de_opt_string")]
     message: Option<String>,
     #[serde(default, deserialize_with = "de_opt_string")]
     data: Option<String>,
@@ -569,14 +636,14 @@ struct HdareaSearchResponse {
     #[serde(default, deserialize_with = "de_opt_string")]
     message: Option<String>,
     #[serde(default)]
-    data: Option<HdareaData>,
+    data: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum HdareaData {
     Envelope {
-        #[serde(default)]
+        #[serde(default, deserialize_with = "de_vec_or_null")]
         items: Vec<HdareaItem>,
     },
     Items(Vec<HdareaItem>),

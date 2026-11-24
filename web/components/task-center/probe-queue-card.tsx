@@ -71,7 +71,7 @@ export function ProbeQueueCard({
               {status.libraries.map((lib) => (
                 <span
                   key={lib.library_id}
-                  className="tnum inline-flex items-center gap-1 rounded-lg border border-white/10 bg-black/25 px-2.5 py-1 text-caption text-white/80"
+                  className="code-well tnum inline-flex items-center gap-1 rounded-lg px-2.5 py-1 text-caption text-white/80"
                 >
                   <span>
                     {lib.library_name}：{formatCount(lib.total_pending)} 项
@@ -88,7 +88,7 @@ export function ProbeQueueCard({
               type="button"
               disabled={busy}
               onClick={onResume}
-              className="rounded-xl bg-amber-400/90 px-3.5 py-1.5 text-ui font-semibold text-[#1a1204] transition hover:bg-amber-300 disabled:opacity-45"
+              className="rounded-xl bg-[#fbbf24] px-3.5 py-1.5 text-ui font-semibold text-[#1a1204] transition hover:bg-[#fcd34d] disabled:opacity-45"
             >
               {busyAction === "resume" ? "正在继续…" : "继续执行"}
             </button>

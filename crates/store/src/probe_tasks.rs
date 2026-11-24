@@ -3,6 +3,7 @@ mod optional;
 #[path = "probe_tasks/queue_control.rs"]
 mod queue_control;
 
+pub(crate) use counters::reconcile_counts_in_transaction;
 pub use queue_control::{ProbeCancelSummary, ProbeLibraryQueueSummary, ProbeQueueSummary};
 
 use rusqlite::{OptionalExtension, params};
@@ -400,6 +401,7 @@ pub(crate) fn probe_job_terminal_status(
         return Some("failed");
     }
     match kind {
+        "marker_refresh" if partial > 0 => Some("failed"),
         "marker_refresh" if cancelled < total => None,
         _ if cancelled > 0 => Some("cancelled"),
         _ if partial > 0 => Some("partial"),

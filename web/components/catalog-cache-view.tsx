@@ -1,5 +1,6 @@
 "use client";
 
+import { useConfirm, useToast } from "@/components/feedback";
 import { PosterImage } from "@/components/poster-image";
 import { useEffect, useMemo, useState, useTransition } from "react";
 import {
@@ -26,6 +27,8 @@ const KIND_TABS = [
 const PAGE_SIZE = 18;
 
 export function CatalogCacheView() {
+  const confirm = useConfirm();
+  const toast = useToast();
   const [items, setItems] = useState<MediaCacheItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -53,13 +56,15 @@ export function CatalogCacheView() {
     loadData();
   }, []);
 
-  const handleDelete = (item: MediaCacheItem) => {
+  const handleDelete = async (item: MediaCacheItem) => {
     const keyCount = item.cached_keys?.length ?? 1;
-    if (
-      !window.confirm(
-        `确定要清除《${item.title}》的本地元数据缓存吗？\n将清除包括基础信息、海报与剧照等 ${keyCount} 项缓存。`,
-      )
-    ) {
+    const confirmed = await confirm({
+      title: `确定要清除《${item.title}》的本地元数据缓存吗？`,
+      description: `将清除包括基础信息、海报与剧照等 ${keyCount} 项缓存。`,
+      confirmLabel: "清除",
+      tone: "danger",
+    });
+    if (!confirmed) {
       return;
     }
     startTransition(async () => {
@@ -67,8 +72,9 @@ export function CatalogCacheView() {
         setDeletingId(item.id);
         await deleteMediaCache(item.source, item.cached_keys);
         await loadData();
+        toast.success(`已清除《${item.title}》的元数据缓存`);
       } catch (e) {
-        alert("清除缓存失败: " + (e as Error).message);
+        toast.error("清除缓存失败: " + (e as Error).message);
       } finally {
         setDeletingId(null);
       }
@@ -231,7 +237,7 @@ export function CatalogCacheView() {
                 className="group relative flex flex-col overflow-hidden rounded-xl border border-white/10 bg-white/[0.02] transition hover:border-white/20 hover:bg-white/[0.04]"
               >
                 {/* 竖版电影海报 (2:3 黄金比例) */}
-                <div className="relative aspect-[2/3] w-full overflow-hidden bg-black/40">
+                <div className="dark-media-surface relative aspect-[2/3] w-full overflow-hidden bg-[#141824]">
                   {item.poster_url ? (
                     <PosterImage
                       src={imageUrl(item.poster_url, "poster-card")}
@@ -253,7 +259,7 @@ export function CatalogCacheView() {
                       </span>
                       <button
                         type="button"
-                        onClick={() => handleDelete(item)}
+                        onClick={() => void handleDelete(item)}
                         disabled={isDeleting || isPending}
                         title="清除该条目缓存"
                         className="rounded bg-red-500/80 p-1 text-[10px] text-white hover:bg-red-500 disabled:opacity-50"

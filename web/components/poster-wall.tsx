@@ -175,7 +175,7 @@ export const InventoryCell = memo(function InventoryCell({
           <>
             <span className="pointer-events-none absolute inset-0 rounded-xl ring-2 ring-[var(--info)] ring-offset-0" />
             {/* 不用 backdrop-blur：海报墙每格一个模糊合成层会放大滚动时的 GPU 压力，底色加实即可 */}
-            <span className="pointer-events-none absolute inset-x-0 bottom-0 flex items-center gap-1.5 rounded-b-xl bg-[rgba(7,12,20,0.92)] px-2 py-1.5 text-micro font-medium text-[var(--info)]">
+            <span className="dark-media-surface pointer-events-none absolute inset-x-0 bottom-0 flex items-center gap-1.5 rounded-b-xl bg-[rgba(7,12,20,0.92)] px-2 py-1.5 text-micro font-medium text-[var(--info)]">
               <span className="size-2.5 shrink-0 animate-spin rounded-full border-[1.5px] border-[var(--info)]/30 border-t-[var(--info)]" />
               <span className="truncate">{workingLabel}</span>
             </span>
@@ -241,7 +241,7 @@ function useCellMetrics(sample: LibraryItem | undefined, frameAspect: number | u
     >
       <div ref={normalRef}>
         <InventoryCell
-          item={{ ...sample, poster_url: null }}
+          item={{ ...sample, poster_url: null, missing: false }}
           libraryId=""
           frameAspect={frameAspect}
           measuring
@@ -249,7 +249,7 @@ function useCellMetrics(sample: LibraryItem | undefined, frameAspect: number | u
       </div>
       <div ref={abnormalRef}>
         <InventoryCell
-          item={{ ...sample, poster_url: null }}
+          item={{ ...sample, poster_url: null, missing: true }}
           libraryId=""
           frameAspect={frameAspect}
           measuring
@@ -319,7 +319,9 @@ export function PosterWall<T extends LibraryItem>({
     // 一格的高 = 海报框（列宽 ÷ 比例，纯算术）+ 文字区（实测）。混排的墙里
     // 竖横两种比例的格子高度不同，靠 extraOf 把行内最高的那个算进行高
     const heightOf = (item: LibraryItem) =>
-      cellWidth / frameAspectOf(item, frameAspect) + metrics.caption;
+      cellWidth / frameAspectOf(item, frameAspect) +
+      metrics.caption +
+      (item.missing ? metrics.abnormal : 0);
     let shortest = Infinity;
     for (const item of items) shortest = Math.min(shortest, heightOf(item));
     return {

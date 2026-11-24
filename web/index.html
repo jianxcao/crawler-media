@@ -24,7 +24,7 @@
       try{var u=localStorage.getItem("crawler-media.backdrop");if(u&&u.charAt(0)==="/")document.documentElement.style.setProperty("--backdrop-image",'url("'+u+'")')}catch(e){}
     </script>
     <script>
-      try{var p=JSON.parse(localStorage.getItem("crawler-media.ui-prefs")||"null");var t=p&&p.theme;if(t==="paper"||t==="netflix"){document.documentElement.setAttribute("data-theme",t);var m=document.querySelector('meta[name="theme-color"]');if(m)m.setAttribute("content",t==="paper"?"#eef1f6":"#000000")}}catch(e){}
+      try{var p=JSON.parse(localStorage.getItem("crawler-media.ui-prefs")||"null");var t=p&&p.theme;if(t==="paper"||t==="netflix"||t==="liquid"){document.documentElement.setAttribute("data-theme",t);var m=document.querySelector('meta[name="theme-color"]');if(m)m.setAttribute("content",t==="paper"?"#eef1f6":t==="liquid"?"#06101f":"#000000")}}catch(e){}
     </script>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>

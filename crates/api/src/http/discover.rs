@@ -234,10 +234,26 @@ pub(crate) struct FilterQuery {
     page: Option<i64>,
 }
 
+fn encode_filter_value(value: &str) -> String {
+    use std::fmt::Write;
+    let mut out = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b',' | b'|' => {
+                out.push(char::from(byte));
+            }
+            _ => {
+                let _ = write!(out, "%{byte:02X}");
+            }
+        }
+    }
+    out
+}
+
 fn build_filter_query_string(kind: &str, query: &FilterQuery) -> String {
     let mut params = Vec::new();
     if let Some(genres) = query.genres.as_deref().filter(|value| !value.is_empty()) {
-        params.push(format!("with_genres={genres}"));
+        params.push(format!("with_genres={}", encode_filter_value(genres)));
     }
     // TV 且用户没指定类型时，默认排除综艺/真人秀（TMDB 的 CN origin 大量是
     // 这些，用户筛「中国剧」时几乎总是想要剧情剧而不是《奔跑吧》）。
@@ -245,7 +261,10 @@ fn build_filter_query_string(kind: &str, query: &FilterQuery) -> String {
         params.push("without_genres=10764,10767".to_string());
     }
     if let Some(country) = query.country.as_deref().filter(|value| !value.is_empty()) {
-        params.push(format!("with_origin_country={country}"));
+        params.push(format!(
+            "with_origin_country={}",
+            encode_filter_value(country)
+        ));
     }
     let is_tv = kind == "tv";
     let sort = match query.sort.as_deref() {
@@ -367,7 +386,9 @@ pub(crate) async fn discover_filtered(
         let src_bg = requested_source;
         spawn_swr_closure_refresh(&state, flight_key, move |root| {
             let catalog = select_catalog(root, src_bg.as_deref());
-            let _ = fetch_filtered_page(catalog, &kind_bg, &qs_bg, page);
+            if let Err((status, error)) = fetch_filtered_page(catalog, &kind_bg, &qs_bg, page) {
+                tracing::warn!(kind = %kind_bg, query = %qs_bg, page, status, %error, "发现筛选页后台 SWR 刷新失败");
+            }
         });
     }
 
@@ -472,9 +493,13 @@ pub(crate) async fn discover_collection(
             "collection:{}:{kind}:{normalized_id}:p{page}",
             requested_source.as_deref().unwrap_or("fanout")
         );
+        let kind_bg = kind.clone();
+        let id_bg = normalized_id.to_string();
         spawn_swr_closure_refresh(&state, flight_key, move |root| {
             let selected = select_catalog(root, requested_source.as_deref());
-            let _ = selected.collection_paged(media_kind, &section_query, page);
+            if let Err(error) = selected.collection_paged(media_kind, &section_query, page) {
+                tracing::warn!(kind = %kind_bg, collection_id = %id_bg, page, %error, "发现榜单页后台 SWR 刷新失败");
+            }
         });
     }
 
@@ -739,4 +764,25 @@ async fn enrich_items_ownership(
         .map_err(super::store_wait::StoreCallError::response)?;
     *items = enriched;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{FilterQuery, build_filter_query_string};
+
+    #[test]
+    fn filter_query_string_encodes_injected_delimiters_in_genres_and_country() {
+        let q = FilterQuery {
+            genres: Some("28,12&include_adult=true#frag".into()),
+            country: Some("CN?api_key=leak&page=9".into()),
+            ..Default::default()
+        };
+        let qs = build_filter_query_string("movie", &q);
+        assert!(!qs.contains("&include_adult="), "{qs}");
+        assert!(!qs.contains("&page="), "{qs}");
+        assert!(!qs.contains('#'), "{qs}");
+        assert!(!qs.contains('?'), "{qs}");
+        assert!(qs.starts_with("with_genres=28,12%26include_adult%3Dtrue%23frag&"));
+        assert!(qs.contains("&with_origin_country=CN%3Fapi_key%3Dleak%26page%3D9&"));
+    }
 }

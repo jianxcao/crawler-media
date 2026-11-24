@@ -6,6 +6,7 @@ pub(crate) async fn list_sites(
     State(state): State<ApiState>,
     Extension(user_id): Extension<domain::UserId>,
 ) -> Response {
+    let indexer = state.indexer.clone();
     crate::http::store_wait::store_read(&state, &[store::Db::App], move |store| {
         let sites = match store.list_sites() {
             Ok(sites) => sites,
@@ -21,7 +22,10 @@ pub(crate) async fn list_sites(
         ok(Value::Array(
             sites
                 .iter()
-                .map(|site| site_public(site, auth_type(site), admin))
+                .map(|site| {
+                    let auth = auth_type_for(site, indexer.profile(&site.profile_id));
+                    site_public(site, auth, admin)
+                })
                 .collect(),
         ))
         .into_response()
@@ -49,16 +53,13 @@ pub(crate) async fn get_site(
         Ok(id) => id,
         Err(_) => return err(StatusCode::BAD_REQUEST, "site.invalid", "站点 id 无效"),
     };
+    let indexer = state.indexer.clone();
     crate::http::store_wait::store_read(&state, &[store::Db::App], move |store| {
         let Some(site) = store.get_site(id).ok().flatten() else {
             return err(StatusCode::NOT_FOUND, "site.missing", "站点不存在");
         };
-        ok(site_public(
-            &site,
-            auth_type(&site),
-            site_admin(&store, user_id),
-        ))
-        .into_response()
+        let auth = auth_type_for(&site, indexer.profile(&site.profile_id));
+        ok(site_public(&site, auth, site_admin(&store, user_id))).into_response()
     })
     .await
     .unwrap_or_else(|error| error.response())

@@ -149,7 +149,7 @@ export function ImageLightbox({
       aria-modal="true"
       aria-label={heading ? `图片浏览：${heading}` : "图片浏览"}
       onClick={onClose}
-      className="viewport-overlay-height fixed inset-x-0 top-0 z-[70] flex flex-col bg-black/85 backdrop-blur-md"
+      className="dark-media-surface viewport-overlay-height fixed inset-x-0 top-0 z-[70] flex flex-col bg-black/85 backdrop-blur-md"
     >
       {/* 顶栏：计数 + 标题 + 关闭 */}
       <div className="flex shrink-0 flex-wrap items-center gap-3 px-4 py-3 text-white/85 [padding-top:calc(0.75rem+var(--safe-top))] max-md:gap-2 max-md:px-3">

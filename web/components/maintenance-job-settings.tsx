@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { useToast } from "@/components/feedback";
 import {
   previewMaintenance,
   updateMaintenanceConfig,
@@ -44,6 +45,7 @@ export function MaintenanceJobSettings({
   onSaved: () => void | Promise<void>;
   onError?: (message: string) => void;
 }) {
+  const toast = useToast();
   const isRetention = RETENTION_KINDS.has(job.kind);
   const isDataRetention = job.kind === DATA_RETENTION_KIND;
   const isDatabase = job.kind === "database_maintenance";
@@ -97,6 +99,7 @@ export function MaintenanceJobSettings({
         qoe_days: qoeDays,
         transient_cache_days: transientCacheDays,
         probe_days: probeDays,
+        operations_days: readNumber(summary?.operations_days, 30),
       };
     }
     return { version: summary?.version ?? 1, retention_days: retentionDays, dry_run: dryRun };
@@ -124,7 +127,7 @@ export function MaintenanceJobSettings({
 
   const report = (message: string) => {
     if (onError) onError(message);
-    else alert(message);
+    else toast.error(message);
   };
 
   const daysInvalid = (days: number) =>
@@ -196,7 +199,7 @@ export function MaintenanceJobSettings({
                 max={MAX_RETENTION_DAYS}
                 value={field.value}
                 onChange={(e) => field.set(parseInt(e.target.value, 10) || 0)}
-                className="w-24 rounded border border-white/20 bg-black/40 px-2 py-1 text-xs text-white"
+                className="w-24 rounded border border-[var(--line)] bg-[var(--surface-inset)] px-2 py-1 text-xs text-[var(--text)]"
               />
             </label>
           ))}
@@ -262,7 +265,7 @@ export function MaintenanceJobSettings({
               max={MAX_RETENTION_DAYS}
               value={retentionDays}
               onChange={(e) => setRetentionDays(parseInt(e.target.value, 10) || 0)}
-              className="w-24 rounded border border-white/20 bg-black/40 px-2 py-1 text-xs text-white"
+              className="w-24 rounded border border-[var(--line)] bg-[var(--surface-inset)] px-2 py-1 text-xs text-[var(--text)]"
             />
             <span className="text-white/40">
               {MIN_RETENTION_DAYS}..{MAX_RETENTION_DAYS}；永久保留请直接关闭该任务
@@ -337,7 +340,7 @@ export function MaintenanceJobSettings({
           type="button"
           onClick={handleSave}
           disabled={saving || retentionInvalid}
-          className="rounded bg-sky-500 hover:bg-sky-600 px-3 py-1 text-xs font-semibold text-white transition disabled:opacity-50"
+          className="rounded bg-sky-700 px-3 py-1 text-xs font-semibold text-[#ffffff] transition hover:bg-sky-600 disabled:opacity-50"
         >
           {saving ? "保存中..." : "保存维护配置"}
         </button>

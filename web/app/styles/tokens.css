@@ -102,8 +102,14 @@
   --accent: #cdd6e6; /* 冷银 */
   --accent-strong: #eef2f8; /* 亮银高光 */
   --accent-2: #9fb0c9; /* 银蓝暗侧 */
+  --accent-ink: #141821; /* 压在 --accent / --accent-2 实心徽标上的墨字色 */
   --accent-soft: rgba(205, 214, 230, 0.14);
   --accent-ring: rgba(200, 218, 255, 0.55); /* 聚焦环：极淡冷光（借鉴 Bing 蓝环，但去色） */
+
+  /* —— 浮层提示与列表渐隐底色（各主题同步覆盖） —— */
+  --tooltip-bg: rgba(16, 18, 26, 0.97);
+  --tooltip-stroke: rgba(243, 245, 249, 0.12);
+  --row-fade-bg: rgba(20, 23, 31, 0.98);
 
   /* —— 行内玻璃填充（可点击行的 hover / active） —— */
   --glass-fill: rgba(255, 255, 255, 0.04);
@@ -137,6 +143,7 @@
    * 已收齐」本来就是这个绿，token 该描述现实，而不是和现实唱反调。
    */
   --ok: #4ade80;
+  --ok-ink: #07120c;
   --info: #7fb0ff;
   --warn: #f5c451;
   --danger: #ff6b6b;

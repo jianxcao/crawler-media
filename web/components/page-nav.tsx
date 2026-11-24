@@ -37,7 +37,7 @@ const REVEAL_END = 82;
  * 图标同比例缩放（约为键径的一半），改动时两档要一起看。
  */
 export const PAGE_NAV_BUTTON_CLASS =
-  "grid size-9 shrink-0 place-items-center rounded-full border border-white/[0.09] bg-black/30 text-white/85 backdrop-blur-md transition hover:bg-black/50 hover:text-white active:scale-[0.94] pointer-coarse:size-11";
+  "page-nav-btn grid size-9 shrink-0 place-items-center rounded-full transition active:scale-[0.94] pointer-coarse:size-11";
 
 /**
  * 找到本组件所在的滚动容器（全站页面都是「外壳固定 + 内层 overflow-y-auto」，

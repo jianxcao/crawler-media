@@ -89,16 +89,39 @@ pub(crate) fn resolve_transfer_plan(
         .map_err(|error| error.to_string())?
 }
 
+fn plan_naming_and_nfo(
+    kind: domain::MediaKind,
+    scrape: bool,
+    scrape_setting: &store::RawScrapeSettings,
+) -> (String, bool) {
+    let setting = match scrape_setting.value.as_deref() {
+        Some(raw) => serde_json::from_str::<ScrapeConfigSetting>(raw).unwrap_or_else(|error| {
+            tracing::error!(%error, "Transfer scrape configuration is corrupt; using defaults");
+            ScrapeConfigSetting::default()
+        }),
+        None => ScrapeConfigSetting::default(),
+    };
+    let cfg = compose_config(setting);
+    let naming = match kind {
+        domain::MediaKind::Tv => cfg.effective.compose_tv_pattern(),
+        _ => cfg.effective.compose_movie_pattern(),
+    };
+    (naming, scrape && cfg.effective.mirror_nfo)
+}
+
 fn resolve_library_plan(
     store: &store::LibraryConnection<'_>,
     media: &Media,
     subscribe: &Subscribe,
 ) -> Result<TransferPlan, String> {
     let library = match subscribe.library_id {
-        Some(id) => store.get_library(&id.to_string()),
-        None => store.default_library(media.kind),
+        Some(id) => store
+            .get_library(&id.to_string())
+            .map_err(|e| e.to_string())?,
+        None => store
+            .default_library(media.kind)
+            .map_err(|e| e.to_string())?,
     }
-    .map_err(|e| e.to_string())?
     .ok_or("目标 Library 不存在")?;
     if !store
         .library_accepts_work(&library.id)
@@ -123,18 +146,7 @@ fn resolve_library_plan(
     let scrape_setting = store
         .raw_scrape_settings()
         .map_err(|error| error.to_string())?;
-    let setting = match scrape_setting.value.as_deref() {
-        Some(raw) => serde_json::from_str::<ScrapeConfigSetting>(raw).unwrap_or_else(|error| {
-            tracing::error!(%error, "Transfer scrape configuration is corrupt; using defaults");
-            ScrapeConfigSetting::default()
-        }),
-        None => ScrapeConfigSetting::default(),
-    };
-    let cfg = compose_config(setting);
-    let naming = match media.kind {
-        domain::MediaKind::Tv => cfg.effective.compose_tv_pattern(),
-        _ => cfg.effective.compose_movie_pattern(),
-    };
+    let (naming, nfo) = plan_naming_and_nfo(media.kind, scrape, &scrape_setting);
     let fingerprint = store
         .read_fingerprint(&library.id, media.id)
         .map_err(|e| e.to_string())?;
@@ -150,7 +162,7 @@ fn resolve_library_plan(
         mode,
         naming,
         scrape,
-        nfo: scrape && cfg.effective.mirror_nfo,
+        nfo,
         published_removals: parking_lot::Mutex::default(),
     })
 }

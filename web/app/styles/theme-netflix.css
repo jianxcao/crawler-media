@@ -40,9 +40,14 @@ html[data-theme="netflix"] {
   --accent: #e50914;
   --accent-strong: #c11119; /* hover 红：Netflix 的红是 hover 变暗，不是变亮 */
   --accent-2: #b20710; /* pressed / 品牌暗红 */
+  --accent-ink: #ffffff;
   --accent-soft: rgba(229, 9, 20, 0.15);
   /* Netflix 焦点环 = 2px 白描边（生产 CSS 证实），不是冷光 */
   --accent-ring: rgba(255, 255, 255, 0.7);
+
+  --tooltip-bg: #181818;
+  --tooltip-stroke: var(--line);
+  --row-fade-bg: #181818;
 
   /* —— 行内填充（hover / active） —— */
   --glass-fill: rgba(255, 255, 255, 0.06);
@@ -52,6 +57,7 @@ html[data-theme="netflix"] {
   /* —— 状态语义色（Netflix 化；--danger 刻意不等于品牌红，红点/红字是状态
         信号，与品牌色混用会让满屏红失去语义，见 §4 备注） —— */
   --ok: #46d369;
+  --ok-ink: #07120c;
   --info: #6ba6ff;
   --warn: #e87c03;
   --danger: #eb3942;
@@ -174,6 +180,78 @@ html[data-theme="netflix"] .css-glass {
   background: var(--surface-raised);
   box-shadow: none;
 }
+html[data-theme="netflix"] button.css-glass:hover:not(:disabled) {
+  border-color: var(--line-strong);
+  background: #222222;
+  box-shadow: none;
+}
+html[data-theme="netflix"] .css-glass[aria-pressed="true"],
+html[data-theme="netflix"] button.css-glass[aria-pressed="true"]:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--accent) 65%, transparent);
+  background: linear-gradient(180deg, rgba(229, 9, 20, 0.16) 0%, #1c1415 100%);
+  box-shadow: inset 0 0 0 1px rgba(229, 9, 20, 0.22);
+}
+
+html[data-theme="netflix"] .segmented-glass {
+  border-color: var(--line);
+  background: #141414;
+  backdrop-filter: none;
+}
+html[data-theme="netflix"] .segmented-glass__item:is([aria-pressed="true"], [aria-selected="true"], [aria-checked="true"]) {
+  background: rgba(255, 255, 255, 0.16);
+  color: #ffffff;
+  box-shadow: none;
+}
+
+html[data-theme="netflix"] .code-well {
+  border-color: var(--line);
+  background: #141414;
+}
+
+html[data-theme="netflix"] .modal-scrim {
+  background: rgba(0, 0, 0, 0.7);
+  backdrop-filter: none;
+}
+html[data-theme="netflix"] .dialog-surface,
+html[data-theme="netflix"] .popover-surface,
+html[data-theme="netflix"] .toast-item {
+  border-color: var(--line);
+  background: #181818;
+  backdrop-filter: none;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.9);
+}
+
+html[data-theme="netflix"] .card-row-surface {
+  border-color: var(--line);
+  background: #181818;
+}
+html[data-theme="netflix"] .card-row-surface--interactive:hover {
+  border-color: var(--line-strong);
+  background: #222222;
+}
+html[data-theme="netflix"] .card-row-surface--danger {
+  border-color: color-mix(in srgb, var(--danger) 32%, transparent);
+}
+html[data-theme="netflix"] .card-row-surface--warn {
+  border-color: color-mix(in srgb, var(--warn) 34%, transparent);
+}
+
+html[data-theme="netflix"] .page-nav-btn {
+  border-color: var(--line);
+  background: rgba(20, 20, 20, 0.85);
+  color: #ffffff;
+  backdrop-filter: none;
+}
+html[data-theme="netflix"] .page-nav-btn:hover {
+  background: #2f2f2f;
+  color: #ffffff;
+}
+html[data-theme="netflix"] .page-nav-btn[data-active="true"],
+html[data-theme="netflix"] .page-nav-btn[data-state="open"] {
+  border-color: var(--line-strong);
+  background: #383838;
+  color: #ffffff;
+}
 
 /* —— 主操作按钮：白底黑字三态（生产 CSS：1 / hover 0.75 / 按下 0.5） —— */
 html[data-theme="netflix"] .btn-accent {
@@ -201,6 +279,11 @@ html[data-theme="netflix"] .btn-glass:hover {
   background: rgba(109, 109, 110, 0.4);
   border-color: transparent;
 }
+html[data-theme="netflix"] .btn-glass--ok { color: var(--ok); }
+html[data-theme="netflix"] .btn-glass--danger { color: var(--danger); }
+html[data-theme="netflix"] .btn-glass--accent { color: var(--accent); }
+html[data-theme="netflix"] .btn-glass--muted { color: var(--text-muted); }
+html[data-theme="netflix"] .btn-glass--muted:hover:not(:disabled) { color: #ffffff; }
 
 /* —— 选中胶囊：白系（§4；侧栏在 netflix 主题只服务于设置模式） —— */
 html[data-theme="netflix"] .nav-item[data-active="true"] {

@@ -79,7 +79,7 @@ export function MediaRow({
             {ranked && (
               <span
                 aria-hidden="true"
-                className="pointer-events-none absolute left-1.5 top-1.5 z-10 rounded-md bg-black/60 px-1.5 py-0.5 font-mono text-sm font-bold text-white/90 backdrop-blur-sm"
+                className="dark-media-surface pointer-events-none absolute left-1.5 top-1.5 z-10 rounded-md bg-black/60 px-1.5 py-0.5 font-mono text-sm font-bold text-white/90 backdrop-blur-sm"
               >
                 {index + 1}
               </span>

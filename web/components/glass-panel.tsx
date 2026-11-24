@@ -80,15 +80,17 @@ export function GlassPanel({
   const rendererRef = useRef<LiquidGlassRenderer | null>(null);
   const sizeRef = useRef({ width: 0, height: 0 });
 
-  // Netflix 主题（纯色平铺设计）整体停用 WebGL：不挂 canvas、按 flat 预设渲染
-  // （实色卡面 + 实线描边，见 globals.css 的 .glass-panel--flat）。调用方零改动，
-  // 顺带省下 GPU 与移动端的 WebGL 上下文配额。
+  // Netflix（纯色平铺）与纸感玻璃（日光白瓷磨砂）停用深色 WebGL 采样，省下 GPU 与
+  // 移动端 WebGL 上下文配额；银玻璃与液态玻璃共用同一 WebGL 生命周期，互切只热更新参数。
   const theme = useTheme();
+  const usesWebgl = theme.id !== "netflix" && theme.id !== "paper";
 
   // 最新配置的引用：apply 从这里取值而非闭包捕获，保证参数热更新时
-  // （如设置页拖动侧栏透明度滑杆）不必销毁重建 WebGL 渲染器。
+  // （如设置页拖动侧栏透明度滑杆、银玻璃 ↔ 液态玻璃互切）不必销毁重建 WebGL 渲染器。
   const propsRef = useRef({ variant, settings, radius, sampleBackground });
   propsRef.current = { variant, settings, radius, sampleBackground };
+  const backgroundImageRef = useRef(backgroundImage);
+  backgroundImageRef.current = backgroundImage;
 
   // 用序列化后的配置做依赖：内联传入的 settings 每次渲染都是新对象，
   // 直接进依赖会导致 effect 被反复触发，这里比对内容而非引用。
@@ -112,11 +114,10 @@ export function GlassPanel({
     renderer.setGeometry(width / 2, height / 2, 0, false, 1, 1, 0);
   }, []);
 
-  // 渲染器只随背景图重建（要换折射纹理）；参数变化走下面的轻量热更新。
-  // 主题参与依赖：netflix 主题不创建渲染器，从银玻璃切过来时也会把旧渲染器
-  // 一并 dispose（live 切换主题不能泄漏 WebGL 上下文）。
+  // 渲染器仅随 WebGL 启用态（usesWebgl）创建/销毁；背景图切换走下方 setImage 热换纹理，
+  // silver <-> liquid 互切直接经 apply() 更新 uniform，全程零 loseContext 闪烁与着色器重编译。
   useEffect(() => {
-    if (theme.id === "netflix") return;
+    if (!usesWebgl) return;
     const root = rootRef.current;
     const canvas = canvasRef.current;
     if (!root || !canvas) return;
@@ -126,7 +127,7 @@ export function GlassPanel({
     try {
       renderer = new LiquidGlassRenderer(
         canvas,
-        backgroundImage,
+        backgroundImageRef.current,
         resolveLiquidGlassSettings(variant, { radius, ...settings }),
       );
     } catch (err) {
@@ -151,7 +152,12 @@ export function GlassPanel({
       renderer.dispose();
       rendererRef.current = null;
     };
-  }, [backgroundImage, apply, theme.id]);
+  }, [apply, usesWebgl]);
+
+  // 背景图切换时原地更新 WebGL 纹理，不销毁重建上下文。
+  useEffect(() => {
+    rendererRef.current?.setImage(backgroundImage);
+  }, [backgroundImage]);
 
   // 参数（variant/settings/radius/sampleBackground）内容变化时热更新，不重建渲染器。
   useEffect(() => {
@@ -159,35 +165,31 @@ export function GlassPanel({
     // settingsKey 覆盖了上述参数的内容变化
   }, [settingsKey, apply]);
 
-  // —— flat 分支（Netflix 主题）：实色卡面，不挂 canvas、不初始化 WebGL ——
-  if (theme.id === "netflix") {
-    return (
-      <div
-        className={`glass-panel glass-panel--flat ${className}`}
-        // Netflix 全站圆角压到 2/4/8 档（globals.css 的 --radius-* 覆盖只作用于
-        // 工具类，radius 是内联样式够不到），16px 的银玻璃默认值在此钳到 8px 档
-        style={{ borderRadius: Math.min(radius, 8) }}
-      >
-        <div className={`glass-panel__content ${contentClassName}`}>{children}</div>
-      </div>
-    );
-  }
+  const panelClass =
+    theme.id === "netflix"
+      ? "glass-panel glass-panel--flat"
+      : theme.id === "paper"
+        ? "glass-panel glass-panel--paper"
+        : "glass-panel";
 
   return (
-    // borderRadius 与 WebGL 的 radius 同步：CSS 负责裁切 canvas 四角 + 投影，
-    // WebGL 负责让玻璃边缘光沿圆角走。二者用同一个 radius 值保持一致。
+    // 四套主题共用同一外层 <div> 与固定子槽位（slot 0 = canvas|null，slot 1 = 内容层）：
+    // 任意主题切换都不会卸载/重建 {children}。
     <div
       ref={rootRef}
-      className={`glass-panel ${className}`}
+      className={`${panelClass} ${className}`}
       style={
         {
-          borderRadius: radius,
-          ...(hairlineAlpha !== undefined && { "--glass-hairline": hairlineAlpha }),
-          ...(fallbackAlpha !== undefined && { "--glass-fallback": fallbackAlpha }),
+          // Netflix 全站圆角压到 2/4/8 档，内联 radius 在此钳到 8px；其余主题保持原值
+          borderRadius: theme.id === "netflix" ? Math.min(radius, 8) : radius,
+          ...(theme.id !== "netflix" &&
+            hairlineAlpha !== undefined && { "--glass-hairline": hairlineAlpha }),
+          ...(theme.id !== "netflix" &&
+            fallbackAlpha !== undefined && { "--glass-fallback": fallbackAlpha }),
         } as React.CSSProperties
       }
     >
-      <canvas ref={canvasRef} className="glass-panel__canvas" aria-hidden="true" />
+      {usesWebgl ? <canvas ref={canvasRef} className="glass-panel__canvas" aria-hidden="true" /> : null}
       <div className={`glass-panel__content ${contentClassName}`}>{children}</div>
     </div>
   );

@@ -154,3 +154,132 @@ test("当前字母取最后一个已滑过的锚点", () => {
   // 还没滑到首个锚点时保留兜底档
   assert.equal(activeInitialAt(anchors.slice(1), rowTops, columns, 0, "M"), "M");
 });
+
+test("PosterWall probes missing:false vs missing:true and expands row height for 文件缺失 items", async () => {
+  const { readFileSync } = await import("node:fs");
+  const { createRequire } = await import("node:module");
+  const React = (await import("react")).default;
+  const { act } = await import("react");
+  const { create } = await import("react-test-renderer");
+  const ts = (await import("typescript")).default;
+  const require = createRequire(import.meta.url);
+  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+
+  const wallWindowMod = await import("../lib/wall-window.ts");
+  const probeItems = [];
+  const source = readFileSync(new URL("../components/poster-wall.tsx", import.meta.url), "utf8");
+  const js = ts.transpileModule(source, {
+    compilerOptions: {
+      module: ts.ModuleKind.CommonJS,
+      jsx: ts.JsxEmit.ReactJSX,
+      target: ts.ScriptTarget.ES2022,
+    },
+  }).outputText;
+
+  const prevWindow = globalThis.window;
+  const prevResizeObserver = globalThis.ResizeObserver;
+  globalThis.window = {
+    matchMedia: () => ({ matches: false, addEventListener() {}, removeEventListener() {} }),
+  };
+  globalThis.ResizeObserver = class {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  };
+
+  const mod = { exports: {} };
+  new Function("require", "module", "exports", js)(
+    (spec) => {
+      if (spec === "@/components/wall") {
+        return { useTileWindow: (_ref, placements) => [0, placements.length] };
+      }
+      if (spec === "@/components/poster-card") {
+        return {
+          PosterCardVisual: ({ item }) => React.createElement("div", { "data-poster": item.id }),
+        };
+      }
+      if (spec === "@/components/library-view") {
+        return { libraryCardAction: () => undefined };
+      }
+      if (spec === "@/lib/image-proxy") {
+        return { cardVariantFor: () => "poster-card", imageUrl: (u) => u };
+      }
+      if (spec === "@/lib/wall-window") {
+        return wallWindowMod;
+      }
+      return require(spec);
+    },
+    mod,
+    mod.exports,
+  );
+
+  const items = [
+    { media_item_id: "m1", title: "正常电影A", kind: "movie", year: 2024, rating: 8, poster_url: "/a.jpg", missing: true },
+    { media_item_id: "m2", title: "正常电影B", kind: "movie", year: 2024, rating: 8, poster_url: "/b.jpg", missing: false },
+    { media_item_id: "m3", title: "第二行电影C", kind: "movie", year: 2024, rating: 8, poster_url: "/c.jpg", missing: false },
+  ];
+
+  let probeIndex = 0;
+  let geometry = null;
+  let renderer;
+  try {
+    await act(async () => {
+      renderer = create(
+        React.createElement(mod.exports.PosterWall, {
+          items,
+          libraryIdOf: () => "lib-1",
+          wide: false,
+          onGeometry: (g) => {
+            geometry = g;
+          },
+        }),
+        {
+          createNodeMock(element) {
+            if (element.type === "div" && element.props?.className === "relative min-w-0") {
+              return { clientWidth: 414 };
+            }
+            // The two probe wrapper divs inside aria-hidden probe container
+            if (element.type === "div" && !element.props?.className && !element.props?.style) {
+              const idx = probeIndex++;
+              // Inspect child InventoryCell's item.missing prop!
+              const childItem = element.props?.children?.props?.item;
+              if (childItem) {
+                probeItems.push(childItem);
+                const hasMissingLine = Boolean(childItem.missing);
+                return {
+                  getBoundingClientRect: () => ({
+                    width: 148,
+                    height: 222 + 40 + (hasMissingLine ? 22 : 0),
+                  }),
+                };
+              }
+              void idx;
+            }
+            return { clientWidth: 414, getBoundingClientRect: () => ({ width: 414, height: 0 }) };
+          },
+        },
+      );
+    });
+
+    assert.equal(probeItems.length, 2, "PosterWall must render normal and abnormal probe cells");
+    assert.equal(probeItems[0].missing, false, "normalRef probe must force missing: false even when sample.missing is true");
+    assert.equal(probeItems[1].missing, true, "abnormalRef probe must force missing: true");
+
+    // 414px desktop poster grid -> 2 columns: cellWidth = (414 - 16) / 2 = 199, posterH = 199 / (2/3) = 298.5, caption = 40 -> base row = 338.5
+    // Row 0 has m1 (missing: true -> +22px), so row 1 must start at 338.5 + 22 + 28 = 388.5 (NOT 366.5!)
+    assert.ok(geometry, "PosterWall must compute layout geometry");
+    assert.equal(geometry.columns, 2);
+    assert.equal(geometry.rowTops[0], 0);
+    assert.equal(
+      geometry.rowTops[1],
+      388.5,
+      `Row with 文件缺失 item must add metrics.abnormal (22px) to row height, got rowTops[1]=${geometry.rowTops[1]}`,
+    );
+  } finally {
+    if (renderer) await act(async () => renderer.unmount());
+    if (prevWindow === undefined) delete globalThis.window;
+    else globalThis.window = prevWindow;
+    if (prevResizeObserver === undefined) delete globalThis.ResizeObserver;
+    else globalThis.ResizeObserver = prevResizeObserver;
+  }
+});

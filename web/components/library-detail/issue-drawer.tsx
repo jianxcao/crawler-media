@@ -98,7 +98,7 @@ export function IssueDrawer({
         onClick={onClose}
         className="absolute inset-0 cursor-default bg-black/50 backdrop-blur-[2px]"
       />
-      <div className="absolute right-0 top-0 flex h-full w-full max-w-[600px] flex-col border-l border-white/10 bg-[rgba(16,18,26,0.94)] shadow-[-24px_0_70px_rgba(0,0,0,0.55)] backdrop-blur-2xl max-md:max-w-none">
+      <div className="popover-surface absolute right-0 top-0 flex h-full w-full max-w-[600px] flex-col !border-y-0 !border-r-0 max-md:max-w-none">
         {/* 头部：tab + 关闭。padding-top 叠 --safe-top：面板 top-0 贴的是屏幕物理顶边，
             iOS 独立 App（black-translucent + viewport-fit=cover）里状态栏正压在这一行上，
             不让位就会与 tab 胶囊糊在一起（见 globals.css 的安全区说明） */}
