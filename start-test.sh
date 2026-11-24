@@ -16,12 +16,13 @@
 #   --no-clean                     启动/重启时不清除旧日志
 #
 # 测试文件默认位于 ~/Downloads/crawler-media：data/ 数据，log/ 日志，run/ PID，qb/ 下载
-# 可用 TEST_ROOT 覆盖根目录；DATA_DIR、LOG_DIR、QB_HOST_DOWNLOADS 可分别覆盖。
-# 启动后访问:  http://127.0.0.1:3334   账号 admin / 密码 test-admin-secret-password
+# 可用 TEST_ROOT 覆盖根目录；DATA_DIR、LOG_DIR、QB_HOST_DOWNLOADS、LISTEN_HOST 可分别覆盖。
+# 启动后本机或局域网访问: http://<本机或局域网IP>:3334   账号 admin / 密码 test-admin-secret-password
 # =============================================================================
 set -euo pipefail
 
 # ----------------------------- 配置区（按需修改） ----------------------------
+LISTEN_HOST="${LISTEN_HOST:-0.0.0.0}"
 BACKEND_PORT="${BACKEND_PORT:-18765}"
 FRONTEND_PORT="${FRONTEND_PORT:-3334}"
 QB_PORT="${QB_PORT:-8080}"
@@ -131,6 +132,43 @@ is_running() {
   kill -0 "$pid" 2>/dev/null
 }
 
+detect_lan_ip() {
+  local ip="" iface
+  if command -v ipconfig >/dev/null 2>&1; then
+    for iface in en0 en1 en2 bridge0; do
+      ip="$(ipconfig getifaddr "$iface" 2>/dev/null || true)"
+      if [[ -n "$ip" ]]; then
+        printf '%s' "$ip"
+        return 0
+      fi
+    done
+  fi
+  if command -v hostname >/dev/null 2>&1; then
+    ip="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
+    if [[ -n "$ip" ]]; then
+      printf '%s' "$ip"
+      return 0
+    fi
+  fi
+  if command -v ifconfig >/dev/null 2>&1; then
+    ip="$(ifconfig 2>/dev/null | awk '/inet / && $2 != "127.0.0.1" {print $2; exit}' || true)"
+    if [[ -n "$ip" ]]; then
+      printf '%s' "$ip"
+      return 0
+    fi
+  fi
+  return 1
+}
+
+listener_matches_host() {
+  local port="$1" host="$2"
+  if [[ "$host" == "0.0.0.0" ]]; then
+    lsof -nP -iTCP:"$port" -sTCP:LISTEN 2>/dev/null | grep -Eq "(\\*|0\\.0\\.0\\.0):${port}\\b"
+    return $?
+  fi
+  return 0
+}
+
 # lsof 可能吐出多个 PID（换行分隔）。逐个 SIGTERM，仍占端口再 SIGKILL。
 # 等到 LISTEN 消失再返回：Python TCPServer 默认不 SO_REUSEADDR，立刻 bind 会 EADDRINUSE。
 free_port() {
@@ -171,8 +209,8 @@ launch() {
 start_backend() {
   local force="${1:-false}"
   prepare_runtime_dirs
-  if [[ "$force" != "true" ]] && is_running "$(pid_file backend)" && local_curl -sf --connect-timeout 1 -m 2 "http://127.0.0.1:$BACKEND_PORT/api/v1/health" >/dev/null 2>&1; then
-    log "后端已在运行且健康 (端口 $BACKEND_PORT)，跳过重复启动"
+  if [[ "$force" != "true" ]] && is_running "$(pid_file backend)" && listener_matches_host "$BACKEND_PORT" "$LISTEN_HOST" && local_curl -sf --connect-timeout 1 -m 2 "http://127.0.0.1:$BACKEND_PORT/api/v1/health" >/dev/null 2>&1; then
+    log "后端已在运行且健康 ($LISTEN_HOST:$BACKEND_PORT)，跳过重复启动"
     return 0
   fi
 
@@ -188,7 +226,20 @@ start_backend() {
   # 确保端口彻底释放，无任何 TIME_WAIT 或残留监听
   free_port "$BACKEND_PORT"
 
-  log "启动后端 (端口 $BACKEND_PORT)..."
+  local cors_origins="http://127.0.0.1:$FRONTEND_PORT,http://localhost:$FRONTEND_PORT"
+  local lan_ip="" local_host=""
+  lan_ip="$(detect_lan_ip || true)"
+  if [[ -n "$lan_ip" ]]; then
+    cors_origins="$cors_origins,http://$lan_ip:$FRONTEND_PORT"
+  fi
+  if command -v scutil >/dev/null 2>&1; then
+    local_host="$(scutil --get LocalHostName 2>/dev/null || true)"
+    if [[ -n "$local_host" ]]; then
+      cors_origins="$cors_origins,http://${local_host}.local:$FRONTEND_PORT"
+    fi
+  fi
+
+  log "启动后端 (监听 $LISTEN_HOST:$BACKEND_PORT)..."
   printf '\n=== [START BACKEND %s] ===\n' "$(date)" >>"$BACKEND_LOG"
   launch backend env \
     RUST_LOG="${RUST_LOG:-info,api=debug,crawler_media=debug,domain=debug,indexer=debug,media=debug,downloader=debug,library=debug,subscribe=debug,filter=debug,release=debug,hooks=debug,jobs=debug,playback=debug,marker=debug,html5ever=off,selectors=warn}" \
@@ -200,8 +251,8 @@ start_backend() {
     CRAWLER_MEDIA_QB_USER="$QB_USER" \
     CRAWLER_MEDIA_QB_PASS="$QB_PASS" \
     CRAWLER_MEDIA_QB_PATH_MAP="/downloads=$QB_HOST_DOWNLOADS" \
-    CRAWLER_MEDIA_CORS_ORIGINS="http://127.0.0.1:$FRONTEND_PORT,http://localhost:$FRONTEND_PORT" \
-    CRAWLER_MEDIA_LISTEN="127.0.0.1:$BACKEND_PORT" \
+    CRAWLER_MEDIA_CORS_ORIGINS="${CRAWLER_MEDIA_CORS_ORIGINS:-$cors_origins}" \
+    CRAWLER_MEDIA_LISTEN="$LISTEN_HOST:$BACKEND_PORT" \
     "$BACKEND_BIN" serve
 
   # 等待后端 HTTP 存活探针就绪
@@ -226,15 +277,19 @@ start_backend() {
 
 start_frontend() {
   if is_running "$(pid_file frontend)"; then
-    log "前端已在运行 (PID $(read_pid "$(pid_file frontend)"))"
-    return
+    if listener_matches_host "$FRONTEND_PORT" "$LISTEN_HOST"; then
+      log "前端已在运行 (PID $(read_pid "$(pid_file frontend)"), $LISTEN_HOST:$FRONTEND_PORT)"
+      return
+    fi
+    log "停止旧前端进程 (监听地址未覆盖 $LISTEN_HOST) 并重新绑定..."
+    stop_service frontend
   fi
   if [[ ! -x "$FRONTEND_DIR/node_modules/.bin/vite" ]]; then
     fail "找不到 vite，请先: cd web && pnpm install"
     return 1
   fi
   free_port "$FRONTEND_PORT"
-  log "启动前端 (端口 $FRONTEND_PORT)..."
+  log "启动前端 (监听 $LISTEN_HOST:$FRONTEND_PORT)..."
   # Vite 同源代理转发到后端端口。
   # 先跑 copy-jassub 复制字幕渲染资产,再 exec vite,避免 pid 文件记到 shell 包装器。
   (
@@ -244,7 +299,7 @@ start_frontend() {
     fi
     launch frontend env VITE_BACKEND_TARGET="http://127.0.0.1:$BACKEND_PORT" \
       node "$FRONTEND_DIR/node_modules/vite/bin/vite.js" \
-      --host 127.0.0.1 --port "$FRONTEND_PORT" --strictPort
+      --host "$LISTEN_HOST" --port "$FRONTEND_PORT" --strictPort
   )
   local _
   for _ in $(seq 1 90); do
@@ -356,8 +411,14 @@ status_all() {
   fi
   printf '  后端: %s\n  前端: %s\n  qB:   %s\n  mock: %s\n' "$backend" "$frontend" "$qb" "$mock"
   printf '\n  数据目录: %s\n  日志目录: %s\n  下载目录: %s\n' "$DATA_DIR" "$LOG_DIR" "$QB_HOST_DOWNLOADS"
-  printf '\n  登录页面: http://127.0.0.1:%s   (账号 admin / 密码 %s)\n' "$FRONTEND_PORT" "$ADMIN_PASSWORD"
-  printf '  API 接口: http://127.0.0.1:%s   (CLI Bearer Token: %s)\n' "$BACKEND_PORT" "$TOKEN"
+  printf '\n  本机页面:   http://127.0.0.1:%s   (账号 admin / 密码 %s)\n' "$FRONTEND_PORT" "$ADMIN_PASSWORD"
+  printf '  本机 API:   http://127.0.0.1:%s   (CLI Bearer Token: %s)\n' "$BACKEND_PORT" "$TOKEN"
+  local lan_ip=""
+  lan_ip="$(detect_lan_ip || true)"
+  if [[ "$LISTEN_HOST" == "0.0.0.0" && -n "$lan_ip" ]]; then
+    printf '  局域网页面: http://%s:%s\n' "$lan_ip" "$FRONTEND_PORT"
+    printf '  局域网 API: http://%s:%s   (Jellyfin / Infuse 填此地址)\n' "$lan_ip" "$BACKEND_PORT"
+  fi
 }
 
 # -------------------------------- 主入口 ------------------------------------

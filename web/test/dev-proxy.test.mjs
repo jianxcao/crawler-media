@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { createServer as createHttpServer } from "node:http";
+import { createServer as createHttpServer, get as httpGet } from "node:http";
 import test from "node:test";
 import { createServer } from "vite";
 
@@ -23,6 +23,23 @@ test("Vite forwards same-origin API requests to the configured backend", async (
     const address = vite.httpServer.address();
     const response = await fetch(`http://127.0.0.1:${address.port}/api/v1/auth/me`);
     assert.equal(await response.text(), "/api/v1/auth/me");
+
+    const lanHostStatus = await new Promise((resolve, reject) => {
+      const req = httpGet(
+        {
+          host: "127.0.0.1",
+          port: address.port,
+          path: "/",
+          headers: { Host: `mac-mini.local:${address.port}` },
+        },
+        (res) => {
+          res.resume();
+          resolve(res.statusCode);
+        },
+      );
+      req.once("error", reject);
+    });
+    assert.equal(lanHostStatus, 200);
   } finally {
     await vite?.close();
     await new Promise((resolve, reject) => backend.close((error) => error ? reject(error) : resolve()));
