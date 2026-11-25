@@ -119,6 +119,7 @@ impl MockQbit {
             url: self.url.clone(),
             username: "admin".into(),
             password: "pass".into(),
+            api_key: None,
             category: Some("crawler-media".into()),
             path_maps: vec![],
         }

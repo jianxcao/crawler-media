@@ -306,6 +306,7 @@ fn env_whitelist_covers_every_variable_the_server_reads() {
         "CRAWLER_MEDIA_QB_URL",
         "CRAWLER_MEDIA_QB_USER",
         "CRAWLER_MEDIA_QB_PASS",
+        "CRAWLER_MEDIA_QB_API_KEY",
         "CRAWLER_MEDIA_QB_CATEGORY",
         "CRAWLER_MEDIA_QB_PATH_MAP",
         "CRAWLER_MEDIA_TR_PATH_MAP",
@@ -319,6 +320,7 @@ fn env_whitelist_covers_every_variable_the_server_reads() {
         "CRAWLER_MEDIA_TMDB_KEY_FILE",
         "CRAWLER_MEDIA_TVDB_KEY_FILE",
         "CRAWLER_MEDIA_QB_PASS_FILE",
+        "CRAWLER_MEDIA_QB_API_KEY_FILE",
         "CRAWLER_MEDIA_METADATA_PROXY_USER_FILE",
         "CRAWLER_MEDIA_METADATA_PROXY_PASS_FILE",
     ];

@@ -99,6 +99,7 @@ fn finished_qbittorrent_task_transfers_into_library_ledger() {
         ),
         username: "admin".into(),
         password: "pass".into(),
+        api_key: None,
         category: Some("crawler-media".into()),
         path_maps: vec![],
     })

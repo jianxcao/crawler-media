@@ -25,6 +25,8 @@ pub(crate) struct DownloaderInput {
     #[serde(default)]
     password: Option<String>,
     #[serde(default)]
+    api_key: Option<String>,
+    #[serde(default)]
     category: Option<String>,
     #[serde(default)]
     path_maps: Vec<PathMapInput>,
@@ -39,6 +41,36 @@ pub(crate) struct DownloaderInput {
 pub(crate) struct PathMapInput {
     from: String,
     to: String,
+}
+
+fn downloader_json_with_meta(
+    row: &crate::store::DownloaderRow,
+    status: &str,
+    last_error: Option<String>,
+) -> Value {
+    let has_api_key = row.api_key.as_deref().is_some_and(|k| !k.trim().is_empty());
+    let has_password = row.password.as_deref().is_some_and(|p| !p.is_empty());
+    let auth_type = if row.kind == "qbittorrent" && has_api_key {
+        "apikey"
+    } else {
+        "password"
+    };
+    json!({
+        "id": row.id.to_string(),
+        "name": row.name,
+        "kind": row.kind,
+        "url": row.url,
+        "username": row.username,
+        "auth_type": auth_type,
+        "has_api_key": has_api_key,
+        "has_password": has_password,
+        "category": row.category,
+        "path_maps": row.path_maps.iter().map(|m| json!({"from": m.from, "to": m.to.display().to_string()})).collect::<Vec<_>>(),
+        "is_default": row.is_default,
+        "enabled": row.enabled,
+        "status": status,
+        "last_error": last_error,
+    })
 }
 
 fn downloader_json_with_store(row: &crate::store::DownloaderRow, store: &crate::Store) -> Value {
@@ -59,39 +91,12 @@ fn downloader_json_with_store(row: &crate::store::DownloaderRow, store: &crate::
     } else {
         "pending"
     };
-    json!({
-        "id": row.id.to_string(),
-        "name": row.name,
-        "kind": row.kind,
-        "url": row.url,
-        "username": row.username,
-        "category": row.category,
-        "path_maps": row.path_maps.iter().map(|m| json!({"from": m.from, "to": m.to.display().to_string()})).collect::<Vec<_>>(),
-        "is_default": row.is_default,
-        "enabled": row.enabled,
-        "status": status,
-        "last_error": last_error,
-    })
+    downloader_json_with_meta(row, status, last_error)
 }
 
 fn downloader_json(row: &crate::store::DownloaderRow) -> Value {
-    json!({
-        "id": row.id.to_string(),
-        "name": row.name,
-        "kind": row.kind,
-        "url": row.url,
-        "username": row.username,
-        "category": row.category,
-        "path_maps": row.path_maps.iter().map(|m| json!({"from": m.from, "to": m.to.display().to_string()})).collect::<Vec<_>>(),
-        "is_default": row.is_default,
-        "enabled": row.enabled,
-        "status": if !row.enabled {
-            "disabled"
-        } else {
-            "pending"
-        },
-        "last_error": null,
-    })
+    let status = if !row.enabled { "disabled" } else { "pending" };
+    downloader_json_with_meta(row, status, None)
 }
 
 fn parse_path_maps(input: Vec<PathMapInput>) -> Vec<downloader::PathMap> {
@@ -150,6 +155,10 @@ pub(crate) async fn create_downloader(
         url: body.url,
         username: body.username.filter(|u| !u.is_empty()),
         password: body.password.filter(|p| !p.is_empty()),
+        api_key: body
+            .api_key
+            .map(|k| k.trim().to_string())
+            .filter(|k| !k.is_empty()),
         category: body.category.filter(|c| !c.is_empty()),
         path_maps: parse_path_maps(body.path_maps),
         is_default: body.is_default,
@@ -215,6 +224,8 @@ pub(crate) struct DownloaderPatch {
     #[serde(default)]
     password: Option<String>,
     #[serde(default)]
+    api_key: Option<String>,
+    #[serde(default)]
     category: Option<String>,
     #[serde(default)]
     path_maps: Option<Vec<PathMapInput>>,
@@ -239,6 +250,10 @@ fn apply_downloader_patch(row: &mut store::DownloaderRow, body: DownloaderPatch)
     }
     if let Some(password) = body.password {
         row.password = (!password.is_empty()).then_some(password);
+    }
+    if let Some(api_key) = body.api_key {
+        let trimmed = api_key.trim();
+        row.api_key = (!trimmed.is_empty()).then(|| trimmed.to_string());
     }
     if let Some(category) = body.category {
         row.category = (!category.is_empty()).then_some(category);

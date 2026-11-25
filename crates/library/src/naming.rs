@@ -110,10 +110,22 @@ fn substitute(pattern: &str, media: &Media, release: &Release, ext: &str) -> Str
         .collect();
     let mut out = drop_empty_groups(pattern, &empty);
     for name in placeholders(&out) {
-        let value = value_for(&name, media, release, ext);
+        let raw = value_for(&name, media, release, ext);
+        let value = sanitize_token_value(&raw);
         out = out.replace(&format!("{{{name}}}"), &value);
     }
     out
+}
+
+/// Strip directory separators and null bytes from substituted metadata tokens
+/// so a title like `Fate/stay night` never splits into unintended subdirs.
+fn sanitize_token_value(raw: &str) -> String {
+    raw.chars()
+        .map(|ch| match ch {
+            '/' | '\\' | '\0' => ' ',
+            other => other,
+        })
+        .collect()
 }
 
 /// Remove `[...]` / `(...)` groups that reference an empty placeholder; also

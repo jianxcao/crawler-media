@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use domain::DownloaderId;
 use downloader::PathMap;
 use rusqlite::{OptionalExtension, params};
@@ -12,6 +14,7 @@ pub struct DownloaderRow {
     pub url: String,
     pub username: Option<String>,
     pub password: Option<String>,
+    pub api_key: Option<String>,
     pub category: Option<String>,
     pub path_maps: Vec<PathMap>,
     pub is_default: bool,
@@ -19,10 +22,10 @@ pub struct DownloaderRow {
     pub enabled: bool,
 }
 
-/// 手写 `Debug`：`password` 是下载器凭证，绝不能进日志。
+/// 手写 `Debug`：`password` 与 `api_key` 是下载器凭证，绝不能进日志。
 ///
 /// 之前这里是 `#[derive(Debug)]`，任何一句 `debug!(?row)` 都会把口令打进日志与
-/// 前端"系统日志"。`None`/`Some("<redacted>")` 仍能看出是否配置了口令，
+/// 前端"系统日志"。`None`/`Some("<redacted>")` 仍能看出是否配置了凭证，
 /// 其余字段保留原样，便于诊断。`DownloaderRow` 没有 serde 派生，这里只影响
 /// `Debug`。
 impl std::fmt::Debug for DownloaderRow {
@@ -34,12 +37,24 @@ impl std::fmt::Debug for DownloaderRow {
             .field("url", &self.url)
             .field("username", &self.username)
             .field("password", &self.password.as_ref().map(|_| "<redacted>"))
+            .field("api_key", &self.api_key.as_ref().map(|_| "<redacted>"))
             .field("category", &self.category)
             .field("path_maps", &self.path_maps)
             .field("is_default", &self.is_default)
             .field("enabled", &self.enabled)
             .finish()
     }
+}
+
+fn api_key_setting(id: DownloaderId) -> String {
+    format!("downloader.{id}.api_key")
+}
+
+fn normalized_api_key(api_key: &Option<String>) -> Option<&str> {
+    api_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
 }
 
 const COLS: &str =
@@ -54,6 +69,7 @@ fn map_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DownloaderRow> {
         url: row.get(3)?,
         username: row.get(4)?,
         password: row.get(5)?,
+        api_key: None,
         category: row.get(6)?,
         path_maps: path_maps
             .and_then(|raw| serde_json::from_str::<Vec<serde_json::Value>>(&raw).ok())
@@ -96,6 +112,7 @@ mod debug_tests {
             url: "http://127.0.0.1:8080".into(),
             username: Some("admin".into()),
             password: Some("downloader-password-secret".into()),
+            api_key: Some("qbt_secret_token".into()),
             category: Some("movies".into()),
             path_maps: Vec::new(),
             is_default: true,
@@ -106,6 +123,10 @@ mod debug_tests {
             !rendered.contains("downloader-password-secret"),
             "Debug 不得输出 password: {rendered}"
         );
+        assert!(
+            !rendered.contains("qbt_secret_token"),
+            "Debug 不得输出 api_key: {rendered}"
+        );
         assert!(rendered.contains("<redacted>"), "{rendered}");
         assert!(rendered.contains("127.0.0.1:8080"), "{rendered}");
         assert!(rendered.contains("qbit"), "{rendered}");
@@ -113,6 +134,47 @@ mod debug_tests {
 }
 
 impl crate::writers::App<'_> {
+    fn sync_api_key(&self, row: &DownloaderRow) -> Result<(), StoreError> {
+        let key = api_key_setting(row.id);
+        match normalized_api_key(&row.api_key) {
+            Some(value) => self.put_setting(&key, value)?,
+            None => {
+                self.delete_setting(&key)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn hydrate_api_key(&self, mut row: DownloaderRow) -> Result<DownloaderRow, StoreError> {
+        row.api_key = self
+            .get_setting(&api_key_setting(row.id))?
+            .filter(|s| !s.trim().is_empty());
+        Ok(row)
+    }
+
+    fn load_api_keys(&self) -> Result<HashMap<String, String>, StoreError> {
+        let mut stmt = self
+            .app
+            .prepare("SELECT key, value FROM settings WHERE key LIKE 'downloader.%.api_key'")?;
+        let pairs = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let mut map = HashMap::new();
+        for pair in pairs {
+            let (key, value) = pair?;
+            if value.trim().is_empty() {
+                continue;
+            }
+            if let Some(id) = key
+                .strip_prefix("downloader.")
+                .and_then(|rest| rest.strip_suffix(".api_key"))
+            {
+                map.insert(id.to_string(), value);
+            }
+        }
+        Ok(map)
+    }
+
     /// Verify status and error are one result of one exact observed configuration.
     /// An IMMEDIATE transaction prevents another connection changing config between
     /// the comparison and status publication; any second-statement failure rolls back.
@@ -141,6 +203,7 @@ impl crate::writers::App<'_> {
     }
 
     pub fn insert_downloader(&self, row: &DownloaderRow) -> Result<(), StoreError> {
+        let tx = crate::write_tx(self.app)?;
         if row.is_default {
             self.app
                 .execute("UPDATE downloaders SET is_default = 0", [])?;
@@ -161,10 +224,13 @@ impl crate::writers::App<'_> {
                 row.enabled as i64,
             ],
         )?;
+        self.sync_api_key(row)?;
+        tx.commit()?;
         Ok(())
     }
 
     pub fn save_downloader(&self, row: &DownloaderRow) -> Result<(), StoreError> {
+        let tx = crate::write_tx(self.app)?;
         self.app.execute(
             "UPDATE downloaders SET name = ?1, kind = ?2, url = ?3, username = ?4,
                     password = ?5, category = ?6, path_maps = ?7, enabled = ?9
@@ -181,6 +247,8 @@ impl crate::writers::App<'_> {
                 row.enabled as i64,
             ],
         )?;
+        self.sync_api_key(row)?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -198,34 +266,44 @@ impl crate::writers::App<'_> {
     }
 
     pub fn list_downloaders(&self) -> Result<Vec<DownloaderRow>, StoreError> {
+        let mut api_keys = self.load_api_keys()?;
         let mut stmt = self
             .app
             .prepare(&format!("SELECT {COLS} FROM downloaders ORDER BY name"))?;
         let rows = stmt.query_map([], map_row)?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+        let mut list = rows.collect::<Result<Vec<_>, _>>()?;
+        for row in &mut list {
+            row.api_key = api_keys.remove(&row.id.to_string());
+        }
+        Ok(list)
     }
 
     pub fn get_downloader(&self, id: DownloaderId) -> Result<Option<DownloaderRow>, StoreError> {
-        self.app
+        let row = self
+            .app
             .query_row(
                 &format!("SELECT {COLS} FROM downloaders WHERE id = ?1"),
                 params![id.to_string()],
                 map_row,
             )
-            .optional()
-            .map_err(Into::into)
+            .optional()?;
+        row.map(|r| self.hydrate_api_key(r)).transpose()
     }
 
     pub fn delete_downloader(&self, id: DownloaderId) -> Result<bool, StoreError> {
+        let tx = crate::write_tx(self.app)?;
         let n = self.app.execute(
             "DELETE FROM downloaders WHERE id = ?1",
             params![id.to_string()],
         )?;
+        self.delete_setting(&api_key_setting(id))?;
+        tx.commit()?;
         Ok(n > 0)
     }
 
     pub fn default_downloader(&self) -> Result<Option<DownloaderRow>, StoreError> {
-        self.app
+        let row = self
+            .app
             .query_row(
                 &format!(
                     "SELECT {COLS} FROM downloaders WHERE is_default = 1 AND enabled = 1 LIMIT 1"
@@ -233,8 +311,8 @@ impl crate::writers::App<'_> {
                 [],
                 map_row,
             )
-            .optional()
-            .map_err(Into::into)
+            .optional()?;
+        row.map(|r| self.hydrate_api_key(r)).transpose()
     }
 
     pub fn set_default_downloader(&self, id: DownloaderId) -> Result<bool, StoreError> {

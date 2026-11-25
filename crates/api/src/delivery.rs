@@ -131,7 +131,7 @@ fn submit_on(
         .as_ref()
         .map(|site| state.indexer.resolve_torrent_download(site, torrent))
         .transpose()
-        .map_err(error)?
+        .map_err(|err| DownloaderError::SourceRejected(err.to_string()))?
         .flatten();
     match resolved_url {
         Some(url) => client.add_with_options(torrent, &url, save_path),
@@ -330,7 +330,10 @@ impl Downloader for RoutedDownloader<'_> {
         self.used.lock().insert(torrent.enclosure.clone(), id);
         let client = self.client_for(torrent)?;
         if let Err(error) = submit_on(self.state, client.as_ref(), torrent, None) {
-            if matches!(error, DownloaderError::ExistingTaskBroken(..)) {
+            if matches!(
+                error,
+                DownloaderError::ExistingTaskBroken(..) | DownloaderError::SourceRejected(..)
+            ) {
                 self.broken.lock().push(torrent.clone());
             } else {
                 self.used.lock().remove(&torrent.enclosure);

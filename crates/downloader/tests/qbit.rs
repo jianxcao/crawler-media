@@ -51,6 +51,16 @@ fn match_fake_qbit_route(
             "d8:announce10:https://pt4:infod6:lengthi1e4:name1:a12:piece lengthi16384e6:pieces20:aaaaaaaaaaaaaaaaaaaaee".into(),
             "",
         )
+    } else if req.starts_with("GET /missing.torrent") {
+        ("404 Not Found", "not found".into(), "")
+    } else if req.starts_with("GET /html-login.torrent") {
+        (
+            "200 OK",
+            "<html><body>Please login first</body></html>".into(),
+            "",
+        )
+    } else if req.starts_with("GET /api/v2/app/version") {
+        ("200 OK", "v5.3.0".into(), "")
     } else if req.contains("/api/v2/torrents/info") {
         let injected = capture.injected_infos.lock().clone();
         let body = if let Some(custom) = injected {
@@ -104,6 +114,7 @@ fn connect(url: &str) -> QbitDownloader {
         url: url.into(),
         username: "admin".into(),
         password: "pass".into(),
+        api_key: None,
         category: Some("crawler-media".into()),
         path_maps: vec![],
     })
@@ -138,6 +149,7 @@ fn adds_enclosure_as_qbittorrent_task_with_stopped_semantics() {
         url,
         username: "admin".into(),
         password: "pass".into(),
+        api_key: None,
         category: Some("crawler-media".into()),
         path_maps: vec![],
     })
@@ -197,6 +209,7 @@ fn add_is_skipped_when_qbittorrent_already_has_the_torrent() {
         url,
         username: "admin".into(),
         password: "pass".into(),
+        api_key: None,
         category: None,
         path_maps: vec![],
     })
@@ -218,6 +231,7 @@ fn completed_task_exposes_files_for_transfer() {
         url,
         username: "admin".into(),
         password: "pass".into(),
+        api_key: None,
         category: None,
         path_maps: vec![],
     })
@@ -246,6 +260,7 @@ fn live_qbittorrent_add_is_manual() {
         url,
         username,
         password,
+        api_key: None,
         category: Some("crawler-media-test".into()),
         path_maps: vec![],
     })
@@ -261,6 +276,7 @@ fn remove_deletes_task_by_hash_keeping_files() {
         url,
         username: "admin".into(),
         password: "pass".into(),
+        api_key: None,
         category: Some("crawler-media".into()),
         path_maps: vec![],
     })
@@ -456,5 +472,43 @@ fn same_name_different_hash_is_not_treated_as_owned() {
     assert!(
         capture.deletes.lock().is_empty(),
         "同名不同 hash 绝不能被删除"
+    );
+}
+
+#[test]
+fn http_404_torrent_fetch_is_rejected_without_forwarding_url_to_qbit() {
+    let capture = Capture::new();
+    let (url, _server) = serve(capture.clone(), "/downloads".into());
+    let dl = connect(&url);
+    let mut t = torrent();
+    t.enclosure = format!("{url}/missing.torrent");
+
+    let err = dl.add(&t).unwrap_err();
+    assert!(
+        matches!(err, downloader::DownloaderError::SourceRejected(_)),
+        "expected SourceRejected for 404 .torrent fetch, got: {err:?}"
+    );
+    assert!(
+        capture.adds.lock().is_empty(),
+        "404 .torrent fetch must NOT forward URL blindly to qBittorrent"
+    );
+}
+
+#[test]
+fn html_body_torrent_fetch_is_rejected_as_source_error() {
+    let capture = Capture::new();
+    let (url, _server) = serve(capture.clone(), "/downloads".into());
+    let dl = connect(&url);
+    let mut t = torrent();
+    t.enclosure = format!("{url}/html-login.torrent");
+
+    let err = dl.add(&t).unwrap_err();
+    assert!(
+        matches!(err, downloader::DownloaderError::SourceRejected(_)),
+        "expected SourceRejected for HTML body instead of .torrent, got: {err:?}"
+    );
+    assert!(
+        capture.adds.lock().is_empty(),
+        "HTML error body must NOT forward URL to qBittorrent"
     );
 }

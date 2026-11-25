@@ -4,7 +4,8 @@ use axum::Json;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use serde::Deserialize;
+use serde::de::{IgnoredAny, MapAccess, Visitor};
+use serde::{Deserialize, Deserializer};
 use serde_json::{Value, json};
 use std::hash::{Hash, Hasher};
 
@@ -15,12 +16,54 @@ use super::AppState;
 
 const JELLYFIN_PROTOCOL_VERSION: &str = "10.9.11";
 
-#[derive(Deserialize)]
 pub struct AuthBody {
-    #[serde(alias = "Username")]
     pub username: String,
-    #[serde(default, alias = "Pw", alias = "Password", alias = "password")]
     pub pw: String,
+}
+
+impl<'de> Deserialize<'de> for AuthBody {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct AuthBodyVisitor;
+
+        impl<'de> Visitor<'de> for AuthBodyVisitor {
+            type Value = AuthBody;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a Jellyfin authentication object")
+            }
+
+            fn visit_map<M: MapAccess<'de>>(self, mut map: M) -> Result<AuthBody, M::Error> {
+                let mut username = None;
+                let mut pw = None;
+                let mut password = None;
+                while let Some(key) = map.next_key::<String>()? {
+                    if key.eq_ignore_ascii_case("username") {
+                        username = map.next_value::<Option<String>>()?;
+                    } else if key.eq_ignore_ascii_case("pw") {
+                        pw = Some(map.next_value::<Option<String>>()?);
+                    } else if key.eq_ignore_ascii_case("password") {
+                        password = Some(map.next_value::<Value>()?);
+                    } else {
+                        map.next_value::<IgnoredAny>()?;
+                    }
+                }
+                let pw = match pw {
+                    Some(pw) => pw,
+                    None => password
+                        .map(serde_json::from_value::<Option<String>>)
+                        .transpose()
+                        .map_err(serde::de::Error::custom)?
+                        .flatten(),
+                };
+                Ok(AuthBody {
+                    username: username.unwrap_or_default(),
+                    pw: pw.unwrap_or_default(),
+                })
+            }
+        }
+
+        deserializer.deserialize_map(AuthBodyVisitor)
+    }
 }
 
 fn system_info_payload(server_id: &str) -> Value {

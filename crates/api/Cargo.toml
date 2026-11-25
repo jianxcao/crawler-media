@@ -3,6 +3,7 @@ name = "api"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+autotests = false
 
 [dependencies]
 time = { workspace = true }
@@ -68,8 +69,457 @@ name = "fingerprint-bench"
 path = "src/bin/fingerprint-bench.rs"
 
 [[test]]
+name = "api_suite_1"
+path = "tests/api_suite_1.rs"
+
+[[test]]
+name = "api_suite_2"
+path = "tests/api_suite_2.rs"
+
+[[test]]
+name = "api_suite_3"
+path = "tests/api_suite_3.rs"
+
+[[test]]
+name = "api_suite_4"
+path = "tests/api_suite_4.rs"
+
+[[test]]
+name = "management"
+path = "tests/management/main.rs"
+
+[[test]]
+name = "playback_read_regression"
+path = "tests/playback_read_regression/main.rs"
+
+[[test]]
+name = "adaptive_fingerprint_season"
+path = "tests/adaptive_fingerprint_season.rs"
+
+[[test]]
+name = "adaptive_review10_regression"
+path = "tests/adaptive_review10_regression.rs"
+
+[[test]]
+name = "adaptive_review12_regression"
+path = "tests/adaptive_review12_regression.rs"
+
+[[test]]
 name = "adaptive_review9_regression"
 path = "tests/adaptive_review9_regression.rs"
+
+[[test]]
+name = "auth_reads_app_db"
+path = "tests/auth_reads_app_db.rs"
+
+[[test]]
+name = "auto_resolve_matching"
+path = "tests/auto_resolve_matching.rs"
+
+[[test]]
+name = "chapter_frame_identity"
+path = "tests/chapter_frame_identity.rs"
+
+[[test]]
+name = "chapter_frame_paused_strm"
+path = "tests/chapter_frame_paused_strm.rs"
+
+[[test]]
+name = "claim_io_isolation"
+path = "tests/claim_io_isolation.rs"
+
+[[test]]
+name = "correctness_batch_acceptance"
+path = "tests/correctness_batch_acceptance.rs"
+
+[[test]]
+name = "cover_generate"
+path = "tests/cover_generate.rs"
+
+[[test]]
+name = "cover_publication"
+path = "tests/cover_publication.rs"
+
+[[test]]
+name = "data_retention_control"
+path = "tests/data_retention_control.rs"
+
+[[test]]
+name = "driver_executor_bounds"
+path = "tests/driver_executor_bounds.rs"
+
+[[test]]
+name = "duplicates_work_bounds"
+path = "tests/duplicates_work_bounds.rs"
+
+[[test]]
+name = "endpoint_perf"
+path = "tests/endpoint_perf.rs"
+
+[[test]]
+name = "executor_jellyfin_store"
+path = "tests/executor_jellyfin_store.rs"
+
+[[test]]
+name = "executor_library_admin"
+path = "tests/executor_library_admin.rs"
+
+[[test]]
+name = "executor_manual_operations"
+path = "tests/executor_manual_operations.rs"
+
+[[test]]
+name = "executor_media_artwork"
+path = "tests/executor_media_artwork.rs"
+
+[[test]]
+name = "executor_not_blocked"
+path = "tests/executor_not_blocked.rs"
+
+[[test]]
+name = "executor_remaining_store"
+path = "tests/executor_remaining_store.rs"
+
+[[test]]
+name = "executor_site_downloader_store"
+path = "tests/executor_site_downloader_store.rs"
+
+[[test]]
+name = "executor_store_bounds"
+path = "tests/executor_store_bounds.rs"
+
+[[test]]
+name = "executor_users_catalog"
+path = "tests/executor_users_catalog.rs"
+
+[[test]]
+name = "facets_regression"
+path = "tests/facets_regression.rs"
+
+[[test]]
+name = "filter_default_regression"
+path = "tests/filter_default_regression.rs"
+
+[[test]]
+name = "fingerprint_backlog_drain"
+path = "tests/fingerprint_backlog_drain.rs"
+
+[[test]]
+name = "fingerprint_benchmark"
+path = "tests/fingerprint_benchmark.rs"
+
+[[test]]
+name = "fingerprint_refresh_policy"
+path = "tests/fingerprint_refresh_policy.rs"
+
+[[test]]
+name = "fingerprint_source_binding"
+path = "tests/fingerprint_source_binding.rs"
+
+[[test]]
+name = "fixture_lifecycle"
+path = "tests/fixture_lifecycle.rs"
+
+[[test]]
+name = "fs_browse"
+path = "tests/fs_browse.rs"
+
+[[test]]
+name = "hdarea_api_and_checkin"
+path = "tests/hdarea_api_and_checkin.rs"
+
+[[test]]
+name = "image_phase_observation"
+path = "tests/image_phase_observation.rs"
+
+[[test]]
+name = "instance_lease_starvation"
+path = "tests/instance_lease_starvation.rs"
+
+[[test]]
+name = "integrity_read_barrier"
+path = "tests/integrity_read_barrier.rs"
+
+[[test]]
+name = "jellyfin"
+path = "tests/jellyfin.rs"
+
 [[test]]
 name = "jellyfin_read_scale"
 path = "tests/jellyfin_read_scale.rs"
+
+[[test]]
+name = "jellyfin_shared_coverage"
+path = "tests/jellyfin_shared_coverage.rs"
+
+[[test]]
+name = "legacy_rejection"
+path = "tests/legacy_rejection.rs"
+
+[[test]]
+name = "library_browse_rows"
+path = "tests/library_browse_rows.rs"
+
+[[test]]
+name = "library_create_detection"
+path = "tests/library_create_detection.rs"
+
+[[test]]
+name = "library_cursor_paging"
+path = "tests/library_cursor_paging.rs"
+
+[[test]]
+name = "library_index_cursor"
+path = "tests/library_index_cursor.rs"
+
+[[test]]
+name = "library_media_info_refresh"
+path = "tests/library_media_info_refresh.rs"
+
+[[test]]
+name = "library_paging_validation"
+path = "tests/library_paging_validation.rs"
+
+[[test]]
+name = "library_patch_contract"
+path = "tests/library_patch_contract.rs"
+
+[[test]]
+name = "library_presence"
+path = "tests/library_presence.rs"
+
+[[test]]
+name = "library_presence_removal"
+path = "tests/library_presence_removal.rs"
+
+[[test]]
+name = "library_presence_safety"
+path = "tests/library_presence_safety.rs"
+
+[[test]]
+name = "library_read_logs"
+path = "tests/library_read_logs.rs"
+
+[[test]]
+name = "library_read_principal"
+path = "tests/library_read_principal.rs"
+
+[[test]]
+name = "library_reads_off_writer"
+path = "tests/library_reads_off_writer.rs"
+
+[[test]]
+name = "library_work_lifecycle"
+path = "tests/library_work_lifecycle.rs"
+
+[[test]]
+name = "marker_boundary_publication"
+path = "tests/marker_boundary_publication.rs"
+
+[[test]]
+name = "marker_kind_publication"
+path = "tests/marker_kind_publication.rs"
+
+[[test]]
+name = "marker_late_intro_capture"
+path = "tests/marker_late_intro_capture.rs"
+
+[[test]]
+name = "media_posters"
+path = "tests/media_posters.rs"
+
+[[test]]
+name = "metadata_priority"
+path = "tests/metadata_priority.rs"
+
+[[test]]
+name = "metadata_write_gate"
+path = "tests/metadata_write_gate.rs"
+
+[[test]]
+name = "n2_signal_shutdown"
+path = "tests/n2_signal_shutdown.rs"
+
+[[test]]
+name = "nfo_export_failure_isolation"
+path = "tests/nfo_export_failure_isolation.rs"
+
+[[test]]
+name = "nfo_scan_identity"
+path = "tests/nfo_scan_identity.rs"
+
+[[test]]
+name = "password_login_runtime"
+path = "tests/password_login_runtime.rs"
+
+[[test]]
+name = "playback_event_identity"
+path = "tests/playback_event_identity.rs"
+
+[[test]]
+name = "playback_identity_barrier"
+path = "tests/playback_identity_barrier.rs"
+
+[[test]]
+name = "playback_visibility_revocation"
+path = "tests/playback_visibility_revocation.rs"
+
+[[test]]
+name = "playback_writer_latency"
+path = "tests/playback_writer_latency.rs"
+
+[[test]]
+name = "probe_backlog_capacity"
+path = "tests/probe_backlog_capacity.rs"
+
+[[test]]
+name = "probe_context_retry"
+path = "tests/probe_context_retry.rs"
+
+[[test]]
+name = "probe_manager_lock"
+path = "tests/probe_manager_lock.rs"
+
+[[test]]
+name = "probe_missing_source"
+path = "tests/probe_missing_source.rs"
+
+[[test]]
+name = "probe_paused_manual_and_cancel"
+path = "tests/probe_paused_manual_and_cancel.rs"
+
+[[test]]
+name = "probe_queue_control_and_restart_pause"
+path = "tests/probe_queue_control_and_restart_pause.rs"
+
+[[test]]
+name = "probe_retry"
+path = "tests/probe_retry.rs"
+
+[[test]]
+name = "probe_retry_deleted_file"
+path = "tests/probe_retry_deleted_file.rs"
+
+[[test]]
+name = "probe_settings_runtime"
+path = "tests/probe_settings_runtime.rs"
+
+[[test]]
+name = "probe_source_races"
+path = "tests/probe_source_races.rs"
+
+[[test]]
+name = "product_user_agent"
+path = "tests/product_user_agent.rs"
+
+[[test]]
+name = "reads_during_scan"
+path = "tests/reads_during_scan.rs"
+
+[[test]]
+name = "reidentify_scoped"
+path = "tests/reidentify_scoped.rs"
+
+[[test]]
+name = "relative_data_startup"
+path = "tests/relative_data_startup.rs"
+
+[[test]]
+name = "remediation_acceptance"
+path = "tests/remediation_acceptance.rs"
+
+[[test]]
+name = "review_remediation_pipeline"
+path = "tests/review_remediation_pipeline.rs"
+
+[[test]]
+name = "review_remediation_playback"
+path = "tests/review_remediation_playback.rs"
+
+[[test]]
+name = "review_remediation_site_actions"
+path = "tests/review_remediation_site_actions.rs"
+
+[[test]]
+name = "scan_probe_backpressure"
+path = "tests/scan_probe_backpressure.rs"
+
+[[test]]
+name = "settings_env_precedence"
+path = "tests/settings_env_precedence.rs"
+
+[[test]]
+name = "sqlite_process_startup"
+path = "tests/sqlite_process_startup.rs"
+
+[[test]]
+name = "storage_cache_runtime"
+path = "tests/storage_cache_runtime.rs"
+
+[[test]]
+name = "storage_contention"
+path = "tests/storage_contention.rs"
+
+[[test]]
+name = "storage_end_to_end"
+path = "tests/storage_end_to_end.rs"
+
+[[test]]
+name = "storage_http_cutover"
+path = "tests/storage_http_cutover.rs"
+
+[[test]]
+name = "storage_integrity_runtime"
+path = "tests/storage_integrity_runtime.rs"
+
+[[test]]
+name = "storage_nfo_export"
+path = "tests/storage_nfo_export.rs"
+
+[[test]]
+name = "storage_query_scale"
+path = "tests/storage_query_scale.rs"
+
+[[test]]
+name = "storage_review_playback"
+path = "tests/storage_review_playback.rs"
+
+[[test]]
+name = "storage_transfer_presence_recovery"
+path = "tests/storage_transfer_presence_recovery.rs"
+
+[[test]]
+name = "subscription_e2e"
+path = "tests/subscription_e2e.rs"
+
+[[test]]
+name = "subscription_hot_reads"
+path = "tests/subscription_hot_reads.rs"
+
+[[test]]
+name = "subscription_wanted_work"
+path = "tests/subscription_wanted_work.rs"
+
+[[test]]
+name = "subtitle_runtime"
+path = "tests/subtitle_runtime.rs"
+
+[[test]]
+name = "theintrodb_rate_limit"
+path = "tests/theintrodb_rate_limit.rs"
+
+[[test]]
+name = "theintrodb_resolution"
+path = "tests/theintrodb_resolution.rs"
+
+[[test]]
+name = "vanished_file_cleanup"
+path = "tests/vanished_file_cleanup.rs"
+
+[[test]]
+name = "watch_stats_regression"
+path = "tests/watch_stats_regression.rs"
+
+[[test]]
+name = "write_admission"
+path = "tests/write_admission.rs"

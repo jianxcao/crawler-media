@@ -214,3 +214,163 @@ async fn patch_downloader_rejects_invalid_kind_without_saving() {
     .await;
     assert_eq!(detail["kind"], "qbittorrent");
 }
+
+#[tokio::test]
+async fn api_key_downloader_masks_secrets_selects_bearer_and_toggles_via_patch() {
+    let tmp = tempfile::tempdir().unwrap();
+    let app = app(&tmp);
+    let created = post_dl(
+        &app,
+        json!({
+            "name": "qb-apikey",
+            "kind": "qbittorrent",
+            "url": "http://qb-v5:8080",
+            "api_key": "  qbt_test_key_123  ",
+            "path_maps": [{ "from": "/downloads", "to": "/host/qb" }],
+            "is_default": true
+        }),
+    )
+    .await;
+    assert_eq!(created["auth_type"], "apikey");
+    assert_eq!(created["has_api_key"], true);
+    assert_eq!(created["has_password"], false);
+    assert!(created.get("api_key").is_none());
+    assert!(created.get("password").is_none());
+    let id = created["id"].as_str().unwrap().to_string();
+
+    let store = Store::open(tmp.path().join("data")).unwrap();
+    let ChosenDownloader::Qbittorrent(cfg) =
+        choose_downloader(&store, &DownloaderEnv::default()).unwrap()
+    else {
+        panic!("expected qbittorrent config");
+    };
+    assert_eq!(cfg.api_key.as_deref(), Some("qbt_test_key_123"));
+    assert_eq!(cfg.username, "");
+    assert_eq!(cfg.password, "");
+
+    // Partial PATCH omitting api_key keeps stored api_key intact.
+    let renamed = app
+        .clone()
+        .oneshot(request(
+            "PATCH",
+            &format!("/api/v1/downloaders/{id}"),
+            Some("management-secret"),
+            json!({ "name": "qb-apikey-renamed" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(renamed.status(), StatusCode::OK);
+    let renamed_data = json_data(renamed).await;
+    assert_eq!(renamed_data["auth_type"], "apikey");
+    assert_eq!(renamed_data["has_api_key"], true);
+    assert!(renamed_data.get("api_key").is_none());
+
+    // Switching back to password mode clears api_key when api_key="" is sent.
+    let switched = app
+        .clone()
+        .oneshot(request(
+            "PATCH",
+            &format!("/api/v1/downloaders/{id}"),
+            Some("management-secret"),
+            json!({ "username": "admin", "password": "pw", "api_key": "" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(switched.status(), StatusCode::OK);
+    let switched_data = json_data(switched).await;
+    assert_eq!(switched_data["auth_type"], "password");
+    assert_eq!(switched_data["has_api_key"], false);
+    assert_eq!(switched_data["has_password"], true);
+
+    let ChosenDownloader::Qbittorrent(cfg) =
+        choose_downloader(&store, &DownloaderEnv::default()).unwrap()
+    else {
+        panic!("expected qbittorrent config");
+    };
+    assert_eq!(cfg.api_key, None);
+    assert_eq!(cfg.username, "admin");
+    assert_eq!(cfg.password, "pw");
+}
+
+#[tokio::test]
+async fn verify_api_key_downloader_succeeds_via_bearer_without_login() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let login_hit = Arc::new(AtomicBool::new(false));
+    let flag = shutdown.clone();
+    let login_flag = login_hit.clone();
+    let server = std::thread::spawn(move || {
+        while !flag.load(Ordering::Relaxed) {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    let mut buf = [0u8; 4096];
+                    let n = stream.read(&mut buf).unwrap_or(0);
+                    let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                    let lower = req.to_ascii_lowercase();
+                    let (status, body) = if req.contains("/api/v2/auth/login") {
+                        login_flag.store(true, Ordering::Relaxed);
+                        ("500 Internal Server Error", "must not login")
+                    } else if req.contains("/api/v2/app/version")
+                        && lower.contains("authorization: bearer qbt_live_verify")
+                    {
+                        ("200 OK", "v5.3.0")
+                    } else {
+                        ("401 Unauthorized", "missing bearer")
+                    };
+                    let resp = format!(
+                        "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = stream.write_all(resp.as_bytes());
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    let tmp = tempfile::tempdir().unwrap();
+    let app = app(&tmp);
+    let created = post_dl(
+        &app,
+        json!({
+            "name": "qb-bearer",
+            "kind": "qbittorrent",
+            "url": format!("http://{addr}"),
+            "api_key": "qbt_live_verify",
+            "is_default": true
+        }),
+    )
+    .await;
+    let id = created["id"].as_str().unwrap();
+
+    let verified = app
+        .oneshot(request(
+            "POST",
+            &format!("/api/v1/downloaders/{id}/verify"),
+            Some("management-secret"),
+            Value::Null,
+        ))
+        .await
+        .unwrap();
+    shutdown.store(true, Ordering::Relaxed);
+    let _ = server.join();
+    assert_eq!(verified.status(), StatusCode::OK);
+    let data = json_data(verified).await;
+    assert_eq!(data["ok"], true, "{data}");
+    assert!(
+        !login_hit.load(Ordering::Relaxed),
+        "must not call /auth/login"
+    );
+}

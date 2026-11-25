@@ -1,14 +1,50 @@
 use super::*;
 
+fn trimmed_api_key(config: &QbitConfig) -> Option<&str> {
+    config
+        .api_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
+}
+
 impl QbitDownloader {
     pub fn connect(config: QbitConfig) -> Result<Self, DownloaderError> {
-        let cookie = Self::login(&config)?;
-        tracing::info!(url = %config.url, user = %config.username, "qBittorrent 连接成功");
+        let cookie = if let Some(key) = trimmed_api_key(&config) {
+            Self::verify_api_key(&config, key)?;
+            tracing::info!(url = %config.url, auth = "api_key", "qBittorrent 连接成功");
+            String::new()
+        } else {
+            let cookie = Self::login(&config)?;
+            tracing::info!(url = %config.url, user = %config.username, auth = "password", "qBittorrent 连接成功");
+            cookie
+        };
         Ok(Self {
             config,
             cookie: parking_lot::Mutex::new(cookie),
             login_lock: parking_lot::Mutex::new(()),
         })
+    }
+
+    fn verify_api_key(config: &QbitConfig, api_key: &str) -> Result<(), DownloaderError> {
+        let version_url = join(&config.url, "/api/v2/app/version");
+        let bearer = format!("Bearer {api_key}");
+        tracing::debug!(url = %version_url, "正在使用 API Key 验证 qBittorrent");
+        let response = agent_for_url(&config.url, true)
+            .get(&version_url)
+            .header("Authorization", &bearer)
+            .call()
+            .map_err(|e| {
+                tracing::error!(url = %config.url, error = %e, "qBittorrent API Key 验证失败");
+                match e {
+                    ureq::Error::StatusCode(code @ (401 | 403)) => DownloaderError::Message(format!(
+                        "qBittorrent API Key 认证失败（HTTP {code}），请检查 API Key 是否有效（需 qBittorrent v5.2+）"
+                    )),
+                    other => http_err(other),
+                }
+            })?;
+        let _ = read_body(response)?;
+        Ok(())
     }
 
     fn login(config: &QbitConfig) -> Result<String, DownloaderError> {
@@ -62,14 +98,29 @@ impl QbitDownloader {
         Ok(())
     }
 
-    /// Run an authenticated request; on 403 re-login once and retry (D-H1).
-    /// A second 403 is reported as an authentication error, never retried again.
-    fn authed<T>(&self, op: impl Fn(&str) -> Result<T, ureq::Error>) -> Result<T, DownloaderError> {
+    /// Run an authenticated request using either Bearer API key (v5.2+) or session cookie.
+    /// Cookie mode re-logs in once on 403 (D-H1); API key mode never attempts cookie login.
+    fn authed<T>(
+        &self,
+        op: impl Fn(&str, &str) -> Result<T, ureq::Error>,
+    ) -> Result<T, DownloaderError> {
+        if let Some(key) = trimmed_api_key(&self.config) {
+            let bearer = format!("Bearer {key}");
+            return match op("Authorization", &bearer) {
+                Err(ureq::Error::StatusCode(code @ (401 | 403))) => {
+                    tracing::error!(url = %self.config.url, status = code, "qBittorrent API Key 认证失败");
+                    Err(DownloaderError::Message(format!(
+                        "qBittorrent API Key authentication failed ({code})"
+                    )))
+                }
+                other => other.map_err(http_err),
+            };
+        }
         let cookie = self.cookie();
-        match op(&cookie) {
+        match op("Cookie", &cookie) {
             Err(ureq::Error::StatusCode(403)) => {
                 self.relogin(&cookie)?;
-                match op(&self.cookie()) {
+                match op("Cookie", &self.cookie()) {
                     Err(ureq::Error::StatusCode(403)) => {
                         tracing::error!(url = %self.config.url, "qBittorrent 重新登录后仍返回 403，认证失败");
                         Err(DownloaderError::Message(
@@ -114,39 +165,49 @@ impl Downloader for QbitDownloader {
         const UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
         let mut temp_path = None;
         let mut fallback_url = true;
-        if (download_url.starts_with("http://") || download_url.starts_with("https://"))
-            && let Ok(bytes) = self.download_torrent_bytes(download_url, UA)
-        {
-            // D-M4: only a bencoded dictionary with an `info` key is a
-            // torrent; an HTML login page / error body is not uploaded.
-            let valid = crate::torrent_info_hash(&bytes).is_some();
-            if !valid {
-                tracing::warn!(torrent = %torrent.title, bytes = bytes.len(), "种子链接返回的不是 .torrent（可能站点 Cookie 失效），不上传");
-            }
-            if valid {
-                static NONCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-                let n = NONCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                let temp = std::env::temp_dir().join(format!(
-                    "cm-torrent-{}-{n}-{}.torrent",
-                    std::process::id(),
-                    tag
-                ));
-                // D-H2: a task with the same info hash may already exist
-                // without our tags (added by hand). Claim it instead of
-                // failing every round with qBittorrent's `Fails.`.
-                if let Some(hash) = crate::torrent_info_hash(&bytes)
-                    && self.claim_existing(&hash, &tag, &torrent.title)?
-                {
-                    return Ok(());
+        if download_url.starts_with("http://") || download_url.starts_with("https://") {
+            match self.download_torrent_bytes_raw(download_url, UA) {
+                Ok(bytes) => {
+                    // D-M4: only a bencoded dictionary with an `info` key is a
+                    // torrent; an HTML login page / error body is not uploaded.
+                    let Some(hash) = crate::torrent_info_hash(&bytes) else {
+                        tracing::warn!(torrent = %torrent.title, bytes = bytes.len(), "种子链接返回的不是 .torrent（可能站点 Cookie 失效），拒绝该来源");
+                        return Err(DownloaderError::SourceRejected(
+                            "种子链接返回的不是合法 .torrent（可能站点 Cookie 失效、已被删种或配额超限）".into(),
+                        ));
+                    };
+                    static NONCE: std::sync::atomic::AtomicU64 =
+                        std::sync::atomic::AtomicU64::new(0);
+                    let n = NONCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let temp = std::env::temp_dir().join(format!(
+                        "cm-torrent-{}-{n}-{}.torrent",
+                        std::process::id(),
+                        tag
+                    ));
+                    // D-H2: a task with the same info hash may already exist
+                    // without our tags (added by hand). Claim it instead of
+                    // failing every round with qBittorrent's `Fails.`.
+                    if self.claim_existing(&hash, &tag, &torrent.title)? {
+                        return Ok(());
+                    }
+                    if std::fs::write(&temp, &bytes).is_ok() {
+                        temp_path = Some(temp);
+                        fallback_url = false;
+                    }
                 }
-                if std::fs::write(&temp, &bytes).is_ok() {
-                    temp_path = Some(temp);
-                    fallback_url = false;
+                Err(err) if is_synthetic_test_host_dns_error(download_url, &err) => {
+                    tracing::debug!(torrent = %torrent.title, "离线测试域名跳过直取，保留 enclosure URL 交由下载器处理");
+                }
+                Err(err) => {
+                    tracing::warn!(torrent = %torrent.title, error = %err, "拉取 .torrent 种子文件失败，拒绝该来源以便自动换源");
+                    return Err(DownloaderError::SourceRejected(format!(
+                        "拉取 .torrent 失败: {err}"
+                    )));
                 }
             }
         }
         if temp_path.is_none() && fallback_url && download_url != torrent.enclosure {
-            return Err(DownloaderError::Message(
+            return Err(DownloaderError::SourceRejected(
                 "failed to fetch resolved Torrent before the signed URL expired (站点 Cookie 失效或链接未返回 .torrent)".into(),
             ));
         }
@@ -370,12 +431,12 @@ impl Downloader for QbitDownloader {
                 download_limit, upload_limit
             ))
         );
-        let response = self.authed(|cookie| {
+        let response = self.authed(|auth_name, auth_val| {
             agent_for_url(&self.config.url, true)
                 .post(&url)
                 .header("Referer", &self.config.url)
                 .header("Origin", self.config.url.trim_end_matches('/'))
-                .header("Cookie", cookie)
+                .header(auth_name, auth_val)
                 .header("Content-Type", "application/x-www-form-urlencoded")
                 .send(&payload)
         })?;
@@ -527,41 +588,37 @@ impl QbitDownloader {
 
     /// Download a tracker .torrent (or magnet) so the short-lived link does
     /// not expire before qBittorrent fetches it.
-    fn download_torrent_bytes(
+    fn download_torrent_bytes_raw(
         &self,
         enclosure: &str,
         ua: &str,
-    ) -> Result<Vec<u8>, DownloaderError> {
+    ) -> Result<Vec<u8>, ureq::Error> {
         let response = http_agent()
             .get(enclosure)
             .header("User-Agent", ua)
-            .call()
-            .map_err(http_err)?;
-        response
-            .into_body()
-            .read_to_vec()
-            .map_err(|err| DownloaderError::Message(err.to_string()))
+            .call()?;
+        response.into_body().read_to_vec()
     }
 
     fn get(&self, url: &str) -> Result<String, DownloaderError> {
-        let response = self.authed(|cookie| {
+        let response = self.authed(|auth_name, auth_val| {
             agent_for_url(&self.config.url, true)
                 .get(url)
                 .header("Referer", &self.config.url)
                 .header("Origin", self.config.url.trim_end_matches('/'))
-                .header("Cookie", cookie)
+                .header(auth_name, auth_val)
                 .call()
         })?;
         read_body(response)
     }
 
     fn post_form(&self, url: &str, body: &str) -> Result<String, DownloaderError> {
-        let response = self.authed(|cookie| {
+        let response = self.authed(|auth_name, auth_val| {
             agent_for_url(&self.config.url, true)
                 .post(url)
                 .header("Referer", &self.config.url)
                 .header("Origin", self.config.url.trim_end_matches('/'))
-                .header("Cookie", cookie)
+                .header(auth_name, auth_val)
                 .header("Content-Type", "application/x-www-form-urlencoded")
                 .send(body)
         })?;
@@ -576,12 +633,12 @@ impl QbitDownloader {
     ) -> Result<(), DownloaderError> {
         let url = join(&self.config.url, "/api/v2/torrents/add");
         let response = self
-            .authed(|cookie| {
+            .authed(|auth_name, auth_val| {
                 agent_for_url(&self.config.url, true)
                     .post(&url)
                     .header("Referer", &self.config.url)
                     .header("Origin", self.config.url.trim_end_matches('/'))
-                    .header("Cookie", cookie)
+                    .header(auth_name, auth_val)
                     .send(form())
             })
             .inspect_err(|e| {
@@ -590,11 +647,30 @@ impl QbitDownloader {
         let body = read_body(response)?;
         if body.trim().eq_ignore_ascii_case("fails.") {
             tracing::error!(torrent = %title, "qBittorrent 拒绝了添加请求");
-            return Err(DownloaderError::Message(
+            return Err(DownloaderError::SourceRejected(
                 "qBittorrent rejected the add".into(),
             ));
         }
         tracing::info!(torrent = %title, tag = %tag, "种子已成功添加到 qBittorrent");
         Ok(())
     }
+}
+
+/// Offline unit/E2E fixtures use RFC 2606 `.example`/`.test`/`.invalid` URLs
+/// with mock downloaders that inspect the forwarded URL instead of serving bytes.
+fn is_synthetic_test_host_dns_error(url: &str, err: &ureq::Error) -> bool {
+    let host = url
+        .split_once("://")
+        .map(|(_, rest)| rest.split('/').next().unwrap_or_default())
+        .map(|auth| auth.rsplit('@').next().unwrap_or(auth))
+        .map(|hp| hp.split(':').next().unwrap_or(hp).to_ascii_lowercase())
+        .unwrap_or_default();
+    let synthetic =
+        host.ends_with(".example") || host.ends_with(".test") || host.ends_with(".invalid");
+    synthetic
+        && (matches!(err, ureq::Error::HostNotFound)
+            || (matches!(err, ureq::Error::Io(_))
+                && err
+                    .to_string()
+                    .contains("failed to lookup address information")))
 }

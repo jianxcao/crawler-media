@@ -6,6 +6,7 @@ import { DirectoryPicker } from "@/components/directory-picker";
 import { FolderIcon, PlusIcon, XIcon } from "@/components/icons";
 import type {
   Downloader,
+  DownloaderAuthType,
   DownloaderClientType,
   DownloaderPayload,
   PathMapping,
@@ -48,11 +49,17 @@ export function DownloaderForm({
   const [clientType, setClientType] = useState<DownloaderClientType>(
     downloader?.kind ?? "qbittorrent",
   );
+  const [authType, setAuthType] = useState<DownloaderAuthType>(
+    downloader?.kind !== "transmission" && downloader?.auth_type === "apikey"
+      ? "apikey"
+      : "password",
+  );
   const [name, setName] = useState(downloader?.name ?? "");
   const [url, setUrl] = useState(downloader?.url ?? "");
   const [username, setUsername] = useState(downloader?.username ?? "");
   // 出于安全后端不回传密码，编辑时留空需重新填写（未开鉴权则保持留空）
   const [password, setPassword] = useState("");
+  const [apiKey, setApiKey] = useState("");
   // 路径映射：跨容器部署时本机与下载器看同一块盘的两个名字。
   // 体检跳转带建议时预填一行本机侧（右侧留给用户按下载器视角补齐）
   const [mappings, setMappings] = useState<PathMapping[]>(
@@ -80,20 +87,29 @@ export function DownloaderForm({
   const mappingsUnique =
     new Set(localPaths).size === localPaths.length &&
     new Set(remotePaths).size === remotePaths.length;
+  const isQbitApiKey = clientType === "qbittorrent" && authType === "apikey";
+  const hasValidAuth =
+    !isQbitApiKey || apiKey.trim().length > 0 || Boolean(downloader?.has_api_key);
   const canSubmit =
     name.trim().length > 0 &&
     /^https?:\/\/.+/.test(url.trim()) &&
+    hasValidAuth &&
     mappingsComplete &&
     mappingsUnique;
 
   function submit() {
     setBusy(true);
+    const authPayload: Partial<DownloaderPayload> =
+      clientType === "qbittorrent"
+        ? authType === "apikey"
+          ? { auth_type: "apikey", username: null, password: null, api_key: apiKey.trim() || null }
+          : { auth_type: "password", username: username.trim() || null, password: password || null, api_key: "" }
+        : { username: username.trim() || null, password: password || null };
     void onSubmit({
       name: name.trim(),
       client_type: clientType,
       url: url.trim(),
-      username: username.trim() || null,
-      password: password || null,
+      ...authPayload,
       path_mappings: mappings.length
         ? mappings.map((m) => ({ local: m.local.trim(), remote: m.remote.trim() }))
         : null,
@@ -157,30 +173,80 @@ export function DownloaderForm({
         />
       </div>
 
-      {/* 凭证：未开鉴权的下载器可整体留空 */}
-      <div className="grid grid-cols-2 gap-3">
+      {/* 认证方式（qBittorrent 支持用户名密码或 v5.2+ 原生 API Key） */}
+      {clientType === "qbittorrent" && (
         <div>
-          <label className={labelClass}>用户名（可选）</label>
-          <input
-            type="text"
-            value={username}
-            onChange={(e) => setUsername(e.target.value)}
-            autoComplete="off"
-            className={inputClass}
-          />
+          <label className={labelClass}>认证方式</label>
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={() => setAuthType("password")}
+              data-active={authType === "password"}
+              className="glass-row nav-item !w-auto px-3 py-1.5 text-sub font-medium"
+            >
+              用户名与密码
+            </button>
+            <button
+              type="button"
+              onClick={() => setAuthType("apikey")}
+              data-active={authType === "apikey"}
+              className="glass-row nav-item !w-auto px-3 py-1.5 text-sub font-medium"
+            >
+              API Key（v5.2+）
+            </button>
+          </div>
         </div>
-        <div>
-          <label className={labelClass}>密码（可选）</label>
-          <input
-            type="password"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            placeholder={downloader ? "出于安全，请重新填写" : ""}
-            autoComplete="new-password"
-            className={inputClass}
-          />
+      )}
+
+      {isQbitApiKey ? (
+        <div className="space-y-2">
+          <div>
+            <label className={labelClass}>API Key</label>
+            <input
+              type="password"
+              value={apiKey}
+              onChange={(e) => setApiKey(e.target.value)}
+              placeholder={
+                downloader?.has_api_key
+                  ? "已配置 API Key（留空则保持不变）"
+                  : "粘贴 qbt_ 开头的 API Key"
+              }
+              autoComplete="new-password"
+              className={`${inputClass} font-mono`}
+            />
+          </div>
+          <p className="rounded-xl border border-white/[0.06] bg-white/[0.03] px-3 py-2 text-caption leading-relaxed text-[var(--text-faint)]">
+            适用于 qBittorrent v5.2.0 及以上版本：请求时直接发送
+            <code className="mx-1 font-mono text-[var(--text-muted)]">Authorization: Bearer</code>
+            认证头，无需填写用户名/密码，也不依赖 Cookie 会话。请在 qBittorrent WebUI → 设置（选项）→ WebUI → API Key 中生成并复制
+            <code className="mx-0.5 font-mono">qbt_</code> 开头的密钥。
+          </p>
         </div>
-      </div>
+      ) : (
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className={labelClass}>用户名（可选）</label>
+            <input
+              type="text"
+              value={username}
+              onChange={(e) => setUsername(e.target.value)}
+              autoComplete="off"
+              className={inputClass}
+            />
+          </div>
+          <div>
+            <label className={labelClass}>密码（可选）</label>
+            <input
+              type="password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              placeholder={downloader ? "出于安全，请重新填写" : ""}
+              autoComplete="new-password"
+              className={inputClass}
+            />
+          </div>
+        </div>
+      )}
 
       {/* 路径映射：默认折叠，仅跨容器/跨主机部署需要展开配置 */}
       <div>

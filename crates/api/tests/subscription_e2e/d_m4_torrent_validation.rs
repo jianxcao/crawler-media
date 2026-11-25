@@ -26,8 +26,17 @@ async fn submit_with(body: &str) -> String {
 
 #[tokio::test]
 async fn html_login_page_is_not_uploaded_as_torrent() {
-    let source = submit_with("<!DOCTYPE html><html><body>login</body></html>").await;
-    assert_ne!(source, "file", "HTML not uploaded as a .torrent");
+    let h = Harness::new();
+    h.create_site_at_mock().await;
+    let id = h.create_movie_subscribe(serde_json::json!({})).await;
+    *h.qb.torrent_file.lock() = Some("<!DOCTYPE html><html><body>login</body></html>".to_string());
+    h.run_subscribe(id).await;
+    assert_eq!(
+        h.qb.add_count(),
+        0,
+        "HTML response must be rejected before forwarding to qBittorrent"
+    );
+    assert_eq!(temp_torrents(), 0, "no cm-torrent-* temp files left");
 }
 
 #[tokio::test]

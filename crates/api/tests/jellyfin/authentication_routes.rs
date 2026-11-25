@@ -254,3 +254,145 @@ async fn authenticated_system_info_and_session_capabilities_endpoints() {
         }
     }
 }
+
+#[tokio::test]
+async fn jellyfin_login_accepts_case_insensitive_property_names() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (app, _, _) = app(tmp.path());
+    for prefix in ["", "/emby"] {
+        for (username_key, password_key) in [
+            ("Username", "Pw"),
+            ("username", "pw"),
+            ("UserName", "PW"),
+            ("USERNAME", "pW"),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::post(format!("{prefix}/Users/AuthenticateByName"))
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            json!({username_key: "admin", password_key: "admin-token"}).to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::OK,
+                "{prefix} {username_key} {password_key}"
+            );
+            let body = json(response).await;
+            let token = body["AccessToken"].as_str().unwrap();
+            let protected = app
+                .clone()
+                .oneshot(
+                    Request::get(format!("{prefix}/UserViews"))
+                        .header("authorization", format!("Bearer {token}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(protected.status(), StatusCode::OK);
+        }
+    }
+}
+
+#[tokio::test]
+async fn jellyfin_login_prefers_pw_when_password_is_also_present() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (app, _, _) = app(tmp.path());
+    for prefix in ["", "/emby"] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post(format!("{prefix}/Users/AuthenticateByName"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({"Username": "admin", "Pw": "admin-token", "Password": "incorrect"})
+                            .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{prefix}");
+    }
+}
+
+#[tokio::test]
+async fn jellyfin_login_rejects_invalid_credentials_and_malformed_fields() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (app, _, _) = app(tmp.path());
+    for prefix in ["", "/emby"] {
+        for (body, expected) in [
+            (
+                json!({"Username": "admin", "Pw": "wrong"}),
+                StatusCode::UNAUTHORIZED,
+            ),
+            (
+                json!({"Username": "admin", "Pw": "wrong", "Password": "admin-token"}),
+                StatusCode::UNAUTHORIZED,
+            ),
+            (
+                json!({"Username": "admin", "Pw": null, "Password": "admin-token"}),
+                StatusCode::UNAUTHORIZED,
+            ),
+            (json!({"Username": "admin"}), StatusCode::UNAUTHORIZED),
+            (
+                json!({"Username": null, "Pw": "admin-token"}),
+                StatusCode::UNAUTHORIZED,
+            ),
+            (
+                json!({"Username": 42, "Pw": "admin-token"}),
+                StatusCode::UNPROCESSABLE_ENTITY,
+            ),
+            (
+                json!({"Username": "admin", "Pw": 42}),
+                StatusCode::UNPROCESSABLE_ENTITY,
+            ),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::post(format!("{prefix}/Users/AuthenticateByName"))
+                        .header("content-type", "application/json")
+                        .body(Body::from(body.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected, "{prefix} {body}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn jellyfin_login_accepts_vidhub_password_and_ignores_extra_fields() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (app, _, _) = app(tmp.path());
+    for prefix in ["", "/emby"] {
+        let response = app.clone().oneshot(
+            Request::post(format!("{prefix}/Users/AuthenticateByName"))
+                .header("content-type", "application/json")
+                .body(Body::from(json!({"Username": "admin", "Password": "admin-token", "Extra": {"arbitrary": true}}).to_string()))
+                .unwrap(),
+        ).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{prefix}");
+    }
+}
+
+#[tokio::test]
+async fn jellyfin_login_ignores_non_string_password_when_pw_is_present() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (app, _, _) = app(tmp.path());
+    let response = app.oneshot(
+        Request::post("/Users/AuthenticateByName")
+            .header("content-type", "application/json")
+            .body(Body::from(json!({"Username": "admin", "Pw": "admin-token", "Password": {"ignored": true}}).to_string()))
+            .unwrap(),
+    ).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+}

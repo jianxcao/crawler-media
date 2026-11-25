@@ -13,6 +13,10 @@ pub enum DownloaderError {
     /// (`error` / `missingFiles`); callers must switch source.
     #[error("existing downloader task {0} is broken")]
     ExistingTaskBroken(String),
+    /// Fetching or validating the `.torrent` from the indexer/source failed
+    /// (404, timeout, HTML login page, etc.); callers may fall back to another candidate.
+    #[error("torrent source rejected: {0}")]
+    SourceRejected(String),
 }
 
 pub trait Downloader: Send + Sync {

@@ -457,6 +457,7 @@ async fn hash_task_operations_route_to_the_named_downloader() {
             url: default_url.clone(),
             username: "admin".into(),
             password: "pass".into(),
+            api_key: None,
             category: None,
             path_maps: vec![],
         })

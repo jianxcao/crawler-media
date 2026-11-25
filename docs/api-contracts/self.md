@@ -79,7 +79,7 @@ HTTP 路径是 `/rule-sets`；表名仍是 `filters`。这是有意的 API 别�
 
 ### Downloader
 
-`{id, name, kind: "qbittorrent"|"transmission", url, username?, password?, category?, path_maps: [{from, to}], is_default, status, last_error?}`
+`{id, name, kind: "qbittorrent"|"transmission", url, username?, password?, api_key?, auth_type: "password"|"apikey", has_api_key, has_password, category?, path_maps: [{from, to}], is_default, status, last_error?}`（响应回显省略明文 `password`/`api_key`）。
 
 ### Library
 

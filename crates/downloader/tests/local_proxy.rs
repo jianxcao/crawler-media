@@ -176,6 +176,7 @@ fn loopback_downloader_connections_bypass_system_proxy() {
             url: qb.url.clone(),
             username: "admin".into(),
             password: "pass".into(),
+            api_key: None,
             category: None,
             path_maps: vec![],
         });

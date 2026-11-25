@@ -211,3 +211,85 @@ fn default_patterns_render_byte_identical() {
         "/lib/The Matrix (1999)/The Matrix (1999) - 2160p.mkv"
     );
 }
+
+#[test]
+fn title_with_slash_is_sanitized_and_never_creates_nested_directory() {
+    let mut media = tv();
+    media.title = "Fate/stay night".into();
+    media.original_title = Some("Face/Off".into());
+    media.year = Some(2006);
+    let mut release = release_ep();
+    release.group = Some("Sub/Group".into());
+
+    let tv_path = render_path(
+        Path::new("/lib"),
+        default_pattern(MediaKind::Tv),
+        &media,
+        &release,
+        Path::new("fsn.mkv"),
+    )
+    .unwrap();
+    assert_eq!(
+        tv_path,
+        Path::new("/lib/Fate stay night (2006)/Season 01/Fate stay night - S01E01.mkv")
+    );
+
+    let custom_movie = render_path(
+        Path::new("/lib"),
+        "{original_title} ({year})/{title} [{release_group}]{ext}",
+        &media,
+        &release,
+        Path::new("movie.mkv"),
+    )
+    .unwrap();
+    assert_eq!(
+        custom_movie,
+        Path::new("/lib/Face Off (2006)/Fate stay night [Sub Group].mkv")
+    );
+}
+
+#[test]
+fn comprehensive_directory_structures_cover_multi_episode_and_custom_templates() {
+    let mut ep_span = release_ep();
+    ep_span.episode = Some(1);
+    ep_span.episode_to = Some(2);
+    ep_span.resolution = Some("2160p".into());
+    ep_span.source = Some("WEB-DL".into());
+    ep_span.group = Some("HDSky".into());
+
+    let span_path = render_path(
+        Path::new("/tv"),
+        "{title}/S{season:02d}/{title} - {season_episode} [{resolution}.{media_source}-{release_group}]{ext}",
+        &tv(),
+        &ep_span,
+        Path::new("span.mp4"),
+    )
+    .unwrap();
+    assert_eq!(
+        span_path,
+        Path::new("/tv/The Expanse/S01/The Expanse - S01E01-E02 [2160p.WEB-DL-HDSky].mp4")
+    );
+
+    let inception = Media {
+        title: "Inception".into(),
+        year: Some(2010),
+        tmdb_id: Some("27205".into()),
+        ..movie()
+    };
+    let mut rel_inc = release_movie();
+    rel_inc.resolution = Some("1080p".into());
+    rel_inc.source = Some("BluRay".into());
+    rel_inc.group = Some("SPARKS".into());
+    let custom = render_path(
+        Path::new("/movies"),
+        "{title} ({year}) [tmdbid-{tmdb_id}]/{title}.{year}.{resolution}.{media_source}-{release_group}{ext}",
+        &inception,
+        &rel_inc,
+        Path::new("inc.mkv"),
+    )
+    .unwrap();
+    assert_eq!(
+        custom,
+        Path::new("/movies/Inception (2010) [tmdbid-27205]/Inception.2010.1080p.BluRay-SPARKS.mkv")
+    );
+}

@@ -29,6 +29,7 @@ pub const KNOWN_ENV_VARS: &[&str] = &[
     "CRAWLER_MEDIA_QB_URL",
     "CRAWLER_MEDIA_QB_USER",
     "CRAWLER_MEDIA_QB_PASS",
+    "CRAWLER_MEDIA_QB_API_KEY",
     "CRAWLER_MEDIA_QB_CATEGORY",
     "CRAWLER_MEDIA_QB_PATH_MAP",
     "CRAWLER_MEDIA_TR_PATH_MAP",
@@ -52,6 +53,7 @@ pub const KNOWN_ENV_VARS: &[&str] = &[
     "CRAWLER_MEDIA_TMDB_KEY_FILE",
     "CRAWLER_MEDIA_TVDB_KEY_FILE",
     "CRAWLER_MEDIA_QB_PASS_FILE",
+    "CRAWLER_MEDIA_QB_API_KEY_FILE",
     "CRAWLER_MEDIA_METADATA_PROXY_USER_FILE",
     "CRAWLER_MEDIA_METADATA_PROXY_PASS_FILE",
 ];
@@ -102,6 +104,8 @@ pub struct ServerConfig {
     pub qb_user: Option<String>,
     /// Env: `CRAWLER_MEDIA_QB_PASS`.
     pub qb_pass: Option<String>,
+    /// Env: `CRAWLER_MEDIA_QB_API_KEY` (or `_FILE`).
+    pub qb_api_key: Option<String>,
     /// Env: `CRAWLER_MEDIA_QB_CATEGORY`.
     pub qb_category: Option<String>,
     /// Path mapping for qBittorrent (container → host).
@@ -148,6 +152,7 @@ impl std::fmt::Debug for ServerConfig {
             .field("qb_url", &self.qb_url)
             .field("qb_user", &self.qb_user)
             .field("qb_pass", &redacted(&self.qb_pass))
+            .field("qb_api_key", &redacted(&self.qb_api_key))
             .field("qb_category", &self.qb_category)
             .field("qb_path_map_raw", &self.qb_path_map_raw)
             .field("tr_path_map_raw", &self.tr_path_map_raw)
@@ -193,6 +198,7 @@ impl ServerConfig {
             qb_url: nonempty("CRAWLER_MEDIA_QB_URL"),
             qb_user: nonempty("CRAWLER_MEDIA_QB_USER"),
             qb_pass: secret("CRAWLER_MEDIA_QB_PASS"),
+            qb_api_key: secret("CRAWLER_MEDIA_QB_API_KEY"),
             qb_category: nonempty("CRAWLER_MEDIA_QB_CATEGORY"),
             qb_path_map_raw: nonempty("CRAWLER_MEDIA_QB_PATH_MAP"),
             tr_path_map_raw: nonempty("CRAWLER_MEDIA_TR_PATH_MAP"),

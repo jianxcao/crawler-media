@@ -1,6 +1,8 @@
 """Bound concurrent builds and tests on the shared development host."""
 import fcntl
 import os
+import shutil
+import subprocess
 import sys
 import time
 
@@ -46,4 +48,29 @@ while True:
 
 for lock in held_locks:
     os.set_inheritable(lock.fileno(), True)
-os.execvpe(command[0], command, {**os.environ, "TMPDIR": "/tmp"})
+
+env = {**os.environ, "TMPDIR": "/tmp"}
+taskpolicy = None
+if sys.platform == "darwin" and os.environ.get("CM_NO_BG_QOS") != "1":
+    taskpolicy = shutil.which("taskpolicy") or (
+        "/usr/sbin/taskpolicy" if os.path.exists("/usr/sbin/taskpolicy") else None
+    )
+
+is_cargo_test = (
+    len(command) >= 2
+    and os.path.basename(command[0]) == "cargo"
+    and command[1] == "test"
+)
+if taskpolicy is not None and is_cargo_test:
+    # Run the heavy compile+link pass in macOS Background QoS so desktop UI stays
+    # responsive, then run compiled test binaries at normal QoS so strict
+    # millisecond timing assertions are not tripped by E-core/IO throttling.
+    cargo_args = command[: command.index("--")] if "--" in command else list(command)
+    if "--no-run" not in cargo_args and "--doc" not in cargo_args:
+        status = subprocess.run([taskpolicy, "-b", *cargo_args, "--no-run"], env=env)
+        if status.returncode != 0:
+            raise SystemExit(status.returncode)
+elif taskpolicy is not None:
+    command = [taskpolicy, "-b", *command]
+
+os.execvpe(command[0], command, env)

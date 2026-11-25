@@ -49,6 +49,7 @@ fn connect(url: String) -> QbitDownloader {
         url,
         username: "admin".into(),
         password: "pass".into(),
+        api_key: None,
         category: None,
         path_maps: vec![],
     })

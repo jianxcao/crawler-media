@@ -26,6 +26,7 @@ fn downloader() -> DownloaderRow {
         url: "http://fixture.invalid/".into(),
         username: None,
         password: None,
+        api_key: None,
         category: None,
         path_maps: vec![],
         is_default: false,
@@ -101,5 +102,76 @@ fn verification_result_matches_exact_config_and_status_pair_survives_reopen() {
     assert_eq!(
         reopened.get_setting(&error_key).unwrap().as_deref(),
         Some("current failure")
+    );
+}
+
+#[test]
+fn downloader_api_key_persists_lists_clears_and_triggers_verification_cas() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Store::open(tmp.path()).unwrap();
+    let mut row = downloader();
+    row.is_default = true;
+    row.api_key = Some("qbt_first_key".into());
+    store.insert_downloader(&row).unwrap();
+
+    assert_eq!(
+        store
+            .get_downloader(row.id)
+            .unwrap()
+            .unwrap()
+            .api_key
+            .as_deref(),
+        Some("qbt_first_key")
+    );
+    assert_eq!(
+        store
+            .default_downloader()
+            .unwrap()
+            .unwrap()
+            .api_key
+            .as_deref(),
+        Some("qbt_first_key")
+    );
+    assert_eq!(
+        store.list_downloaders().unwrap()[0].api_key.as_deref(),
+        Some("qbt_first_key")
+    );
+
+    // Changing api_key concurrently invalidates stale verification CAS.
+    let other = Store::open(tmp.path()).unwrap();
+    let mut updated = row.clone();
+    updated.api_key = Some("qbt_rotated_key".into());
+    other.save_downloader(&updated).unwrap();
+    assert!(
+        !store.record_downloader_verification(&row, Ok(())).unwrap(),
+        "changed api_key must trigger CAS conflict"
+    );
+    assert!(
+        store
+            .record_downloader_verification(&updated, Ok(()))
+            .unwrap()
+    );
+
+    // Clearing api_key deletes the setting cleanly.
+    updated.api_key = None;
+    store.save_downloader(&updated).unwrap();
+    assert!(
+        store
+            .get_downloader(row.id)
+            .unwrap()
+            .unwrap()
+            .api_key
+            .is_none()
+    );
+
+    // Re-set then delete downloader cleans up setting as well.
+    updated.api_key = Some("qbt_temp_key".into());
+    store.save_downloader(&updated).unwrap();
+    assert!(store.delete_downloader(row.id).unwrap());
+    assert!(
+        store
+            .get_setting(&format!("downloader.{}.api_key", row.id))
+            .unwrap()
+            .is_none()
     );
 }
