@@ -1,0 +1,348 @@
+#[path = "management/common.rs"]
+mod common;
+#[path = "support/theintrodb.rs"]
+mod fixture;
+
+use axum::http::StatusCode;
+use domain::{FileCoverage, Media, MediaId, MediaKind, UnitKey};
+use fixture::Server;
+use parking_lot::Mutex;
+use std::{
+    collections::HashMap,
+    sync::{
+        Arc,
+        atomic::{AtomicI64, Ordering},
+    },
+};
+use tower::ServiceExt;
+
+const RESPONSE: &str = r#"{"tvdb_id":169,"type":"tv","season":1,"episode":__EP__,"group_duration_ms":2700000,"intro":[{"start_ms":null,"end_ms":70500,"confidence":0.87,"submission_count":12}]}"#;
+
+struct Clock(AtomicI64);
+impl api::playback_events::PlaybackClock for Clock {
+    fn now_ms(&self) -> i64 {
+        self.0.load(Ordering::SeqCst)
+    }
+}
+
+struct NoMediaReads;
+impl api::marker_resolver::ChapterProbe for NoMediaReads {
+    fn probe(&self, _: &std::path::Path) -> Option<Vec<marker::Chapter>> {
+        panic!("cloud marker rate-limit tests must not read STRM sources")
+    }
+}
+
+struct LocalClient(String);
+impl api::theintrodb_lookup::ClientFactory for LocalClient {
+    fn create(&self, key: Option<String>) -> api::theintrodb::TheIntroDbClient {
+        api::theintrodb::TheIntroDbClient::new(key).with_base_url(&self.0)
+    }
+}
+
+struct Fixture {
+    _tmp: tempfile::TempDir,
+    store: Arc<api::Store>,
+    state: api::ApiState,
+    clock: Arc<Clock>,
+    media: Media,
+    files: Vec<(UnitKey, FileCoverage)>,
+}
+
+fn setup_episodes(server: &Server, durations: &[Option<i64>]) -> Fixture {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Arc::new(api::Store::open(tmp.path().join("data")).unwrap());
+    let clock = Arc::new(Clock(AtomicI64::new(10_000)));
+    let media = store
+        .ensure_media(Media {
+            id: MediaId::new(),
+            kind: MediaKind::Tv,
+            title: "Rate Limit Show".into(),
+            year: None,
+            original_title: None,
+            aliases: vec![],
+            tmdb_id: Some("123".into()),
+            douban_id: None,
+            tvdb_id: None,
+            bangumi_id: None,
+            anilist_id: None,
+        })
+        .unwrap();
+    let root = tmp.path().join("strm");
+    std::fs::create_dir_all(&root).unwrap();
+    let lib = store
+        .create_library(
+            MediaKind::Tv,
+            "Rate Limit",
+            &[root.to_str().unwrap()],
+            "everyone",
+            true,
+            &[],
+        )
+        .unwrap();
+    store
+        .set_library_intro_settings(&lib.id, true, false)
+        .unwrap();
+    let mut files = Vec::new();
+    for (idx, duration) in durations.iter().enumerate() {
+        let ep = (idx as u32) + 2;
+        let path = root.join(format!("S01E{ep:02}.strm"));
+        std::fs::write(&path, format!("https://fixture.invalid/e{ep}.mkv")).unwrap();
+        let file = store::test_support::publish_fixture_file_units(
+            &store,
+            &store::test_support::FixtureFile {
+                media_id: media.id,
+                path: path.display().to_string(),
+                ..Default::default()
+            },
+            &[UnitKey::new(1, ep as i32)],
+        )
+        .unwrap();
+        if duration.is_some() {
+            store
+                .publish_probe_result(
+                    file.file_id,
+                    &store::library_write::probe::ProbePublication {
+                        expected: &file.version,
+                        tracks_version: store::library_write::probe::CURRENT_TRACKS_VERSION,
+                        resolution: None,
+                        codec: None,
+                        hdr: store::library_write::probe::Observed::NotObserved,
+                        duration_ms: *duration,
+                        details: None,
+                    },
+                    0,
+                )
+                .unwrap();
+        }
+        store
+            .put_cached_chapters(&file.file_id.to_string(), &[])
+            .unwrap();
+        let cov = store.file_coverage_by_id(file.file_id).unwrap().unwrap();
+        files.push((UnitKey::new(1, ep as i32), cov));
+    }
+    store
+        .save_raw_scrape_settings(r#"{"theintrodb_enabled":true,"theintrodb_api_key":"key-a"}"#)
+        .unwrap();
+    let state = common::state(
+        tmp.path(),
+        Arc::new(common::Fixtures {
+            requests: Mutex::new(Vec::new()),
+            bodies: HashMap::new(),
+        }),
+        Arc::new(downloader::MemoryDownloader::new(tmp.path().join("stage"))),
+    )
+    .with_playback_clock(clock.clone())
+    .with_chapter_probe(Arc::new(NoMediaReads))
+    .with_theintrodb_factory(Arc::new(LocalClient(server.url.clone())));
+    Fixture {
+        _tmp: tmp,
+        store,
+        state,
+        clock,
+        media,
+        files,
+    }
+}
+
+async fn get_chapters(f: &Fixture, idx: usize) -> Vec<serde_json::Value> {
+    let (unit, cov) = &f.files[idx];
+    let url = format!(
+        "/api/v1/libraries/{}/items/{}/chapters?file_id={}&season={}&episode={}",
+        cov.file.library_id, f.media.id, cov.file.file_id, unit.season, unit.episode
+    );
+    let resp = api::router(f.state.clone())
+        .oneshot(common::request(
+            "GET",
+            &url,
+            Some("management-secret"),
+            serde_json::Value::Null,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    common::json_data(resp).await.as_array().unwrap().clone()
+}
+
+async fn open_session_pending(f: &Fixture, idx: usize) -> bool {
+    let (unit, cov) = &f.files[idx];
+    let resp = api::router(f.state.clone())
+        .oneshot(common::request(
+            "POST",
+            "/api/v1/playback/sessions",
+            Some("management-secret"),
+            serde_json::json!({
+                "media_item_id": f.media.id,
+                "file_id": cov.file.file_id,
+                "season_number": unit.season,
+                "episode_number": unit.episode,
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    common::json_data(resp).await["chapters_pending"]
+        .as_bool()
+        .unwrap()
+}
+
+#[tokio::test]
+async fn daily_quota_429_trips_cooldown_skips_session_lookup_and_recovers_on_key_change_or_clock() {
+    let server = Server::for_any_episode(
+        429,
+        &[
+            ("X-UsageLimit-Reset", "3600"),
+            ("X-UsageLimit-Remaining", "0"),
+        ],
+        r#"{"error":"Usage limit exceeded","code":"usage_limit_exceeded"}"#,
+        true,
+    );
+    let f = setup_episodes(&server, &[Some(2_700_000), Some(2_700_000)]);
+
+    assert!(get_chapters(&f, 0).await.is_empty());
+    assert_eq!(server.requests.load(Ordering::SeqCst), 1);
+
+    // Within cooldown: session reports chapters_pending=false and other episode skips HTTP.
+    assert!(!open_session_pending(&f, 1).await);
+    assert!(get_chapters(&f, 1).await.is_empty());
+    f.clock.0.store(10_000 + 3_500_000, Ordering::SeqCst);
+    assert!(get_chapters(&f, 1).await.is_empty());
+    assert_eq!(server.requests.load(Ordering::SeqCst), 1);
+
+    // Switching API key bumps configuration_revision -> new scope recovers immediately.
+    server.respond_with_headers(200, &[], RESPONSE);
+    f.store
+        .save_raw_scrape_settings(r#"{"theintrodb_enabled":true,"theintrodb_api_key":"key-b"}"#)
+        .unwrap();
+    let chapters = get_chapters(&f, 1).await;
+    assert!(chapters.iter().any(|c| c["marker_type"] == "IntroStart"));
+    assert_eq!(server.requests.load(Ordering::SeqCst), 2);
+
+    // Trigger DailyQuota again on new scope and verify natural clock expiry restores access.
+    server.respond_with_headers(
+        429,
+        &[
+            ("X-UsageLimit-Reset", "3600"),
+            ("X-UsageLimit-Remaining", "0"),
+        ],
+        r#"{"error":"Usage limit exceeded","code":"usage_limit_exceeded"}"#,
+    );
+    assert!(get_chapters(&f, 0).await.is_empty());
+    assert_eq!(server.requests.load(Ordering::SeqCst), 3);
+
+    server.respond_with_headers(200, &[], RESPONSE);
+    f.clock
+        .0
+        .store(10_000 + 3_500_000 + 3_600_001, Ordering::SeqCst);
+    let recovered = get_chapters(&f, 0).await;
+    assert!(recovered.iter().any(|c| c["marker_type"] == "IntroStart"));
+    assert_eq!(server.requests.load(Ordering::SeqCst), 4);
+}
+
+#[tokio::test]
+async fn burst_429_uses_short_x_ratelimit_reset_window() {
+    let server = Server::for_any_episode(
+        429,
+        &[("X-RateLimit-Reset", "9")],
+        r#"{"error":"Too Many Requests"}"#,
+        true,
+    );
+    let f = setup_episodes(&server, &[Some(2_700_000), Some(2_700_000)]);
+
+    assert!(get_chapters(&f, 0).await.is_empty());
+    assert_eq!(server.requests.load(Ordering::SeqCst), 1);
+
+    server.respond_with_headers(200, &[], RESPONSE);
+    f.clock.0.store(10_000 + 5_000, Ordering::SeqCst);
+    assert!(!open_session_pending(&f, 1).await);
+    assert_eq!(server.requests.load(Ordering::SeqCst), 1);
+
+    f.clock.0.store(10_000 + 9_001, Ordering::SeqCst);
+    assert!(open_session_pending(&f, 1).await);
+    let (ep3_unit, ep3_cov) = &f.files[1];
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+    while f
+        .store
+        .get_file_marker(ep3_cov.file.file_id, *ep3_unit)
+        .unwrap()
+        .is_none()
+    {
+        assert!(tokio::time::Instant::now() < deadline);
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert_eq!(server.requests.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn specific_media_429_and_rejected_candidates_cache_per_file_without_blocking_other_episodes()
+{
+    let server = Server::for_any_episode(
+        429,
+        &[("X-UsageLimit-SpecificMedia-Reset", "1800")],
+        r#"{"error":"Specific media cap","code":"specific_media_usage_limit_exceeded"}"#,
+        true,
+    );
+    // Ep 2: 2700s (gets specific_media 429), Ep 3: None (unknown duration), Ep 4: 2700s (succeeds)
+    let mut f = setup_episodes(&server, &[Some(2_700_000), None, Some(2_700_000)]);
+
+    assert!(get_chapters(&f, 0).await.is_empty());
+    assert_eq!(server.requests.load(Ordering::SeqCst), 1);
+    // Repeated check for Ep 2 hits per-file cache -> no second request.
+    assert!(!open_session_pending(&f, 0).await);
+    assert_eq!(server.requests.load(Ordering::SeqCst), 1);
+
+    // Ep 4 is NOT blocked by Ep 2's SpecificMedia 429!
+    server.respond_with_headers(200, &[], RESPONSE);
+    let ep4 = get_chapters(&f, 2).await;
+    assert!(ep4.iter().any(|c| c["marker_type"] == "IntroStart"));
+    assert_eq!(server.requests.load(Ordering::SeqCst), 2);
+
+    // Ep 3 (unknown duration): first attempt refuses without adopting, then caches; second skips HTTP.
+    assert!(get_chapters(&f, 1).await.is_empty());
+    assert_eq!(server.requests.load(Ordering::SeqCst), 3);
+    assert!(get_chapters(&f, 1).await.is_empty());
+    assert_eq!(server.requests.load(Ordering::SeqCst), 3);
+
+    // Once probe populates duration_ms for Ep 3, LookupKey changes so cloud lookup runs immediately!
+    let ep3_cov = f.files[1].1.clone();
+    f.store
+        .publish_probe_result(
+            ep3_cov.file.file_id,
+            &store::library_write::probe::ProbePublication {
+                expected: &ep3_cov.file.version,
+                tracks_version: store::library_write::probe::CURRENT_TRACKS_VERSION,
+                resolution: None,
+                codec: None,
+                hdr: store::library_write::probe::Observed::NotObserved,
+                duration_ms: Some(2_700_000),
+                details: None,
+            },
+            0,
+        )
+        .unwrap();
+    f.files[1].1 = f
+        .store
+        .file_coverage_by_id(ep3_cov.file.file_id)
+        .unwrap()
+        .unwrap();
+    let ep3 = get_chapters(&f, 1).await;
+    assert!(ep3.iter().any(|c| c["marker_type"] == "IntroStart"));
+    assert_eq!(server.requests.load(Ordering::SeqCst), 4);
+}
+
+#[tokio::test]
+async fn unauthorized_401_cools_down_scope_for_one_hour_until_key_updated() {
+    let server = Server::for_any_episode(401, &[], r#"{"error":"Unauthorized"}"#, true);
+    let f = setup_episodes(&server, &[Some(2_700_000), Some(2_700_000)]);
+
+    assert!(get_chapters(&f, 0).await.is_empty());
+    assert_eq!(server.requests.load(Ordering::SeqCst), 1);
+
+    assert!(!open_session_pending(&f, 1).await);
+    assert_eq!(server.requests.load(Ordering::SeqCst), 1);
+
+    f.clock.0.store(10_000 + 3_599_000, Ordering::SeqCst);
+    assert!(!open_session_pending(&f, 1).await);
+
+    f.clock.0.store(10_000 + 3_600_001, Ordering::SeqCst);
+    assert!(open_session_pending(&f, 1).await);
+}

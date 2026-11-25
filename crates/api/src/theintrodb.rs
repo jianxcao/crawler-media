@@ -30,12 +30,26 @@ pub struct MarkerResult {
     pub group_duration_ms: Option<i64>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RateLimitScope {
+    Burst,
+    DailyQuota,
+    SpecificMedia,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum LookupError {
     #[error("TheIntroDB transport failed: {0}")]
     Transport(#[from] ureq::Error),
     #[error("TheIntroDB returned HTTP {0}")]
     Http(u16),
+    #[error("TheIntroDB rate limited ({scope:?}), retry after {retry_after_ms}ms")]
+    RateLimited {
+        scope: RateLimitScope,
+        retry_after_ms: i64,
+    },
+    #[error("TheIntroDB rejected credentials with HTTP {0}")]
+    Unauthorized(u16),
     #[error("TheIntroDB could not resolve the requested episode")]
     EpisodeNotFound,
     #[error("TheIntroDB could not resolve the requested Media")]
@@ -142,6 +156,17 @@ impl TheIntroDbClient {
         })?;
         let status = resp.status().as_u16();
         if status != 200 {
+            if status == 429 {
+                let headers = resp.headers().clone();
+                let body_bytes = resp.into_body().read_to_vec().unwrap_or_default();
+                let code = serde_json::from_slice::<serde_json::Value>(&body_bytes)
+                    .ok()
+                    .and_then(|v| v.get("code").and_then(|c| c.as_str()).map(str::to_string));
+                return Err(classify_429(&headers, code.as_deref()));
+            }
+            if status == 401 || status == 403 {
+                return Err(LookupError::Unauthorized(status));
+            }
             if status == 404 {
                 let body: serde_json::Value = resp.into_body().read_json()?;
                 match body.get("code").and_then(serde_json::Value::as_str) {
@@ -210,6 +235,57 @@ fn single_range(
         return Err(LookupError::Boundaries);
     }
     Ok(Some((start, segment.end_ms)))
+}
+
+fn header_u64(headers: &ureq::http::HeaderMap, name: &str) -> Option<u64> {
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .and_then(|raw| raw.parse::<u64>().ok())
+}
+
+fn classify_429(headers: &ureq::http::HeaderMap, code: Option<&str>) -> LookupError {
+    let retry_after = header_u64(headers, "retry-after");
+    let specific_reset = header_u64(headers, "x-usagelimit-specificmedia-reset");
+    let specific_rem = header_u64(headers, "x-usagelimit-specificmedia-remaining");
+    let usage_reset = header_u64(headers, "x-usagelimit-reset");
+    let usage_rem = header_u64(headers, "x-usagelimit-remaining");
+    let rate_reset = header_u64(headers, "x-ratelimit-reset");
+
+    let (scope, secs, min_ms, max_ms) = if code == Some("specific_media_usage_limit_exceeded")
+        || specific_rem == Some(0)
+        || (specific_reset.is_some()
+            && code != Some("usage_limit_exceeded")
+            && usage_rem != Some(0))
+    {
+        (
+            RateLimitScope::SpecificMedia,
+            specific_reset.or(retry_after).unwrap_or(3_600),
+            60_000,
+            86_400_000,
+        )
+    } else if code == Some("usage_limit_exceeded") || usage_rem == Some(0) || usage_reset.is_some()
+    {
+        (
+            RateLimitScope::DailyQuota,
+            usage_reset.or(retry_after).unwrap_or(3_600),
+            60_000,
+            86_400_000,
+        )
+    } else {
+        (
+            RateLimitScope::Burst,
+            rate_reset.or(retry_after).unwrap_or(10),
+            1_000,
+            900_000,
+        )
+    };
+    let retry_after_ms = secs.saturating_mul(1_000).clamp(min_ms, max_ms) as i64;
+    LookupError::RateLimited {
+        scope,
+        retry_after_ms,
+    }
 }
 
 #[cfg(test)]

@@ -113,3 +113,67 @@ fn invalid_ranges_and_http_authentication_errors_remain_errors() {
         );
     }
 }
+
+#[test]
+fn parses_v4_rate_limit_usage_quota_and_unauthorized_responses() {
+    use api::theintrodb::{LookupError, RateLimitScope};
+
+    let burst = Server::with_headers(
+        429,
+        &[("X-RateLimit-Reset", "8")],
+        r#"{"error":"Too Many Requests"}"#,
+        true,
+    );
+    assert!(matches!(
+        burst
+            .client(true)
+            .get_episode_markers("123", 1, 2, Some(2700000)),
+        Err(LookupError::RateLimited {
+            scope: RateLimitScope::Burst,
+            retry_after_ms: 8_000,
+        })
+    ));
+
+    let daily = Server::with_headers(
+        429,
+        &[
+            ("X-UsageLimit-Reset", "7200"),
+            ("X-UsageLimit-Remaining", "0"),
+        ],
+        r#"{"error":"Usage limit exceeded","code":"usage_limit_exceeded"}"#,
+        true,
+    );
+    assert!(matches!(
+        daily
+            .client(true)
+            .get_episode_markers("123", 1, 2, Some(2700000)),
+        Err(LookupError::RateLimited {
+            scope: RateLimitScope::DailyQuota,
+            retry_after_ms: 7_200_000,
+        })
+    ));
+
+    let specific = Server::with_headers(
+        429,
+        &[("X-UsageLimit-SpecificMedia-Reset", "1800")],
+        r#"{"error":"Too many requests for this media","code":"specific_media_usage_limit_exceeded"}"#,
+        true,
+    );
+    assert!(matches!(
+        specific
+            .client(true)
+            .get_episode_markers("123", 1, 2, Some(2700000)),
+        Err(LookupError::RateLimited {
+            scope: RateLimitScope::SpecificMedia,
+            retry_after_ms: 1_800_000,
+        })
+    ));
+
+    let unauth = Server::new(401, r#"{"error":"Unauthorized"}"#, true);
+    assert!(matches!(
+        unauth
+            .client(true)
+            .get_episode_markers("123", 1, 2, Some(2700000)),
+        Err(LookupError::Unauthorized(401))
+    ));
+}

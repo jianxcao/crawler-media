@@ -115,12 +115,30 @@ fn protocol_value(headers: &HeaderMap, header_name: &str, key_name: &str) -> Opt
         })
 }
 
+#[derive(Clone, Debug, Default)]
+pub(crate) struct ClientIdentity {
+    pub(crate) client: Option<String>,
+    pub(crate) device_name: Option<String>,
+    pub(crate) device_id: Option<String>,
+    pub(crate) version: Option<String>,
+}
+
+pub(crate) fn extract_client_headers(headers: &HeaderMap) -> ClientIdentity {
+    ClientIdentity {
+        client: protocol_value(headers, "X-Emby-Client", "Client"),
+        device_name: protocol_value(headers, "X-Emby-Device-Name", "Device"),
+        device_id: protocol_value(headers, "X-Emby-Device-Id", "DeviceId"),
+        version: protocol_value(headers, "X-Emby-Client-Version", "Version"),
+    }
+}
+
 impl AuthUser {
     pub(crate) fn playback_client(&self, headers: &HeaderMap) -> PlaybackClientInfo {
-        let client = protocol_value(headers, "X-Emby-Client", "Client");
-        let device_name = protocol_value(headers, "X-Emby-Device-Name", "Device");
-        let client_version = protocol_value(headers, "X-Emby-Client-Version", "Version");
-        let device_id = self.device_id.clone().unwrap_or_else(|| {
+        let extracted = extract_client_headers(headers);
+        let client = extracted.client;
+        let device_name = extracted.device_name;
+        let client_version = extracted.version;
+        let device_id = self.device_id.clone().or(extracted.device_id).unwrap_or_else(|| {
             // No stable protocol identity: correlate this credential/metadata, but
             // never advertise it as a device credential that can be revoked.
             let mut fingerprint = std::collections::hash_map::DefaultHasher::new();

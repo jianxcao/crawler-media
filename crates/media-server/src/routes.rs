@@ -29,6 +29,7 @@ use sessions::{session_playing, session_progress, session_stopped};
 use shows::{show_episodes, show_seasons, shows_next_up};
 use system::{
     authenticate_by_name, device_description, ping, public_system_info, quickconnect_enabled,
+    sessions_capabilities, system_endpoint, system_info, users_logout,
 };
 use user_data::{mark_favorite, mark_played, unmark_favorite, unmark_played};
 use users::{
@@ -189,14 +190,20 @@ pub fn routes(provider: Arc<dyn MediaServerProvider>) -> Router {
             post(mark_played).delete(unmark_played),
         )
         .route("/Items/{id}/PlaybackInfo", post(playback_info))
+        .route("/System/Info", get(system_info))
+        .route("/System/Endpoint", get(system_endpoint))
         .route("/QuickConnect/Enabled", get(quickconnect_enabled))
         .route(
             "/DisplayPreferences/{id}",
             get(display_preferences).post(update_display_preferences),
         )
+        .route("/Sessions/Capabilities", post(sessions_capabilities))
+        .route("/Sessions/Capabilities/Full", post(sessions_capabilities))
         .route("/Sessions/Playing", post(session_playing))
         .route("/Sessions/Playing/Progress", post(session_progress))
         .route("/Sessions/Playing/Stopped", post(session_stopped))
+        .route("/Users/Logout", post(users_logout))
+        .route("/Sessions/Logout", post(users_logout))
         .route_layer(axum::middleware::from_fn(move |req, next| {
             let p = provider.clone();
             authenticate(p, req, next)

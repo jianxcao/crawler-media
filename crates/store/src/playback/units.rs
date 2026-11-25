@@ -199,9 +199,21 @@ impl Store {
         &self,
         user_id: UserId,
         media_ids: Option<&[MediaId]>,
-        since_ms: Option<i64>,
+        since: Option<i64>,
     ) -> Result<usize, StoreError> {
-        self.with_library_write(|db| db.clear_units(user_id, media_ids, since_ms))
+        self.with_library_write(|db| db.clear_units(user_id, media_ids, since))
+    }
+
+    /// Maximum `watch_activity_at` (Unix seconds) across all units of each requested media.
+    pub fn max_user_watch_activity_for_media(
+        &self,
+        user_id: UserId,
+        media_ids: &[MediaId],
+    ) -> Result<std::collections::HashMap<MediaId, i64>, StoreError> {
+        if media_ids.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+        self.with_library_read(|db| db.max_user_watch_activity_for_media(user_id, media_ids))
     }
 }
 

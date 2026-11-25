@@ -257,6 +257,7 @@ fn persist_subscription(state: ApiState, prepared: PreparedSubscription) -> Resp
         Ok(result) => result,
         Err(response) => return response,
     };
+    crate::up_next_dismissed::clear_dismissed_media(&state.store, prepared.user_id, media.id);
     if let Some(days) = pack_fallback_after_days {
         crate::pack_fallback::set_after_days(&state, subscribe.id, Some(days));
     }

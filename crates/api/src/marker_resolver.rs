@@ -476,75 +476,16 @@ fn resolve_without_store(snapshot: &ResolveSnapshot) -> ResolveOutput {
 fn lookup_theintrodb_marker(snapshot: &ResolveSnapshot) -> Option<StoredFileMarker> {
     let client = snapshot.theintrodb.as_ref()?;
     let tmdb_id = snapshot.media.tmdb_id.as_deref()?;
-    let (season, episode) = snapshot.unit.episode_coordinates()?;
-    let key = snapshot
-        .duration_ms
-        .filter(|duration| *duration > 0)
-        .map(|duration_ms| crate::theintrodb_lookup::LookupKey {
-            file_id: snapshot.row.file.file_id,
-            version: snapshot.row.file.version.clone(),
-            unit: snapshot.unit,
-            duration_ms,
-            tmdb_id: tmdb_id.to_string(),
-            configuration: client.cache_scope(),
-        });
-    if key
-        .as_ref()
-        .is_some_and(|key| snapshot.negative.contains(key, snapshot.now_ms))
-    {
-        return None;
-    }
-    let candidate = match client.get_episode_markers(tmdb_id, season, episode, snapshot.duration_ms)
-    {
-        Ok(Some(candidate)) => candidate,
-        Ok(None) => {
-            if let Some(key) = key {
-                snapshot.negative.insert(key, snapshot.now_ms);
-            }
-            return None;
-        }
-        Err(error) => {
-            tracing::warn!(%error, title=%snapshot.media.title, season, episode, "查询 TheIntroDB 失败");
-            return None;
-        }
-    };
-    let duration = snapshot.duration_ms.filter(|duration| *duration > 0)?;
-    let group_duration = candidate
-        .group_duration_ms
-        .filter(|duration| *duration > 0)?;
-    // v4 selects within five minutes, but silently falls back to the most
-    // popular release when no cluster matches. Reject that fallback ourselves.
-    if group_duration.abs_diff(duration) > 300_000 {
-        tracing::warn!(file_id=%snapshot.row.file.file_id, duration, group_duration,
-            "TheIntroDB release duration does not match this file; candidate was not adopted");
-        return None;
-    }
-    let intro = candidate.intro_start_ms.zip(candidate.intro_end_ms);
-    let outro = candidate
-        .outro_start_ms
-        .map(|start| (start, candidate.outro_end_ms.unwrap_or(duration)));
-    if intro
-        .into_iter()
-        .chain(outro)
-        .any(|(start, end)| start < 0 || end <= start || end > duration)
-        || intro
-            .zip(outro)
-            .is_some_and(|((_, end), (start, _))| end > start)
-    {
-        tracing::warn!(file_id=%snapshot.row.file.file_id, "TheIntroDB candidate exceeds this file or has conflicting ranges");
-        return None;
-    }
-    Some(StoredFileMarker {
+    crate::theintrodb_lookup::lookup_cloud_marker(crate::theintrodb_lookup::CloudLookupRequest {
+        client,
+        negative: snapshot.negative.as_ref(),
         file_id: snapshot.row.file.file_id,
-        version: snapshot.row.file.version.clone(),
+        version: &snapshot.row.file.version,
         unit: snapshot.unit,
-        intro_start_ms: intro.map(|range| range.0),
-        intro_end_ms: intro.map(|range| range.1),
-        outro_start_ms: outro.map(|range| range.0),
-        outro_end_ms: outro.map(|range| range.1),
-        source: "theintrodb".into(),
-        locked: false,
-        updated_at: 0,
+        duration_ms: snapshot.duration_ms,
+        media_title: &snapshot.media.title,
+        tmdb_id,
+        now_ms: snapshot.now_ms,
     })
 }
 

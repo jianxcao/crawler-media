@@ -2,30 +2,63 @@
 
 use axum::Json;
 use axum::extract::State;
-use axum::http::{StatusCode, header};
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 use serde_json::{Value, json};
+use std::hash::{Hash, Hasher};
 
+use crate::dto::user_profile_json;
 use crate::provider::AuthenticateError;
 
 use super::AppState;
+
+const JELLYFIN_PROTOCOL_VERSION: &str = "10.9.11";
 
 #[derive(Deserialize)]
 pub struct AuthBody {
     #[serde(alias = "Username")]
     pub username: String,
-    #[serde(alias = "Pw")]
+    #[serde(default, alias = "Pw", alias = "Password", alias = "password")]
     pub pw: String,
 }
-pub(super) async fn public_system_info(State(state): State<AppState>) -> Json<Value> {
-    Json(json!({
-        "Id": state.provider.server_id(),
+
+fn system_info_payload(server_id: &str) -> Value {
+    json!({
+        "Id": server_id,
         "ServerName": "crawler-media",
         "ProductName": "crawler-media",
-        "Version": "0.1.0",
+        "Version": JELLYFIN_PROTOCOL_VERSION,
         "StartupWizardCompleted": true,
+        "OperatingSystem": std::env::consts::OS,
+        "HasPendingRestart": false,
+        "IsShuttingDown": false,
+        "SupportsLibraryMonitor": true,
+        "CanLaunchWebBrowser": false,
+    })
+}
+
+pub(super) async fn public_system_info(State(state): State<AppState>) -> Json<Value> {
+    Json(system_info_payload(&state.provider.server_id()))
+}
+
+pub(super) async fn system_info(State(state): State<AppState>) -> Json<Value> {
+    Json(system_info_payload(&state.provider.server_id()))
+}
+
+pub(super) async fn system_endpoint() -> Json<Value> {
+    Json(json!({
+        "IsLocal": true,
+        "IsInNetwork": true,
     }))
+}
+
+pub(super) async fn sessions_capabilities() -> StatusCode {
+    StatusCode::NO_CONTENT
+}
+
+pub(super) async fn users_logout() -> StatusCode {
+    StatusCode::NO_CONTENT
 }
 
 pub(super) async fn ping() -> Response {
@@ -46,6 +79,7 @@ pub(super) async fn device_description(State(state): State<AppState>) -> Respons
 
 pub(super) async fn authenticate_by_name(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(body): Json<AuthBody>,
 ) -> Result<Json<Value>, StatusCode> {
     let res = match state
@@ -63,9 +97,56 @@ pub(super) async fn authenticate_by_name(
         }
     };
 
+    let client_id = crate::auth::extract_client_headers(&headers);
+    if let Some(device_id) = client_id.device_id.as_deref() {
+        state
+            .provider
+            .bind_playback_credential(res.1.id, device_id, &res.0, None)
+            .await
+            .map_err(|error| error.status_code())?;
+    }
+
+    let server_id = state.provider.server_id();
+    let user = user_profile_json(&res.1, &server_id);
+    let mut session_hash = std::collections::hash_map::DefaultHasher::new();
+    (
+        res.1.id,
+        &client_id.device_id,
+        &client_id.client,
+        std::time::SystemTime::now(),
+    )
+        .hash(&mut session_hash);
+    let session_id = format!("jf-{:016x}", session_hash.finish());
+    let mut session_info = json!({
+        "Id": session_id,
+        "UserId": res.1.id.to_string(),
+        "UserName": res.1.login,
+        "ServerId": server_id,
+        "IsActive": true,
+        "SupportsMediaControl": true,
+        "SupportsRemoteControl": false,
+        "HasCustomDeviceName": client_id.device_name.is_some(),
+        "PlayableMediaTypes": ["Video"],
+        "SupportedCommands": [],
+    });
+    if let Some(device_id) = client_id.device_id {
+        session_info["DeviceId"] = json!(device_id);
+    }
+    if let Some(client) = client_id.client {
+        session_info["Client"] = json!(client);
+    }
+    if let Some(device_name) = client_id.device_name {
+        session_info["DeviceName"] = json!(device_name);
+    }
+    if let Some(version) = client_id.version {
+        session_info["ApplicationVersion"] = json!(version);
+    }
+
     Ok(Json(json!({
         "AccessToken": res.0,
-        "User": { "Id": res.1.id.to_string(), "Name": res.1.login },
+        "ServerId": server_id,
+        "User": user,
+        "SessionInfo": session_info,
     })))
 }
 pub(super) async fn quickconnect_enabled() -> Json<Value> {

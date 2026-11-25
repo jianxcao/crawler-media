@@ -48,12 +48,12 @@ impl crate::LibraryConnection<'_> {
         &self,
         user_id: UserId,
         media_ids: Option<&[MediaId]>,
-        since_ms: Option<i64>,
+        since: Option<i64>,
     ) -> Result<usize, StoreError> {
         let mut sql = String::from("DELETE FROM playback_logs WHERE user_id = ?");
         let mut values: Vec<rusqlite::types::Value> =
             vec![rusqlite::types::Value::Text(user_id.to_string())];
-        if let Some(since) = since_ms {
+        if let Some(since) = since {
             sql.push_str(" AND started_at >= ?");
             values.push(rusqlite::types::Value::Integer(since));
         }
@@ -78,12 +78,12 @@ impl crate::LibraryConnection<'_> {
         &self,
         user_id: UserId,
         media_ids: Option<&[MediaId]>,
-        since_ms: Option<i64>,
+        since: Option<i64>,
     ) -> Result<usize, StoreError> {
         let mut sql = String::from("DELETE FROM playback_metrics WHERE user_id = ?");
         let mut values: Vec<rusqlite::types::Value> =
             vec![rusqlite::types::Value::Text(user_id.to_string())];
-        if let Some(since) = since_ms {
+        if let Some(since) = since {
             sql.push_str(" AND recorded_at >= ?");
             values.push(rusqlite::types::Value::Integer(since));
         }
