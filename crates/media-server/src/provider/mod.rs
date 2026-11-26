@@ -339,6 +339,9 @@ pub trait MediaServerProvider: Send + Sync + 'static {
         deadline: Option<std::time::Instant>,
     ) -> Result<Option<UserId>, QueryError>;
 
+    /// Revoke the caller's session token on explicit Jellyfin/Emby logout.
+    async fn revoke_token(&self, token: &str) -> Result<(), QueryError>;
+
     /// 通过共享 single-flight 服务交付字幕轨。
     ///
     /// 默认不支持：实现方必须显式 override，**绝不默认回退到同步提取**

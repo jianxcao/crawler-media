@@ -212,6 +212,9 @@ impl MediaServerProvider for FileAssetProvider {
             _ => Ok((token == "valid-token").then_some(self.user_id)),
         }
     }
+    async fn revoke_token(&self, _token: &str) -> Result<(), QueryError> {
+        Ok(())
+    }
     async fn bind_playback_credential(
         &self,
         _user_id: UserId,

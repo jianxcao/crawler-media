@@ -132,6 +132,13 @@ impl MediaServerProvider for FakeProvider {
         }
     }
 
+    async fn revoke_token(&self, token: &str) -> Result<(), media_server::provider::QueryError> {
+        if token == "token_a" {
+            self.token_a_valid.store(false, Ordering::SeqCst);
+        }
+        Ok(())
+    }
+
     async fn get_user_for_query(
         &self,
         principal: media_server::provider::QueryPrincipal,

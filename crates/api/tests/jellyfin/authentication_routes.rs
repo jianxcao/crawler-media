@@ -196,8 +196,8 @@ async fn authenticated_system_info_and_session_capabilities_endpoints() {
         assert_eq!(unauth.status(), StatusCode::UNAUTHORIZED);
     }
 
-    let token = issue_token(&app).await;
     for prefix in ["", "/emby"] {
+        let token = issue_token(&app).await;
         let info_resp = app
             .clone()
             .oneshot(
@@ -252,6 +252,104 @@ async fn authenticated_system_info_and_session_capabilities_endpoints() {
                 resp.status()
             );
         }
+    }
+}
+
+#[tokio::test]
+async fn users_logout_revokes_the_token() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (app, _, _) = app(tmp.path());
+
+    for prefix in ["", "/emby"] {
+        let token = issue_token(&app).await;
+        let before = app
+            .clone()
+            .oneshot(
+                Request::get(format!("{prefix}/System/Info"))
+                    .header("authorization", format!("MediaBrowser Token=\"{token}\""))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(before.status(), StatusCode::OK, "{prefix} before logout");
+
+        let logout = app
+            .clone()
+            .oneshot(
+                Request::post(format!("{prefix}/Users/Logout"))
+                    .header("authorization", format!("MediaBrowser Token=\"{token}\""))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(logout.status(), StatusCode::NO_CONTENT, "{prefix} logout");
+
+        let after = app
+            .clone()
+            .oneshot(
+                Request::get(format!("{prefix}/System/Info"))
+                    .header("authorization", format!("MediaBrowser Token=\"{token}\""))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            after.status(),
+            StatusCode::UNAUTHORIZED,
+            "{prefix} after logout"
+        );
+    }
+}
+
+#[tokio::test]
+async fn sessions_logout_revokes_the_token() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (app, _, _) = app(tmp.path());
+
+    for prefix in ["", "/emby"] {
+        let token = issue_token(&app).await;
+        let before = app
+            .clone()
+            .oneshot(
+                Request::get(format!("{prefix}/System/Info"))
+                    .header("authorization", format!("MediaBrowser Token=\"{token}\""))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(before.status(), StatusCode::OK, "{prefix} before logout");
+
+        let logout = app
+            .clone()
+            .oneshot(
+                Request::post(format!("{prefix}/Sessions/Logout"))
+                    .header("authorization", format!("MediaBrowser Token=\"{token}\""))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(logout.status(), StatusCode::NO_CONTENT, "{prefix} logout");
+
+        let after = app
+            .clone()
+            .oneshot(
+                Request::get(format!("{prefix}/System/Info"))
+                    .header("authorization", format!("MediaBrowser Token=\"{token}\""))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            after.status(),
+            StatusCode::UNAUTHORIZED,
+            "{prefix} after logout"
+        );
     }
 }
 

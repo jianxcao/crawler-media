@@ -100,8 +100,20 @@ pub(super) async fn sessions_capabilities() -> StatusCode {
     StatusCode::NO_CONTENT
 }
 
-pub(super) async fn users_logout() -> StatusCode {
-    StatusCode::NO_CONTENT
+pub(super) async fn users_logout(
+    State(state): State<AppState>,
+    axum::Extension(user): axum::Extension<crate::auth::AuthUser>,
+) -> Result<StatusCode, StatusCode> {
+    state
+        .provider
+        .revoke_token(&user.token)
+        .await
+        .map_err(|error| {
+            tracing::error!(user_id = %user.id, %error, "Jellyfin 登出吊销会话令牌失败");
+            error.status_code()
+        })?;
+    tracing::info!(user_id = %user.id, "Jellyfin 会话已登出并吊销令牌");
+    Ok(StatusCode::NO_CONTENT)
 }
 
 pub(super) async fn ping() -> Response {
@@ -141,12 +153,18 @@ pub(super) async fn authenticate_by_name(
     };
 
     let client_id = crate::auth::extract_client_headers(&headers);
-    if let Some(device_id) = client_id.device_id.as_deref() {
-        state
+    if let Some(device_id) = client_id.device_id.as_deref()
+        && let Err(error) = state
             .provider
             .bind_playback_credential(res.1.id, device_id, &res.0, None)
             .await
-            .map_err(|error| error.status_code())?;
+    {
+        tracing::warn!(
+            user_id = %res.1.id,
+            device_id,
+            %error,
+            "Jellyfin 登录时绑定设备凭据失败，后续请求将继续尝试绑定"
+        );
     }
 
     let server_id = state.provider.server_id();

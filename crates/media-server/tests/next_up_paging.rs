@@ -225,6 +225,10 @@ impl MediaServerProvider for EpisodeListProvider {
         Ok((token == "token-a").then(user_id))
     }
 
+    async fn revoke_token(&self, _token: &str) -> Result<(), media_server::provider::QueryError> {
+        Ok(())
+    }
+
     async fn get_user_for_query(
         &self,
         principal: media_server::provider::QueryPrincipal,

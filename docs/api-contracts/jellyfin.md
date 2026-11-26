@@ -17,8 +17,8 @@
 
 | 环节 | 必须验证的可观察行为 | 回归位置 |
 |---|---|---|
-| 发现与登录 | 两个前缀的实例身份一致；登录签发可用且不同于密码的 AccessToken；错误凭据拒绝 | `jellyfin/library_routes.rs`、`jellyfin/authentication_routes.rs` |
-| 协议认证 | MediaBrowser / Emby Authorization、X-Emby-Authorization、token header 与支持的播放 URL 凭据生效；无效凭据及跨用户访问拒绝 | `jellyfin/authentication_routes.rs`、`jellyfin/visibility.rs`、`playback_read_regression/stream_credentials.rs` |
+| 发现与登录 | 两个前缀的实例身份一致；登录签发可用且不同于密码的 AccessToken，初始设备凭据绑定为 best-effort（瞬时争用不失败、不残留孤儿 token）；错误凭据拒绝 | `jellyfin/library_routes.rs`、`jellyfin/authentication_routes.rs` |
+| 协议认证 | MediaBrowser / Emby Authorization、X-Emby-Authorization、token header 与支持的播放 URL 凭据生效；`Users/Logout` 与 `Sessions/Logout` 吊销当前会话 token（后续请求返回 401）；无效凭据及跨用户访问拒绝 | `jellyfin/authentication_routes.rs`、`jellyfin/visibility.rs`、`playback_read_regression/stream_credentials.rs` |
 | User 与 Library | 登录用户、资料、Views 的身份和权限一致；隐藏 Library 的直接条目、字幕和视频地址不能绕过授权 | `jellyfin/protocol.rs`、`jellyfin/visibility.rs` |
 | 列表与详情 | Movie / Series / Episode 身份、类型、父子关系、数量和元数据一致；搜索、分类命中可打开同一详情；分页不丢失、不重复 | `jellyfin/library_routes.rs`、`jellyfin/catalog/`、`jellyfin/metadata_parity.rs`、`jellyfin/filters.rs` |
 | 播放信息与取流 | 可播放详情有 MediaSources；稳定来源下与 PlaybackInfo 一致；消费源和 SID 后的实际字节正确；首选变化和缺 DeviceId 不破坏有效绑定 | `jellyfin/playback.rs`、`jellyfin/playback_contract.rs`、`jellyfin/event_sources/playback_info_race.rs`、`jellyfin_stream_binding.rs` |
