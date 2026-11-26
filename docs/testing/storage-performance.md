@@ -46,26 +46,25 @@
 
 先检查目标源码对应的具体场景，再选择命令；目标名称存在不证明覆盖上述全部矩阵。
 
-基础测量入口也应保留：`store --test perf_baseline` 默认执行 `small_scale_gate`，以缩小 fixture 检查相同 SQL statement/fullscan 门槛；`--release --ignored` 执行约 20k Media / 60k 文件的公开 Store 播种与操作矩阵，墙钟单列而不作为 CI 硬断言。`api --test endpoint_perf` 是无网络、无 Chromium/ffmpeg 的公开 Router 延迟矩阵，可用 `PERF_SIZES`、`PERF_MODES`、`PERF_SAMPLES` 限定输入，必须在报告中写明。`jobs --test query_plans --ignored` 使用 200k 合成任务、ANALYZE、EQP 和中位数耗时比较候选索引；这些合成查询证据需与生产行为回归一起解释。
+基础测量入口也应保留：`store --test store_suite_4 perf_baseline::` 默认执行 `small_scale_gate`，以缩小 fixture 检查相同 SQL statement/fullscan 门槛；`--release --ignored` 执行约 20k Media / 60k 文件的公开 Store 播种与操作矩阵，墙钟单列而不作为 CI 硬断言。`api --test endpoint_perf` 是无网络、无 Chromium/ffmpeg 的公开 Router 延迟矩阵，可用 `PERF_SIZES`、`PERF_MODES`、`PERF_SAMPLES` 限定输入，必须在报告中写明。`jobs --test query_plans --ignored` 使用 200k 合成任务、ANALYZE、EQP 和中位数耗时比较候选索引；这些合成查询证据需与生产行为回归一起解释。
 
 ```sh
 python3 scripts/with-build-lock.py --exclusive cargo test -j8 -p store \
-  --test perf_baseline small_scale_gate -- --test-threads=8
+  --test store_suite_4 perf_baseline::gate::small_scale_gate -- --test-threads=8
 python3 scripts/with-build-lock.py --exclusive cargo test --release -j8 -p store \
-  --test perf_baseline -- --ignored --nocapture --test-threads=8
+  --test store_suite_4 perf_baseline:: -- --ignored --nocapture --test-threads=8
 PERF_SIZES=100,500,2000,10000 PERF_MODES=movie,tv PERF_SAMPLES=5 \
   python3 scripts/with-build-lock.py --exclusive cargo test --release -j8 -p api \
   --test endpoint_perf -- --ignored --nocapture --test-threads=8
 python3 scripts/with-build-lock.py --exclusive cargo test --release -j8 -p jobs \
   --test query_plans -- --ignored --nocapture --test-threads=8
-python3 scripts/with-build-lock.py --exclusive cargo test -j8 -p store \
-  --test media_lookup_indexes --test library_schema_audit --test library_query_plans \
-  -- --test-threads=8
+python3 scripts/with-build-lock.py --exclusive cargo nextest run --build-jobs 8 --test-threads 8 -p store \
+  -E 'test(/^(media_lookup_indexes|library_schema_audit|library_query_plans)::/)'
 python3 scripts/with-build-lock.py --exclusive cargo test --release -j8 -p store \
-  --test storage_work_bounds -- --test-threads=8
+  --test store_suite_2 storage_work_bounds:: -- --test-threads=8
 CRAWLER_MEDIA_SEEK_GROWTH_ITEMS=1000000 python3 scripts/with-build-lock.py --exclusive \
-  cargo test --release -j8 -p store --test storage_work_bounds \
-  seek_work_stays_flat_while_an_unrelated_library_grows -- --nocapture --test-threads=8
+  cargo test --release -j8 -p store --test store_suite_2 \
+  storage_work_bounds::seek_scale::seek_work_stays_flat_while_an_unrelated_library_grows -- --nocapture --test-threads=8
 INTEGRITY_SCALE_N=100000 python3 scripts/with-build-lock.py --exclusive \
   cargo test --release -j8 -p store --test library_integrity_scale \
   -- --ignored --nocapture --test-threads=8

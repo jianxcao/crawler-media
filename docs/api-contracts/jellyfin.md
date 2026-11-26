@@ -119,8 +119,9 @@ Playing / Progress / Stopped 中缺失或 null PositionTicks 不代表零。活�
 ```sh
 python3 scripts/with-build-lock.py --exclusive cargo test --release -j8 -p media-server -- --test-threads=8
 python3 scripts/with-build-lock.py --exclusive cargo test --release -j8 -p api \
-  --test jellyfin --test jellyfin_stream_binding \
-  --test playback_event_identity --test playback_read_regression -- --test-threads=8
+  --test jellyfin --test playback_event_identity --test playback_read_regression -- --test-threads=8
+python3 scripts/with-build-lock.py --exclusive cargo test --release -j8 -p api \
+  --test api_suite_4 jellyfin_stream_binding:: -- --test-threads=8
 ```
 
 分页、搜索、ACL 或图片变化还需运行表中相应目标。最终稳定代码按仓库规则运行一次 workspace 全套。记录实际命令、退出码、ignored 和失败，不以定向重跑覆盖原失败。

@@ -19,9 +19,9 @@
 ```sh
 python3 scripts/with-build-lock.py --exclusive cargo fmt --all -- --check
 python3 scripts/with-build-lock.py --exclusive cargo clippy -j8 --all-targets -- -D warnings
-# 将 <crate> / <target> 换成此次行为对应的实际目标。
-python3 scripts/with-build-lock.py --exclusive cargo test -j8 -p <crate> --test <target> -- --test-threads=8
-python3 scripts/with-build-lock.py --exclusive cargo test -j8 --workspace --no-fail-fast -- --test-threads=8
+# 将 <crate> / <filter> 换成此次行为对应的实际目标；合并套件内模块可用 -E 'test(<module>::)' 或 cargo test --test <suite> <module>::。
+python3 scripts/with-build-lock.py --exclusive cargo nextest run --build-jobs 8 --test-threads 8 -p <crate> -E 'test(<filter>)'
+python3 scripts/with-build-lock.py --exclusive cargo nextest run --build-jobs 8 --test-threads 8 --workspace --no-fail-fast
 python3 scripts/with-build-lock.py --exclusive pnpm --dir web typecheck
 python3 scripts/with-build-lock.py --exclusive pnpm --dir web lint
 python3 scripts/with-build-lock.py --exclusive pnpm --dir web test
