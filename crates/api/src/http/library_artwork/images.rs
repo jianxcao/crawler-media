@@ -3,7 +3,7 @@
 use std::path::{Path as FsPath, PathBuf};
 
 use axum::extract::{Path, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 
 use crate::http::library::library_visible;
@@ -21,6 +21,14 @@ enum Kind {
 }
 
 impl Kind {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Poster => "海报",
+            Self::Backdrop => "背景图",
+            Self::Still => "剧照",
+        }
+    }
+
     fn missing(self) -> Response {
         let message = match self {
             Self::Poster => "海报不存在",
@@ -45,27 +53,92 @@ fn user_id(
     })
 }
 
-fn sidecar(
-    path: &FsPath,
-    kind: Kind,
-    files: &dyn crate::file_stat_read::FileStatRead,
-) -> Option<PathBuf> {
+fn candidate_paths(path: &FsPath, kind: Kind) -> Vec<PathBuf> {
     if matches!(kind, Kind::Still) {
-        return crate::episode_still::existing_with(path, files);
+        return crate::episode_still::candidates(path);
     }
     let name = if matches!(kind, Kind::Poster) {
         "poster.jpg"
     } else {
         "fanart.jpg"
     };
-    let parent = path.parent()?;
+    let Some(parent) = path.parent() else {
+        return Vec::new();
+    };
     [
         Some(parent.join(name)),
         parent.parent().map(|p| p.join(name)),
     ]
     .into_iter()
     .flatten()
-    .find(|candidate| files.is_file(candidate))
+    .collect()
+}
+
+fn is_missing_io(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::NotFound
+            | std::io::ErrorKind::NotADirectory
+            | std::io::ErrorKind::IsADirectory
+    )
+}
+
+fn is_permission_error(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::PermissionDenied
+        || matches!(error.raw_os_error(), Some(1 | 13))
+}
+
+fn read_error_response(kind: Kind, image: &FsPath, error: &std::io::Error) -> Response {
+    tracing::error!(
+        %error,
+        error_kind = ?error.kind(),
+        path = %image.display(),
+        "native image read failed"
+    );
+    let (code, message) = if is_permission_error(error) {
+        (
+            "poster.permission_denied",
+            format!(
+                "读取{}失败：文件或目录无访问权限，请检查系统目录权限设置",
+                kind.label()
+            ),
+        )
+    } else {
+        (
+            "poster.io_error",
+            format!(
+                "读取{}发生 IO 异常，请检查文件访问权限或存储挂载状态",
+                kind.label()
+            ),
+        )
+    };
+    let mut response = err(StatusCode::INTERNAL_SERVER_ERROR, code, &message);
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
+}
+
+fn read_sidecar_bytes(
+    path: &FsPath,
+    kind: Kind,
+    files: &dyn crate::file_stat_read::FileStatRead,
+) -> Result<Option<Vec<u8>>, Response> {
+    for candidate in candidate_paths(path, kind) {
+        if files.is_file(&candidate) {
+            match std::fs::read(&candidate) {
+                Ok(bytes) => return Ok(Some(bytes)),
+                Err(error) if is_missing_io(&error) => continue,
+                Err(error) => return Err(read_error_response(kind, &candidate, &error)),
+            }
+        }
+        if let Err(error) = files.metadata(&candidate)
+            && !is_missing_io(&error)
+        {
+            return Err(read_error_response(kind, &candidate, &error));
+        }
+    }
+    Ok(None)
 }
 
 async fn local_bytes(
@@ -81,16 +154,10 @@ async fn local_bytes(
         .map_err(|_| store_wait::busy_response())?;
     reservation
         .run(IMAGE_READ, move || {
-            sidecar(&path, kind, files.as_ref()).and_then(|image| match std::fs::read(&image) {
-                Ok(bytes) => Some(bytes),
-                Err(error) => {
-                    tracing::warn!(%error, path=%image.display(), "native image read failed");
-                    None
-                }
-            })
+            read_sidecar_bytes(&path, kind, files.as_ref())
         })
         .await
-        .map_err(super::super::library::browse_work_error)
+        .map_err(super::super::library::browse_work_error)?
 }
 
 async fn artwork_bytes(

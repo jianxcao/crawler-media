@@ -438,3 +438,149 @@ async fn artwork_candidates_redacts_host_paths_for_member_and_uses_read_pool() {
     assert_eq!(busy_status, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(busy_body["error"]["code"], "runtime.busy");
 }
+
+struct FailingStatFiles {
+    raw_os: Option<i32>,
+}
+
+impl api::file_stat_read::FileStatRead for FailingStatFiles {
+    fn read_nfo(&self, _: &std::path::Path) -> Option<library::NfoMeta> {
+        None
+    }
+
+    fn metadata(&self, _: &std::path::Path) -> std::io::Result<std::fs::Metadata> {
+        match self.raw_os {
+            Some(code) => Err(std::io::Error::from_raw_os_error(code)),
+            None => Err(std::io::Error::other("disk io failure")),
+        }
+    }
+
+    fn is_file(&self, _: &std::path::Path) -> bool {
+        false
+    }
+}
+
+async fn get_full(app: &axum::Router, uri: &str) -> (StatusCode, axum::http::HeaderMap, Value) {
+    let resp = app
+        .clone()
+        .oneshot(Request::get(uri).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let status = resp.status();
+    let headers = resp.headers().clone();
+    let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let json = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    (status, headers, json)
+}
+
+#[tokio::test]
+async fn unreadable_sidecar_returns_500_permission_hint_instead_of_404_and_recovers() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fx = Fixture::new();
+    let app = router(fx.state.clone());
+    let paths = [
+        (
+            fx.item_dir.join("poster.jpg"),
+            format!("/api/v1/posters/{}", fx.file_id),
+        ),
+        (
+            fx.item_dir.join("fanart.jpg"),
+            format!("/api/v1/fanart/{}", fx.file_id),
+        ),
+        (
+            fx.item_dir.join("Film-thumb.jpg"),
+            format!("/api/v1/stills/{}", fx.file_id),
+        ),
+    ];
+
+    for (_, uri) in &paths {
+        let (status, body) = get_status(&app, uri, None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "absent {uri} should 404");
+        assert_eq!(body["error"]["code"], "poster.missing");
+    }
+
+    for (path, _) in &paths {
+        std::fs::write(path, valid_jpeg()).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o000)).unwrap();
+    }
+    if std::fs::read(&paths[0].0).is_ok() {
+        for (path, _) in &paths {
+            let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644));
+        }
+        return;
+    }
+
+    let mut responses = Vec::new();
+    for (_, uri) in &paths {
+        responses.push((uri.clone(), get_full(&app, uri).await));
+    }
+    for (path, _) in &paths {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    }
+
+    for (uri, (status, headers, body)) in responses {
+        assert_eq!(
+            status,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "unreadable {uri} must return 500 instead of 404: {body}"
+        );
+        assert_eq!(
+            headers
+                .get(axum::http::header::CACHE_CONTROL)
+                .and_then(|v| v.to_str().ok()),
+            Some("no-store")
+        );
+        assert_eq!(body["ok"], false);
+        assert_eq!(body["error"]["code"], "poster.permission_denied");
+        let msg = body["error"]["message"].as_str().unwrap_or_default();
+        assert!(msg.contains("权限"), "expected permission hint: {msg}");
+    }
+
+    for (_, uri) in &paths {
+        let (status, _, _) = get_full(&app, uri).await;
+        assert_eq!(status, StatusCode::OK, "restored {uri} must return 200");
+    }
+}
+
+#[tokio::test]
+async fn stat_permission_and_generic_io_errors_return_500_with_permission_prompt() {
+    let fx = Fixture::new();
+    let uri = format!("/api/v1/posters/{}", fx.file_id);
+
+    let eperm_app = router(
+        fx.state
+            .clone()
+            .with_file_stat_read(Arc::new(FailingStatFiles { raw_os: Some(1) })),
+    );
+    let (status, headers, body) = get_full(&eperm_app, &uri).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(
+        headers
+            .get(axum::http::header::CACHE_CONTROL)
+            .and_then(|v| v.to_str().ok()),
+        Some("no-store")
+    );
+    assert_eq!(body["error"]["code"], "poster.permission_denied");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("权限")
+    );
+
+    let io_app = router(
+        fx.state
+            .clone()
+            .with_file_stat_read(Arc::new(FailingStatFiles { raw_os: None })),
+    );
+    let (status, _, body) = get_full(&io_app, &uri).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(body["error"]["code"], "poster.io_error");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("权限")
+    );
+}
