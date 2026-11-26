@@ -37,6 +37,7 @@ python3 scripts/with-build-lock.py --exclusive pnpm --dir web build
 ```text
 crawler-media/
 ├── data/       数据库、缓存、图片等应用数据
+│   ├── .dev-api-token  未显式传入 TOKEN 时自动生成并持久化的本地管理令牌
 │   └── logs    指向 log/ 的符号链接
 ├── log/        backend.log、frontend.log、mock.log 及应用的滚动日志
 ├── run/        服务 PID 文件
@@ -45,6 +46,8 @@ crawler-media/
 ```
 
 `TEST_ROOT` 可指定另一套测试根目录，`DATA_DIR`、`LOG_DIR`、`QB_HOST_DOWNLOADS`、`MOCK_SITE_PY` 可单独覆盖；绝对路径直接使用，相对路径从仓库根目录解析，与调用时的工作目录无关。例如 `TEST_ROOT=/tmp/crawler-e2e-XXXXXX ./start-test.sh restart` 使用独立实例目录。`status` 显示实际数据、日志和下载路径；`python3 scripts/e2e/logstats.py [日志路径]` 默认读取相同 `TEST_ROOT` / `LOG_DIR` 下的 `backend.log`。
+
+未显式传入 `TOKEN` 时，`start-test.sh` 不再回退固定 `changeme`，而是在 `$DATA_DIR/.dev-api-token` 生成并持久化随机本地管理 Bearer Token（权限 `0600`）；脚本或 CLI 调用可读取 `"$(cat "$DATA_DIR/.dev-api-token")"`（或查看 `./start-test.sh status`），也可显式传入 `TOKEN=...` 覆盖。前端开发服务启用 Vite Host 校验以防 DNS rebinding：未设置 `CM_DEV_ALLOWED_HOSTS` 时仅放行 Vite 内置的 `localhost` 与 IP 访问；`start-test.sh` 保持 `LISTEN_HOST=0.0.0.0` 开箱局域网访问，并自动将 `127.0.0.1,localhost,<局域网IP>,<LocalHostName>.local`（及自定义 `LISTEN_HOST`）注入 `CM_DEV_ALLOWED_HOSTS`，必要时可通过环境变量 `CM_DEV_ALLOWED_HOSTS` 显式覆盖逗号分隔主机列表。
 
 脚本在启动时将 `data/logs` 链接到 `log/`，应用日志导出也读取该目录。若已有不同的 `data/logs` 文件或目录，脚本会报错并保留内容；停服整理后再启动。`clean-logs` 清空三个服务输出日志，应用滚动日志保留。脚本不搬移旧数据库或日志；已有 qB 容器的 `/downloads` 挂载需与 `QB_HOST_DOWNLOADS` 一致。
 

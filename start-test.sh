@@ -27,7 +27,7 @@ BACKEND_PORT="${BACKEND_PORT:-18765}"
 FRONTEND_PORT="${FRONTEND_PORT:-3334}"
 QB_PORT="${QB_PORT:-8080}"
 MOCK_PORT="${MOCK_PORT:-18090}"
-TOKEN="${TOKEN:-changeme}"
+TOKEN="${TOKEN:-}"
 ADMIN_PASSWORD="${ADMIN_PASSWORD:-test-admin-secret-password}"
 QB_USER="${QB_USER:-admin}"
 QB_PASS="${QB_PASS:-adminadmin}"
@@ -117,6 +117,31 @@ prepare_runtime_dirs() {
   fi
 }
 
+resolve_dev_token() {
+  if [[ -n "${TOKEN:-}" ]]; then
+    return 0
+  fi
+  local token_file="$DATA_DIR/.dev-api-token"
+  if [[ -s "$token_file" ]]; then
+    local saved
+    saved="$(tr -d '[:space:]' < "$token_file" 2>/dev/null || true)"
+    if [[ -n "$saved" ]]; then
+      TOKEN="$saved"
+      return 0
+    fi
+  fi
+  mkdir -p "$DATA_DIR"
+  local generated=""
+  if command -v openssl >/dev/null 2>&1; then
+    generated="$(openssl rand -hex 16 2>/dev/null || true)"
+  fi
+  if [[ -z "$generated" ]]; then
+    generated="$(python3 -c 'import secrets; print(secrets.token_hex(16))')"
+  fi
+  (umask 077 && printf '%s\n' "$generated" >"$token_file")
+  TOKEN="$generated"
+}
+
 read_pid() {
   local file="$1"
   [[ -f "$file" ]] || return 1
@@ -158,6 +183,28 @@ detect_lan_ip() {
     fi
   fi
   return 1
+}
+
+build_dev_allowed_hosts() {
+  local allowed_hosts="127.0.0.1,localhost"
+  local lan_ip="" local_host=""
+  lan_ip="$(detect_lan_ip || true)"
+  if [[ -n "$lan_ip" ]]; then
+    allowed_hosts="$allowed_hosts,$lan_ip"
+  fi
+  if command -v scutil >/dev/null 2>&1; then
+    local_host="$(scutil --get LocalHostName 2>/dev/null || true)"
+    if [[ -n "$local_host" ]]; then
+      allowed_hosts="$allowed_hosts,${local_host%.local}.local"
+    fi
+  fi
+  case "${LISTEN_HOST:-}" in
+    ""|0.0.0.0|::|"[::]"|127.0.0.1|localhost) ;;
+    *)
+      allowed_hosts="$allowed_hosts,$LISTEN_HOST"
+      ;;
+  esac
+  printf '%s' "$allowed_hosts"
 }
 
 listener_matches_host() {
@@ -209,6 +256,7 @@ launch() {
 start_backend() {
   local force="${1:-false}"
   prepare_runtime_dirs
+  resolve_dev_token
   if [[ "$force" != "true" ]] && is_running "$(pid_file backend)" && listener_matches_host "$BACKEND_PORT" "$LISTEN_HOST" && local_curl -sf --connect-timeout 1 -m 2 "http://127.0.0.1:$BACKEND_PORT/api/v1/health" >/dev/null 2>&1; then
     log "后端已在运行且健康 ($LISTEN_HOST:$BACKEND_PORT)，跳过重复启动"
     return 0
@@ -289,6 +337,8 @@ start_frontend() {
     return 1
   fi
   free_port "$FRONTEND_PORT"
+  local allowed_hosts
+  allowed_hosts="$(build_dev_allowed_hosts)"
   log "启动前端 (监听 $LISTEN_HOST:$FRONTEND_PORT)..."
   # Vite 同源代理转发到后端端口。
   # 先跑 copy-jassub 复制字幕渲染资产,再 exec vite,避免 pid 文件记到 shell 包装器。
@@ -297,7 +347,9 @@ start_frontend() {
     if [[ -f scripts/copy-jassub.mjs ]]; then
       node scripts/copy-jassub.mjs >>"$FRONTEND_LOG" 2>&1 || true
     fi
-    launch frontend env VITE_BACKEND_TARGET="http://127.0.0.1:$BACKEND_PORT" \
+    launch frontend env \
+      VITE_BACKEND_TARGET="http://127.0.0.1:$BACKEND_PORT" \
+      CM_DEV_ALLOWED_HOSTS="${CM_DEV_ALLOWED_HOSTS:-$allowed_hosts}" \
       node "$FRONTEND_DIR/node_modules/vite/bin/vite.js" \
       --host "$LISTEN_HOST" --port "$FRONTEND_PORT" --strictPort
   )
@@ -411,6 +463,7 @@ status_all() {
   fi
   printf '  后端: %s\n  前端: %s\n  qB:   %s\n  mock: %s\n' "$backend" "$frontend" "$qb" "$mock"
   printf '\n  数据目录: %s\n  日志目录: %s\n  下载目录: %s\n' "$DATA_DIR" "$LOG_DIR" "$QB_HOST_DOWNLOADS"
+  resolve_dev_token
   printf '\n  本机页面:   http://127.0.0.1:%s   (账号 admin / 密码 %s)\n' "$FRONTEND_PORT" "$ADMIN_PASSWORD"
   printf '  本机 API:   http://127.0.0.1:%s   (CLI Bearer Token: %s)\n' "$BACKEND_PORT" "$TOKEN"
   local lan_ip=""
