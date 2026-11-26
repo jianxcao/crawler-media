@@ -163,31 +163,20 @@ impl Downloader for QbitDownloader {
             crate::ownership_tag(&torrent.enclosure)
         );
         const UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
-        let staged_bytes = if download_url.starts_with("http://")
-            || download_url.starts_with("https://")
-        {
-            let bytes = self
-                .download_torrent_bytes_raw(download_url, UA)
-                .map_err(|err| classify_torrent_fetch_error(&torrent.title, err))?;
-            // D-M4: only a bencoded dictionary with an `info` key is a
-            // torrent; an HTML login page / error body is not uploaded.
-            let Some(hash) = crate::torrent_info_hash(&bytes) else {
-                tracing::warn!(torrent = %torrent.title, bytes = bytes.len(), "种子链接返回的不是 .torrent（可能站点 Cookie 失效），拒绝该来源");
-                return Err(DownloaderError::SourceRejected(
-                    "种子链接返回的不是合法 .torrent（可能站点 Cookie 失效、已被删种或配额超限）"
-                        .into(),
-                ));
+        let staged_bytes =
+            if download_url.starts_with("http://") || download_url.starts_with("https://") {
+                let (bytes, hash) =
+                    self.fetch_validated_torrent_bytes(&torrent.title, download_url, UA)?;
+                // D-H2: a task with the same info hash may already exist
+                // without our tags (added by hand). Claim it instead of
+                // failing every round with qBittorrent's `Fails.`.
+                if self.claim_existing(&hash, &tag, &torrent.title)? {
+                    return Ok(());
+                }
+                Some(bytes)
+            } else {
+                None
             };
-            // D-H2: a task with the same info hash may already exist
-            // without our tags (added by hand). Claim it instead of
-            // failing every round with qBittorrent's `Fails.`.
-            if self.claim_existing(&hash, &tag, &torrent.title)? {
-                return Ok(());
-            }
-            Some(bytes)
-        } else {
-            None
-        };
         // The multipart form is consumed per request, so rebuild it for a
         // retry after re-login.
         let build_form = || {
@@ -563,18 +552,80 @@ impl QbitDownloader {
             .find(|info| info.hash.eq_ignore_ascii_case(&hash)))
     }
 
-    /// Download a tracker .torrent (or magnet) so the short-lived link does
-    /// not expire before qBittorrent fetches it.
-    fn download_torrent_bytes_raw(
+    /// Download a tracker `.torrent` so the short-lived link does not expire
+    /// before qBittorrent fetches it, distinguishing transient WAF / truncated
+    /// transfers from definitive non-torrent bodies.
+    fn fetch_validated_torrent_bytes(
         &self,
+        title: &str,
         enclosure: &str,
         ua: &str,
-    ) -> Result<Vec<u8>, ureq::Error> {
+    ) -> Result<(Vec<u8>, String), DownloaderError> {
+        let bytes = self.download_torrent_bytes_raw(title, enclosure, ua)?;
+        // D-M4: only a bencoded dictionary with an `info` key is a torrent;
+        // an HTML login page / error body is not uploaded.
+        if let Some(hash) = crate::torrent_info_hash(&bytes) {
+            return Ok((bytes, hash));
+        }
+        if is_cloudflare_interstitial(&bytes) {
+            tracing::warn!(torrent = %title, bytes = bytes.len(), "种子链接返回 Cloudflare 验证页，保留该来源供后续重试");
+            return Err(DownloaderError::Message(
+                "种子链接被 Cloudflare 验证页拦截，保留重试".into(),
+            ));
+        }
+        if bytes.first() == Some(&b'd') {
+            tracing::warn!(torrent = %title, bytes = bytes.len(), "种子响应以 bencode 字典开头但未完整解析，疑似传输截断，保留重试");
+            return Err(DownloaderError::Message(
+                "种子文件疑似传输截断（bencode 未闭合），保留重试".into(),
+            ));
+        }
+        tracing::warn!(torrent = %title, bytes = bytes.len(), "种子链接返回的不是 .torrent（可能站点 Cookie 失效），拒绝该来源");
+        Err(DownloaderError::SourceRejected(
+            "种子链接返回的不是合法 .torrent（可能站点 Cookie 失效、已被删种或配额超限）".into(),
+        ))
+    }
+
+    fn download_torrent_bytes_raw(
+        &self,
+        title: &str,
+        enclosure: &str,
+        ua: &str,
+    ) -> Result<Vec<u8>, DownloaderError> {
         let response = http_agent()
             .get(enclosure)
             .header("User-Agent", ua)
-            .call()?;
-        response.into_body().read_to_vec()
+            .call()
+            .map_err(|err| classify_torrent_fetch_error(title, err))?;
+        let cf_mitigated = response
+            .headers()
+            .get("cf-mitigated")
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| !v.trim().is_empty());
+        if cf_mitigated {
+            tracing::warn!(torrent = %title, "拉取 .torrent 遇到 cf-mitigated 质询头，保留该来源供后续重试");
+            return Err(DownloaderError::Message(
+                "拉取 .torrent 被 Cloudflare WAF 质询拦截".into(),
+            ));
+        }
+        let expected_len = response
+            .headers()
+            .get("content-length")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|raw| raw.trim().parse::<usize>().ok());
+        let bytes = response
+            .into_body()
+            .read_to_vec()
+            .map_err(|err| classify_torrent_fetch_error(title, err))?;
+        if let Some(expected) = expected_len
+            && bytes.len() < expected
+        {
+            tracing::warn!(torrent = %title, actual = bytes.len(), expected, "拉取 .torrent 响应体短于 Content-Length，保留重试");
+            return Err(DownloaderError::Message(format!(
+                "拉取 .torrent 响应体被截断（{}/{expected} 字节）",
+                bytes.len()
+            )));
+        }
+        Ok(bytes)
     }
 
     fn get(&self, url: &str) -> Result<String, DownloaderError> {
@@ -631,6 +682,13 @@ impl QbitDownloader {
         tracing::info!(torrent = %title, tag = %tag, "种子已成功添加到 qBittorrent");
         Ok(())
     }
+}
+
+fn is_cloudflare_interstitial(bytes: &[u8]) -> bool {
+    let text = String::from_utf8_lossy(bytes);
+    text.contains("Just a moment...")
+        || text.contains("Attention Required! | Cloudflare")
+        || text.contains("cf-browser-verification")
 }
 
 fn classify_torrent_fetch_error(title: &str, err: ureq::Error) -> DownloaderError {

@@ -1,6 +1,6 @@
 //! D-M6: transient source / token-resolution errors must not permanently
 //! blacklist enclosures; only definitive source rejections (`SourceRejected` /
-//! `IndexerError::Parse`) mark an enclosure rejected and fall back in-round.
+//! `IndexerError::SourceNotFound`) mark an enclosure rejected and fall back in-round.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -172,6 +172,7 @@ async fn definitive_source_rejected_blacklists_first_candidate_and_falls_back_to
 
 struct MteamTokenFixture {
     transient_fetch: AtomicBool,
+    token_override: parking_lot::Mutex<Option<String>>,
 }
 
 impl indexer::Fetcher for MteamTokenFixture {
@@ -201,6 +202,9 @@ impl indexer::Fetcher for MteamTokenFixture {
         }
         if self.transient_fetch.load(Ordering::SeqCst) {
             return Err(indexer::IndexerError::Fetch("503 gateway timeout".into()));
+        }
+        if let Some(body) = self.token_override.lock().clone() {
+            return Ok(body);
         }
         if req.key.ends_with(":1") {
             return Ok(r#"{"code":"404","message":"deleted","data":null}"#.into());
@@ -276,6 +280,7 @@ async fn indexer_resolve_fetch_error_retries_while_parse_error_falls_back() {
     let tmp = tempfile::tempdir().unwrap();
     let fixture = Arc::new(MteamTokenFixture {
         transient_fetch: AtomicBool::new(true),
+        token_override: parking_lot::Mutex::new(None),
     });
     let downloader = Arc::new(downloader::MemoryDownloader::new(tmp.path().join("stage")));
     let state = api::ApiState::new(
@@ -319,6 +324,26 @@ async fn indexer_resolve_fetch_error_retries_while_parse_error_falls_back() {
     );
 
     fixture.transient_fetch.store(false, Ordering::SeqCst);
+
+    // Rate-limit JSON envelope and Cloudflare HTML body on genDlToken are both
+    // transient and must NOT blacklist candidate 1.
+    for transient_body in [
+        r#"{"code":"429","message":"請求過於頻繁","data":null}"#,
+        "<!DOCTYPE html><html><head><title>Just a moment...</title></head></html>",
+    ] {
+        *fixture.token_override.lock() = Some(transient_body.into());
+        assert!(run_search_job(&state, id).await.is_err());
+        assert!(
+            state
+                .store()
+                .load_rejected_enclosures(id)
+                .unwrap()
+                .is_empty(),
+            "transient genDlToken body must not blacklist source: {transient_body}"
+        );
+    }
+    *fixture.token_override.lock() = None;
+
     run_search_job(&state, id).await.unwrap();
     let rejected = state.store().load_rejected_enclosures(id).unwrap();
     assert_eq!(rejected.len(), 1);
@@ -334,4 +359,91 @@ async fn indexer_resolve_fetch_error_retries_while_parse_error_falls_back() {
         active,
         vec!["https://pt.example.invalid/api/torrent/download?id=2".to_string()]
     );
+}
+
+#[tokio::test]
+async fn manual_run_persists_source_rejected_when_fallback_candidate_fails_transiently() {
+    struct MixedCandidateDownloader {
+        fail_second_transiently: AtomicBool,
+        inner: downloader::MemoryDownloader,
+    }
+
+    impl downloader::Downloader for MixedCandidateDownloader {
+        fn add(&self, torrent: &domain::Torrent) -> Result<(), downloader::DownloaderError> {
+            self.add_with_options(torrent, &torrent.enclosure, None)
+        }
+
+        fn add_with_options(
+            &self,
+            torrent: &domain::Torrent,
+            download_url: &str,
+            save_path: Option<&str>,
+        ) -> Result<(), downloader::DownloaderError> {
+            if torrent.enclosure.contains("id=1") {
+                return Err(downloader::DownloaderError::SourceRejected(
+                    "404 torrent deleted".into(),
+                ));
+            }
+            if self.fail_second_transiently.load(Ordering::SeqCst) {
+                return Err(downloader::DownloaderError::Message(
+                    "qBittorrent temporarily unreachable".into(),
+                ));
+            }
+            self.inner
+                .add_with_options(torrent, download_url, save_path)
+        }
+
+        fn completed_files(
+            &self,
+            torrent: &domain::Torrent,
+        ) -> Result<Vec<PathBuf>, downloader::DownloaderError> {
+            self.inner.completed_files(torrent)
+        }
+
+        fn owned_identity(
+            &self,
+            torrent: &domain::Torrent,
+        ) -> Result<Option<String>, downloader::DownloaderError> {
+            self.inner.owned_identity(torrent)
+        }
+
+        fn endpoint(&self) -> Option<String> {
+            self.inner.endpoint()
+        }
+    }
+
+    let stage = tempfile::tempdir().unwrap();
+    let stub = Arc::new(MixedCandidateDownloader {
+        fail_second_transiently: AtomicBool::new(true),
+        inner: downloader::MemoryDownloader::new(stage.path()),
+    });
+    let h = Harness::with_downloader(stub.clone());
+    h.create_site().await;
+    let filter_id = prefer_group_filter(&h.app).await;
+    let id = h
+        .create_movie_subscribe(json!({ "filter_id": filter_id }))
+        .await;
+    h.set_search_rows(&[(MATRIX_TITLE, 1), (ALT_TITLE, 2)]);
+
+    let (status, _body) = h.run_subscribe_raw(id).await;
+    assert!(
+        !status.is_success(),
+        "manual /run must report error when fallback candidate fails transiently: {status}"
+    );
+    let rejected = h.state.store().load_rejected_enclosures(id).unwrap();
+    assert_eq!(rejected.len(), 1, "Candidate 1 must be persisted rejected");
+    assert!(rejected.contains(&h.enclosure(1)));
+    assert!(!rejected.contains(&h.enclosure(2)));
+    assert_eq!(h.pending_state(id, "rejected"), 1);
+    assert_eq!(h.pending_state(id, "active"), 0);
+
+    // Next manual /run succeeds by skipping rejected Candidate 1 and submitting Candidate 2.
+    stub.fail_second_transiently.store(false, Ordering::SeqCst);
+    h.run_subscribe(id).await;
+    let active: Vec<_> = h
+        .pending(id)
+        .into_iter()
+        .map(|(_, p)| p.torrent.enclosure)
+        .collect();
+    assert_eq!(active, vec![h.enclosure(2)]);
 }

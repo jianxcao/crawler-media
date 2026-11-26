@@ -74,7 +74,16 @@ pub fn collect_completed_recorded<D: Downloader + ?Sized>(
     recorder: Option<&dyn TransferRecorder>,
 ) -> Result<RunOutcome, SubscribeError> {
     control.check()?;
-    let mut output = CollectionOutput::default();
+    let mut rejected_enclosures = Vec::new();
+    for enclosure in std::mem::take(&mut added.outcome.rejected_enclosures) {
+        if !rejected_enclosures.contains(&enclosure) {
+            rejected_enclosures.push(enclosure);
+        }
+    }
+    let mut output = CollectionOutput {
+        rejected_enclosures,
+        ..CollectionOutput::default()
+    };
 
     // 先依据现有已确认的目标映射刷新/协调 facts，确保即便 Downloader 在 Move 模式下不再列出视频，
     // 本地持久化的映射依然能驱动并修复 facts

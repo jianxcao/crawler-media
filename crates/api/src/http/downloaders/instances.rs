@@ -21,6 +21,8 @@ pub(crate) struct DownloaderInput {
     kind: String,
     url: String,
     #[serde(default)]
+    auth_type: Option<String>,
+    #[serde(default)]
     username: Option<String>,
     #[serde(default)]
     password: Option<String>,
@@ -73,6 +75,18 @@ fn downloader_json_with_meta(
     })
 }
 
+fn downloader_status(enabled: bool, verified: Option<&str>) -> &'static str {
+    if !enabled {
+        "disabled"
+    } else if verified == Some("true") {
+        "active"
+    } else if verified == Some("false") {
+        "failed"
+    } else {
+        "pending"
+    }
+}
+
 fn downloader_json_with_store(row: &crate::store::DownloaderRow, store: &crate::Store) -> Value {
     let verified = store
         .get_setting(&format!("downloader.{}.verified", row.id))
@@ -82,16 +96,20 @@ fn downloader_json_with_store(row: &crate::store::DownloaderRow, store: &crate::
         .get_setting(&format!("downloader.{}.last_error", row.id))
         .ok()
         .flatten();
-    let status = if !row.enabled {
-        "disabled"
-    } else if verified.as_deref() == Some("true") {
-        "active"
-    } else if verified.as_deref() == Some("false") {
-        "failed"
-    } else {
-        "pending"
-    };
+    let status = downloader_status(row.enabled, verified.as_deref());
     downloader_json_with_meta(row, status, last_error)
+}
+
+fn validate_auth_type(kind: Option<&str>, auth_type: Option<&str>) -> Result<(), &'static str> {
+    if let Some(auth) = auth_type {
+        if !matches!(auth, "password" | "apikey") {
+            return Err("auth_type 必须是 password 或 apikey");
+        }
+        if kind == Some("transmission") && auth == "apikey" {
+            return Err("transmission 不支持 apikey 认证");
+        }
+    }
+    Ok(())
 }
 
 fn downloader_json(row: &crate::store::DownloaderRow) -> Value {
@@ -148,18 +166,32 @@ pub(crate) async fn create_downloader(
             "kind 必须是 qbittorrent 或 transmission",
         );
     }
-    let api_key = (body.kind == "qbittorrent")
+    if let Err(msg) = validate_auth_type(Some(body.kind.as_str()), body.auth_type.as_deref()) {
+        return err(StatusCode::BAD_REQUEST, "downloader.invalid", msg);
+    }
+    let is_qbit = body.kind == "qbittorrent";
+    let force_password = body.auth_type.as_deref() == Some("password");
+    let force_apikey = is_qbit && body.auth_type.as_deref() == Some("apikey");
+    let api_key = (is_qbit && !force_password)
         .then_some(body.api_key)
         .flatten()
         .map(|k| k.trim().to_string())
         .filter(|k| !k.is_empty());
+    let username = (!force_apikey)
+        .then_some(body.username)
+        .flatten()
+        .filter(|u| !u.is_empty());
+    let password = (!force_apikey)
+        .then_some(body.password)
+        .flatten()
+        .filter(|p| !p.is_empty());
     let row = crate::store::DownloaderRow {
         id: DownloaderId::new(),
         name: body.name,
         kind: body.kind,
         url: body.url,
-        username: body.username.filter(|u| !u.is_empty()),
-        password: body.password.filter(|p| !p.is_empty()),
+        username,
+        password,
         api_key,
         category: body.category.filter(|c| !c.is_empty()),
         path_maps: parse_path_maps(body.path_maps),
@@ -168,15 +200,6 @@ pub(crate) async fn create_downloader(
     };
     crate::http::store_wait::store_write(&state, move |store| {
         if let Err(error) = store.insert_downloader(&row) {
-            return err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "store.error",
-                &error.to_string(),
-            );
-        }
-        if row.is_default
-            && let Err(error) = store.set_default_downloader(row.id)
-        {
             return err(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "store.error",
@@ -204,10 +227,15 @@ pub(crate) async fn get_downloader(
         }
     };
     crate::http::store_wait::store_read(&state, &[store::Db::App], move |store| {
-        let Some(row) = store.get_downloader(id).ok().flatten() else {
-            return err(StatusCode::NOT_FOUND, "downloader.missing", "下载器不存在");
-        };
-        ok(downloader_json_with_store(&row, &store)).into_response()
+        match store.get_downloader(id) {
+            Ok(Some(row)) => ok(downloader_json_with_store(&row, &store)).into_response(),
+            Ok(None) => err(StatusCode::NOT_FOUND, "downloader.missing", "下载器不存在"),
+            Err(error) => err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "store.error",
+                &error.to_string(),
+            ),
+        }
     })
     .await
     .unwrap_or_else(|error| error.response())
@@ -221,6 +249,8 @@ pub(crate) struct DownloaderPatch {
     kind: Option<String>,
     #[serde(default)]
     url: Option<String>,
+    #[serde(default)]
+    auth_type: Option<String>,
     #[serde(default)]
     username: Option<String>,
     #[serde(default)]
@@ -237,7 +267,10 @@ pub(crate) struct DownloaderPatch {
     enabled: Option<bool>,
 }
 
-fn apply_downloader_patch(row: &mut store::DownloaderRow, body: DownloaderPatch) {
+fn apply_downloader_patch(
+    row: &mut store::DownloaderRow,
+    body: DownloaderPatch,
+) -> Result<(), store::StoreError> {
     if let Some(name) = body.name.filter(|name| !name.is_empty()) {
         row.name = name;
     }
@@ -247,6 +280,10 @@ fn apply_downloader_patch(row: &mut store::DownloaderRow, body: DownloaderPatch)
     if let Some(kind) = body.kind.filter(|kind| !kind.is_empty()) {
         row.kind = kind;
     }
+    if let Err(msg) = validate_auth_type(Some(row.kind.as_str()), body.auth_type.as_deref()) {
+        return Err(store::StoreError::Invalid(msg.into()));
+    }
+    let explicit_username = body.username.is_some();
     if let Some(username) = body.username {
         row.username = (!username.is_empty()).then_some(username);
     }
@@ -259,6 +296,17 @@ fn apply_downloader_patch(row: &mut store::DownloaderRow, body: DownloaderPatch)
     }
     if row.kind != "qbittorrent" {
         row.api_key = None;
+    } else {
+        match body.auth_type.as_deref() {
+            Some("password") => row.api_key = None,
+            Some("apikey") => {
+                row.password = None;
+                if !explicit_username {
+                    row.username = None;
+                }
+            }
+            _ => {}
+        }
     }
     if let Some(category) = body.category {
         row.category = (!category.is_empty()).then_some(category);
@@ -269,6 +317,7 @@ fn apply_downloader_patch(row: &mut store::DownloaderRow, body: DownloaderPatch)
     if let Some(enabled) = body.enabled {
         row.enabled = enabled;
     }
+    Ok(())
 }
 
 pub(crate) async fn patch_downloader(
@@ -295,30 +344,26 @@ pub(crate) async fn patch_downloader(
             "kind 必须是 qbittorrent 或 transmission",
         );
     }
+    if let Err(msg) = validate_auth_type(body.kind.as_deref(), body.auth_type.as_deref()) {
+        return err(StatusCode::BAD_REQUEST, "downloader.invalid", msg);
+    }
+    let make_default = body.is_default == Some(true);
     crate::http::store_wait::store_write(&state, move |store| {
-        let Some(mut row) = store.get_downloader(id).ok().flatten() else {
-            return err(StatusCode::NOT_FOUND, "downloader.missing", "下载器不存在");
-        };
-        let make_default = body.is_default == Some(true);
-        apply_downloader_patch(&mut row, body);
-        if let Err(error) = store.save_downloader(&row) {
-            return err(
+        match store.mutate_downloader(id, make_default, |row| apply_downloader_patch(row, body)) {
+            Ok(Some((row, verified, last_error))) => {
+                let status = downloader_status(row.enabled, verified.as_deref());
+                ok(downloader_json_with_meta(&row, status, last_error)).into_response()
+            }
+            Ok(None) => err(StatusCode::NOT_FOUND, "downloader.missing", "下载器不存在"),
+            Err(store::StoreError::Invalid(message)) => {
+                err(StatusCode::BAD_REQUEST, "downloader.invalid", &message)
+            }
+            Err(error) => err(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "store.error",
                 &error.to_string(),
-            );
+            ),
         }
-        // Updating configuration invalidates previous verification state
-        let _ = store.delete_setting(&format!("downloader.{}.verified", row.id));
-        let _ = store.delete_setting(&format!("downloader.{}.last_error", row.id));
-        if make_default && let Err(error) = store.set_default_downloader(row.id) {
-            return err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "store.error",
-                &error.to_string(),
-            );
-        }
-        ok(downloader_json_with_store(&row, &store)).into_response()
     })
     .await
     .unwrap_or_else(|response| response)

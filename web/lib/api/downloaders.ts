@@ -139,15 +139,21 @@ function toDownloaderInput(payload: DownloaderPayload): Record<string, unknown> 
   };
   if (payload.client_type !== "qbittorrent") {
     if (payload.username !== undefined) input.username = payload.username ?? "";
-    if (payload.password !== undefined) input.password = payload.password ?? "";
+    if (payload.password !== undefined && payload.password !== null) {
+      input.password = payload.password;
+    }
     input.api_key = "";
   } else if (payload.auth_type === "apikey") {
+    input.auth_type = "apikey";
     input.username = "";
     input.password = "";
     if (apiKey.length > 0) input.api_key = apiKey;
   } else {
+    if (payload.auth_type === "password") input.auth_type = "password";
     if (payload.username !== undefined) input.username = payload.username ?? "";
-    if (payload.password !== undefined) input.password = payload.password ?? "";
+    if (payload.password !== undefined && payload.password !== null) {
+      input.password = payload.password;
+    }
     if (payload.auth_type === "password") {
       input.api_key = "";
     } else if (payload.api_key !== undefined) {

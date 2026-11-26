@@ -316,6 +316,7 @@ impl crate::writers::App<'_> {
     }
 
     pub fn set_default_downloader(&self, id: DownloaderId) -> Result<bool, StoreError> {
+        let tx = crate::write_tx(self.app)?;
         let exists = self
             .app
             .query_row(
@@ -334,7 +335,82 @@ impl crate::writers::App<'_> {
             "UPDATE downloaders SET is_default = 1 WHERE id = ?1",
             params![id.to_string()],
         )?;
+        tx.commit()?;
         Ok(true)
+    }
+
+    /// Atomically read-modify-write a downloader row, its `api_key` setting,
+    /// verification invalidation (when connection/auth fields change), and
+    /// optional default promotion inside one `IMMEDIATE` transaction.
+    pub fn mutate_downloader<F>(
+        &self,
+        id: DownloaderId,
+        make_default: bool,
+        mutate: F,
+    ) -> Result<Option<(DownloaderRow, Option<String>, Option<String>)>, StoreError>
+    where
+        F: FnOnce(&mut DownloaderRow) -> Result<(), StoreError>,
+    {
+        let tx = crate::write_tx(self.app)?;
+        let Some(before) = self.get_downloader(id)? else {
+            return Ok(None);
+        };
+        let mut row = before.clone();
+        mutate(&mut row)?;
+        if make_default {
+            self.app
+                .execute("UPDATE downloaders SET is_default = 0", [])?;
+            row.is_default = true;
+        }
+        self.app.execute(
+            "UPDATE downloaders SET name = ?1, kind = ?2, url = ?3, username = ?4,
+                    password = ?5, category = ?6, path_maps = ?7, enabled = ?9, is_default = ?10
+             WHERE id = ?8",
+            params![
+                row.name,
+                row.kind,
+                row.url,
+                row.username,
+                row.password,
+                row.category,
+                maps_json(&row.path_maps),
+                row.id.to_string(),
+                row.enabled as i64,
+                row.is_default as i64,
+            ],
+        )?;
+        self.sync_api_key(&row)?;
+        let connection_or_auth_changed = row.kind != before.kind
+            || row.url != before.url
+            || row.username != before.username
+            || row.password != before.password
+            || normalized_api_key(&row.api_key) != normalized_api_key(&before.api_key)
+            || row.category != before.category
+            || row.path_maps != before.path_maps;
+        let verified_key = format!("downloader.{}.verified", row.id);
+        let error_key = format!("downloader.{}.last_error", row.id);
+        if connection_or_auth_changed {
+            self.delete_setting(&verified_key)?;
+            self.delete_setting(&error_key)?;
+        }
+        let verified = self.get_setting(&verified_key)?;
+        let last_error = self.get_setting(&error_key)?;
+        tx.commit()?;
+        Ok(Some((row, verified, last_error)))
+    }
+}
+
+impl crate::Store {
+    pub fn mutate_downloader<F>(
+        &self,
+        id: DownloaderId,
+        make_default: bool,
+        mutate: F,
+    ) -> Result<Option<(DownloaderRow, Option<String>, Option<String>)>, StoreError>
+    where
+        F: FnOnce(&mut DownloaderRow) -> Result<(), StoreError>,
+    {
+        self.with_app(|app| app.mutate_downloader(id, make_default, mutate))
     }
 }
 

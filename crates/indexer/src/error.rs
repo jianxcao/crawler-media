@@ -8,6 +8,8 @@ pub enum IndexerError {
     Fetch(String),
     #[error("parse: {0}")]
     Parse(String),
+    #[error("source not found: {0}")]
+    SourceNotFound(String),
     #[error("unknown profile: {0}")]
     UnknownProfile(String),
     #[error(transparent)]
@@ -17,15 +19,17 @@ pub enum IndexerError {
 }
 
 impl IndexerError {
-    /// Returns `true` only when a fetched response was parsed and definitively
-    /// lacks a valid download target; transient, infrastructure, and
+    /// Returns `true` only when a fetched response definitively indicates the
+    /// torrent target does not exist (`404`/`410` or explicit success envelope
+    /// with empty download URL); rate-limit, auth, quota, gateway HTML, and
     /// configuration failures remain retryable.
     pub fn is_definitive_source_rejection(&self) -> bool {
         match self {
-            Self::Parse(_) => true,
+            Self::SourceNotFound(_) => true,
             Self::BrowserBusy
             | Self::BrowserSetup(_)
             | Self::Fetch(_)
+            | Self::Parse(_)
             | Self::UnknownProfile(_)
             | Self::Io(_)
             | Self::Yaml(_) => false,

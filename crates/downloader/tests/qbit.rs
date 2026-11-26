@@ -79,6 +79,24 @@ fn match_fake_qbit_route(
             "<html><body>Please login first</body></html>".into(),
             "",
         )
+    } else if req.starts_with("GET /truncated-bencode.torrent") {
+        (
+            "200 OK",
+            "d8:announce10:https://pt4:infod6:lengthi1e".into(),
+            "",
+        )
+    } else if req.starts_with("GET /cf-challenge.torrent") {
+        (
+            "200 OK",
+            "<html><body>challenge</body></html>".into(),
+            "cf-mitigated: challenge\r\n",
+        )
+    } else if req.starts_with("GET /cf-html.torrent") {
+        (
+            "200 OK",
+            "<!DOCTYPE html><html><head><title>Just a moment...</title></head><body><div class=\"cf-browser-verification\"></div></body></html>".into(),
+            "",
+        )
     } else if req.starts_with("GET /api/v2/app/version") {
         ("200 OK", "v5.3.0".into(), "")
     } else if req.contains("/api/v2/torrents/info") {
@@ -610,4 +628,53 @@ fn qbit_fails_reply_is_transient() {
         .add_with_options(&torrent_at(&stub), &stub, None)
         .unwrap_err();
     assert!(matches!(err, DownloaderError::Message(_)), "{err:?}");
+}
+
+#[test]
+fn truncated_bencode_and_cloudflare_waf_responses_are_transient_while_login_html_is_rejected() {
+    let capture = Capture::new();
+    let (url, _server) = serve(capture.clone(), "/downloads".into());
+    let dl = connect(&url);
+
+    for transient_path in [
+        "/truncated-bencode.torrent",
+        "/cf-challenge.torrent",
+        "/cf-html.torrent",
+    ] {
+        let target = format!("{url}{transient_path}");
+        let err = dl
+            .add_with_options(&torrent_at(&target), &target, None)
+            .unwrap_err();
+        assert!(
+            matches!(err, DownloaderError::Message(_)),
+            "expected transient DownloaderError::Message for {transient_path}, got: {err:?}"
+        );
+    }
+
+    // Short body relative to Content-Length (mid-stream disconnect) must also stay transient.
+    let short_server = FakeServer::start(move |_request, stream| {
+        let partial = "<html><body>truncated";
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: 512\r\nContent-Type: application/x-bittorrent\r\nConnection: close\r\n\r\n{partial}"
+        );
+        let _ = stream.write_all(resp.as_bytes());
+    });
+    let short_url = format!("{}/short.torrent", short_server.url());
+    let short_err = dl
+        .add_with_options(&torrent_at(&short_url), &short_url, None)
+        .unwrap_err();
+    assert!(
+        matches!(short_err, DownloaderError::Message(_)),
+        "expected transient Message for Content-Length truncation, got: {short_err:?}"
+    );
+
+    let login_url = format!("{url}/html-login.torrent");
+    let login_err = dl
+        .add_with_options(&torrent_at(&login_url), &login_url, None)
+        .unwrap_err();
+    assert!(
+        matches!(login_err, DownloaderError::SourceRejected(_)),
+        "generic HTML login page must remain SourceRejected, got: {login_err:?}"
+    );
+    assert!(capture.adds.lock().is_empty());
 }

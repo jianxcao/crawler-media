@@ -82,12 +82,15 @@ impl Downloader for AdmittedDownloader<'_, '_> {
     }
 }
 
-/// An accepted remote task remains tracked if paused during IO. A deleted
-/// Subscribe must never be recreated by a late response from its Downloader.
+/// An accepted remote task remains tracked if paused during IO. Definitive
+/// source rejections (`SourceRejected` / `ExistingTaskBroken`) are also
+/// persisted immediately so an unrelated transient error on another candidate
+/// never drops them. A deleted Subscribe must never be recreated.
 pub(super) fn record_accepted(
     state: &ApiState,
     id: SubscribeId,
     outcome: &subscribe::RunOutcome,
+    broken_scored: &[filter::ScoredTorrent],
     routed: &RoutedDownloader<'_>,
 ) -> Result<(), ApiError> {
     let guard = state.subscribe_guard(id);
@@ -121,6 +124,48 @@ pub(super) fn record_accepted(
                 .store
                 .set_pending_info_hash(id, &item.torrent.enclosure, &hash)?;
         }
+    }
+    let mut broken: Vec<(i32, crate::store::PendingDownload)> = broken_scored
+        .iter()
+        .map(|scored| {
+            (
+                scored.score,
+                crate::store::PendingDownload {
+                    torrent: scored.torrent.clone(),
+                    release_override: None,
+                    downloader_id: routed.used_id(&scored.torrent),
+                    submitted_at: Some(now),
+                },
+            )
+        })
+        .collect();
+    for torrent in routed.broken_torrents() {
+        if !broken
+            .iter()
+            .any(|(_, p)| p.torrent.enclosure == torrent.enclosure)
+        {
+            let downloader_id = routed.used_id(&torrent);
+            broken.push((
+                0,
+                crate::store::PendingDownload {
+                    torrent,
+                    release_override: None,
+                    downloader_id,
+                    submitted_at: Some(now),
+                },
+            ));
+        }
+    }
+    if !broken.is_empty() || !outcome.rejected_enclosures.is_empty() {
+        let broken_enclosures: Vec<String> = broken
+            .iter()
+            .map(|(_, p)| p.torrent.enclosure.clone())
+            .collect();
+        state.store.record_pending_submissions(id, &broken)?;
+        state
+            .store
+            .mark_pending_rejected(id, &outcome.rejected_enclosures)?;
+        state.store.mark_pending_rejected(id, &broken_enclosures)?;
     }
     Ok(())
 }

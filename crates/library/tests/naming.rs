@@ -293,3 +293,107 @@ fn comprehensive_directory_structures_cover_multi_episode_and_custom_templates()
         Path::new("/movies/Inception (2010) [tmdbid-27205]/Inception.2010.1080p.BluRay-SPARKS.mkv")
     );
 }
+
+#[test]
+fn sanitizes_forbidden_smb_chars_and_trims_trailing_dot_dash_combinations() {
+    let mut media = movie();
+    media.title = "Mission: Impossible? <1996> *\"Director's|Cut\"\x07".into();
+    media.year = Some(1996);
+    let mut release = release_movie();
+    release.year = Some(1996);
+    release.group = Some("Title.-".into());
+
+    let rendered = render_path(
+        Path::new("/lib"),
+        "{title} ({year})/{title} - {release_group}{ext}",
+        &media,
+        &release,
+        Path::new("mi.mkv"),
+    )
+    .unwrap();
+    assert_eq!(
+        rendered,
+        Path::new(
+            "/lib/Mission Impossible 1996 Director's Cut (1996)/Mission Impossible 1996 Director's Cut - Title.mkv"
+        )
+    );
+
+    let mut trailing_title = movie();
+    trailing_title.title = "Title.-".into();
+    let trimmed = render_path(
+        Path::new("/lib"),
+        "{title}{ext}",
+        &trailing_title,
+        &release,
+        Path::new("mi.mkv"),
+    )
+    .unwrap();
+    assert_eq!(trimmed, Path::new("/lib/Title.mkv"));
+}
+
+#[test]
+fn rejects_dot_traversal_and_empty_sanitized_directory_segments() {
+    let release = release_ep();
+    for bad_title in ["", "/", "...", "-..-", " .. ", ":\\*?\"<>|"] {
+        let mut bad_tv = tv();
+        bad_tv.title = bad_title.into();
+        let err = render_path(
+            Path::new("/lib"),
+            default_pattern(MediaKind::Tv),
+            &bad_tv,
+            &release,
+            Path::new("ep.mkv"),
+        )
+        .expect_err("degenerate title must not collapse Season folder to library root");
+        assert!(matches!(err, library::LibraryError::Naming(_)), "{err:?}");
+
+        let mut bad_movie = movie();
+        bad_movie.title = bad_title.into();
+        assert!(
+            render_path(
+                Path::new("/lib"),
+                default_pattern(MediaKind::Movie),
+                &bad_movie,
+                &release_movie(),
+                Path::new("m.mkv"),
+            )
+            .is_err(),
+            "degenerate movie title {bad_title:?} must be rejected"
+        );
+    }
+
+    // Optional group containing a token that sanitizes to empty shrinks cleanly,
+    // while literal traversal segments in a custom pattern are rejected.
+    let mut with_bad_orig = movie();
+    with_bad_orig.original_title = Some("-..-".into());
+    let shrunk = render_path(
+        Path::new("/lib"),
+        "{title} [{original_title}]{ext}",
+        &with_bad_orig,
+        &release_movie(),
+        Path::new("m.mkv"),
+    )
+    .unwrap();
+    assert_eq!(shrunk, Path::new("/lib/The Matrix.mkv"));
+
+    assert!(
+        render_path(
+            Path::new("/lib"),
+            "-..-/{title}{ext}",
+            &movie(),
+            &release_movie(),
+            Path::new("m.mkv"),
+        )
+        .is_err()
+    );
+    assert!(
+        render_path(
+            Path::new("/lib"),
+            "../{title}{ext}",
+            &movie(),
+            &release_movie(),
+            Path::new("m.mkv"),
+        )
+        .is_err()
+    );
+}

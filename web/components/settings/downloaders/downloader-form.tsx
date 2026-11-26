@@ -99,12 +99,25 @@ export function DownloaderForm({
 
   function submit() {
     setBusy(true);
+    const keepStoredPassword =
+      Boolean(downloader?.has_password) &&
+      downloader?.auth_type !== "apikey" &&
+      password === "";
     const authPayload: Partial<DownloaderPayload> =
       clientType === "qbittorrent"
         ? authType === "apikey"
-          ? { auth_type: "apikey", username: null, password: null, api_key: apiKey.trim() || null }
-          : { auth_type: "password", username: username.trim() || null, password: password || null, api_key: "" }
-        : { username: username.trim() || null, password: password || null, api_key: "" };
+          ? { auth_type: "apikey", username: "", password: "", api_key: apiKey.trim() || null }
+          : {
+              auth_type: "password",
+              username: username.trim() || null,
+              ...(keepStoredPassword ? {} : { password }),
+              api_key: "",
+            }
+        : {
+            username: username.trim() || null,
+            ...(keepStoredPassword ? {} : { password }),
+            api_key: "",
+          };
     void onSubmit({
       name: name.trim(),
       client_type: clientType,
@@ -240,7 +253,11 @@ export function DownloaderForm({
               type="password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
-              placeholder={downloader ? "出于安全，请重新填写" : ""}
+              placeholder={
+                downloader?.has_password && downloader?.auth_type !== "apikey"
+                  ? "已配置密码（留空则保持不变）"
+                  : ""
+              }
               autoComplete="new-password"
               className={inputClass}
             />

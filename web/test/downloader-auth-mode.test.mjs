@@ -295,3 +295,71 @@ test("DownloaderRow displays API Key auth mode cleanly when auth_type is apikey"
   assert.ok(stat, "must render DetailStat for 认证方式");
   assert.match(String(stat.props.value), /API Key/);
 });
+
+test("editing existing password downloader with blank password omits password instead of wiping it", async () => {
+  const calls = [];
+  const api = load("../lib/api/downloaders.ts", {
+    "@/lib/http": {
+      request: async (path, init) => {
+        calls.push({ path, method: init?.method, body: JSON.parse(init?.body ?? "null") });
+        return { data: { id: "dl-pw", status: "pending" } };
+      },
+    },
+    "../downloader-verification": load("../lib/downloader-verification.ts"),
+  });
+
+  const { renderForm, submitted } = formFixture({
+    id: "dl-pw",
+    name: "qB-pw",
+    kind: "qbittorrent",
+    url: "http://127.0.0.1:8080",
+    username: "admin",
+    auth_type: "password",
+    has_api_key: false,
+    has_password: true,
+    path_maps: [],
+    is_default: true,
+    status: "active",
+  });
+  let tree = renderForm();
+  const pwInput = nodes(tree).find(
+    (n) => n.type === "input" && n.props?.type === "password",
+  );
+  assert.match(
+    String(pwInput.props?.placeholder ?? ""),
+    /已配置密码|留空/,
+    "must tell user blank password preserves stored password",
+  );
+
+  // Rename without touching password -> omits `password` from payload and PATCH JSON!
+  const nameInput = nodes(tree).filter((n) => n.type === "input")[0];
+  nameInput.props.onChange({ target: { value: "qB-pw-renamed" } });
+  tree = renderForm();
+  const saveBtn = nodes(tree).find((n) => n.type === "button" && textContent(n).includes("保存"));
+  await saveBtn.props.onClick();
+
+  assert.equal("password" in submitted[0], false, "form payload must omit blank password when has_password=true");
+  await api.updateDownloader("dl-pw", submitted[0]);
+  assert.equal(
+    "password" in calls[0].body,
+    false,
+    "PATCH body must omit password so stored secret is preserved",
+  );
+  assert.equal(calls[0].body.auth_type, "password");
+  assert.equal(calls[0].body.api_key, "");
+
+  // Switching to API key mode explicitly sends password: "" and auth_type: "apikey".
+  const apiKeyBtn = nodes(tree).find((n) => n.type === "button" && textContent(n).includes("API Key"));
+  apiKeyBtn.props.onClick();
+  tree = renderForm();
+  const keyInput = nodes(tree).find((n) => n.type === "input" && n.props?.type === "password");
+  keyInput.props.onChange({ target: { value: "qbt_new_520" } });
+  tree = renderForm();
+  await nodes(tree)
+    .find((n) => n.type === "button" && textContent(n).includes("保存"))
+    .props.onClick();
+  await api.updateDownloader("dl-pw", submitted[1]);
+  assert.equal(calls[1].body.auth_type, "apikey");
+  assert.equal(calls[1].body.password, "");
+  assert.equal(calls[1].body.api_key, "qbt_new_520");
+});

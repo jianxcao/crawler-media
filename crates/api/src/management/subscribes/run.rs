@@ -358,7 +358,7 @@ fn execute(
         overlap,
         absolute: absolute.as_ref(),
     })?;
-    admission::record_accepted(state, id, &added.outcome, routed)?;
+    admission::record_accepted(state, id, &added.outcome, &added.broken, routed)?;
     {
         let guard = state.subscribe_guard(id);
         let _guard = guard.lock();

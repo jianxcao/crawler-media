@@ -356,3 +356,116 @@ fn tv_source_rejected_falls_back_per_episode_without_retrying_client_errors() {
         "{calls:?}"
     );
 }
+
+#[test]
+fn collect_completed_and_run_preserve_submission_rejected_enclosures() {
+    struct BrokenAndRejectedDownloader;
+    impl Downloader for BrokenAndRejectedDownloader {
+        fn add(&self, torrent: &Torrent) -> Result<(), DownloaderError> {
+            if torrent.enclosure.ends_with("/broken") {
+                return Err(DownloaderError::ExistingTaskBroken("deadbeef".into()));
+            }
+            if torrent.enclosure.ends_with("/rejected") {
+                return Err(DownloaderError::SourceRejected("HTTP 404".into()));
+            }
+            Ok(())
+        }
+        fn completed_files(&self, _: &Torrent) -> Result<Vec<PathBuf>, DownloaderError> {
+            Ok(vec![])
+        }
+    }
+
+    let tmp = tempfile::tempdir().unwrap();
+    let media = Media {
+        id: MediaId::new(),
+        kind: MediaKind::Movie,
+        title: "The Matrix".into(),
+        year: Some(1999),
+        original_title: None,
+        aliases: Vec::new(),
+        tmdb_id: None,
+        douban_id: None,
+        tvdb_id: None,
+        bangumi_id: None,
+        anilist_id: None,
+    };
+    let filter = Filter {
+        id: FilterId::new(),
+        name: "hd".into(),
+        atoms: vec![
+            FilterAtom {
+                priority: 120,
+                rule: AtomRule::Resolution("2160p".into()),
+                exclude: false,
+            },
+            FilterAtom {
+                priority: 80,
+                rule: AtomRule::Resolution("1080p".into()),
+                exclude: false,
+            },
+            FilterAtom {
+                priority: 40,
+                rule: AtomRule::Resolution("720p".into()),
+                exclude: false,
+            },
+        ],
+        keep_old_versions: false,
+    };
+    let subscribe = Subscribe {
+        id: SubscribeId::new(),
+        user_id: UserId::new(),
+        media_id: media.id,
+        coverage: Coverage::Movie,
+        fetch_mode: FetchMode::Search,
+        filter_id: filter.id,
+        wash_cut: false,
+        keep_old_versions: false,
+        wash_cut_filter_id: None,
+        full_season_pack: false,
+        downloader_id: None,
+        library_id: None,
+        tracking_state: "active".into(),
+        follow_future: false,
+        search_interval_secs: 1800,
+    };
+    let downloader = BrokenAndRejectedDownloader;
+    let outcome = subscribe::run(RunInput {
+        subscribe: &subscribe,
+        media: &media,
+        filter: &filter,
+        wash_filter: None,
+        torrents: vec![
+            torrent("The.Matrix.1999.2160p.BluRay", "broken"),
+            torrent("The.Matrix.1999.1080p.BluRay", "rejected"),
+            torrent("The.Matrix.1999.720p.BluRay", "usable"),
+        ],
+        search_keywords: vec![],
+        facts: SubscribeFacts::default(),
+        downloader: &downloader,
+        library_root: tmp.path(),
+        library_id: None,
+        root_id: None,
+        config_revision: None,
+        transfer_mode: None,
+        scrape: false,
+        hooks: None,
+        naming: None,
+        preserve_removed: false,
+        overlap: Default::default(),
+        absolute: None,
+    })
+    .unwrap();
+
+    assert_eq!(outcome.torrents_added.len(), 1);
+    assert_eq!(
+        outcome.torrents_added[0].1.enclosure,
+        "https://pt.example/usable"
+    );
+    assert_eq!(
+        outcome.rejected_enclosures,
+        vec![
+            "https://pt.example/broken".to_string(),
+            "https://pt.example/rejected".to_string(),
+        ]
+    );
+}
