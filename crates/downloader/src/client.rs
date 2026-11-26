@@ -13,8 +13,11 @@ pub enum DownloaderError {
     /// (`error` / `missingFiles`); callers must switch source.
     #[error("existing downloader task {0} is broken")]
     ExistingTaskBroken(String),
-    /// Fetching or validating the `.torrent` from the indexer/source failed
-    /// (404, timeout, HTML login page, etc.); callers may fall back to another candidate.
+    /// Fetching or validating the `.torrent` from the source definitively failed
+    /// (HTTP 404/410 or non-`.torrent` body such as an HTML login page); callers
+    /// persist this source as rejected and fall back to another candidate.
+    /// Transient fetch errors (DNS, timeout, 5xx, 429) and qBittorrent `Fails.`
+    /// replies use [`DownloaderError::Message`] so the source can be retried.
     #[error("torrent source rejected: {0}")]
     SourceRejected(String),
 }

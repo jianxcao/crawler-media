@@ -15,3 +15,20 @@ pub enum IndexerError {
     #[error(transparent)]
     Yaml(#[from] serde_yaml::Error),
 }
+
+impl IndexerError {
+    /// Returns `true` only when a fetched response was parsed and definitively
+    /// lacks a valid download target; transient, infrastructure, and
+    /// configuration failures remain retryable.
+    pub fn is_definitive_source_rejection(&self) -> bool {
+        match self {
+            Self::Parse(_) => true,
+            Self::BrowserBusy
+            | Self::BrowserSetup(_)
+            | Self::Fetch(_)
+            | Self::UnknownProfile(_)
+            | Self::Io(_)
+            | Self::Yaml(_) => false,
+        }
+    }
+}

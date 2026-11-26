@@ -27,14 +27,11 @@ async fn task_center_keeps_pending_found_by_info_hash() {
     h.create_site().await;
     let id = h.create_movie_subscribe(serde_json::json!({})).await;
     h.run_subscribe(id).await;
-    let (source, hash) = {
-        let t = &h.qb.tasks.lock()[0];
-        (t.source.clone(), t.hash.clone())
-    };
+    let hash = h.qb.tasks.lock()[0].hash.clone();
     let store = h.state.store();
     store
         .as_ref()
-        .set_pending_info_hash(id, &source, &hash)
+        .set_pending_info_hash(id, &h.enclosure(1), &hash)
         .unwrap();
     assert_eq!(
         store.as_ref().load_pending_info_hashes(id).unwrap().len(),

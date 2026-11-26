@@ -23,7 +23,7 @@ async fn broken_existing_task_is_rejected_and_replaced(state: &str) {
     let h = Harness::new();
     h.create_site().await;
     let id = h.create_movie_subscribe(serde_json::json!({})).await;
-    h.qb.inject(owned_task(state, &enclosure(1)));
+    h.qb.inject(owned_task(state, &h.enclosure(1)));
     h.set_search_rows(&[(MATRIX_TITLE, 1)]);
     h.scheduled_search(id).await.unwrap();
     assert_eq!(
@@ -47,7 +47,7 @@ async fn broken_existing_task_is_rejected_and_replaced(state: &str) {
         .collect();
     assert_eq!(
         active,
-        vec![enclosure(2)],
+        vec![h.enclosure(2)],
         "{state}: next round switches source"
     );
 }
@@ -67,7 +67,7 @@ async fn paused_task_is_resumed_and_pending_stays_active() {
     let h = Harness::new();
     h.create_site().await;
     let id = h.create_movie_subscribe(serde_json::json!({})).await;
-    h.qb.inject(owned_task("pausedDL", &enclosure(1)));
+    h.qb.inject(owned_task("pausedDL", &h.enclosure(1)));
     h.set_search_rows(&[(MATRIX_TITLE, 1)]);
     h.scheduled_search(id).await.unwrap();
     assert_eq!(h.qb.resumes.lock().len(), 1, "paused task resumed");
@@ -80,7 +80,7 @@ async fn manual_run_rejects_broken_existing_task() {
     let h = Harness::new();
     h.create_site().await;
     let id = h.create_movie_subscribe(serde_json::json!({})).await;
-    h.qb.inject(owned_task("missingFiles", &enclosure(1)));
+    h.qb.inject(owned_task("missingFiles", &h.enclosure(1)));
     h.set_search_rows(&[(MATRIX_TITLE, 1)]);
     let _ = h.run_subscribe_raw(id).await;
     assert_eq!(h.pending_state(id, "active"), 0, "not an active pending");

@@ -35,6 +35,8 @@ mod d_m3_persisted_infohash;
 mod d_m4_torrent_validation;
 #[path = "subscription_e2e/d_m5_manual_submit.rs"]
 mod d_m5_manual_submit;
+#[path = "subscription_e2e/d_m6_transient_source.rs"]
+mod d_m6_transient_source;
 #[path = "subscription_e2e/d_s1_pending_cleanup.rs"]
 mod d_s1_pending_cleanup;
 #[path = "subscription_e2e/f1_selective_files.rs"]

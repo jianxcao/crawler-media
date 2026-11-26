@@ -9,7 +9,9 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 
 use domain::{SiteId, Torrent};
-use downloader::{Downloader, QbitConfig, QbitDownloader};
+use downloader::{Downloader, DownloaderError, QbitConfig, QbitDownloader};
+
+const VALID_TORRENT: &str = "d8:announce10:https://pt4:infod6:lengthi1e4:name1:a12:piece lengthi16384e6:pieces20:aaaaaaaaaaaaaaaaaaaaee";
 
 struct Capture {
     adds: Mutex<Vec<String>>,
@@ -17,6 +19,7 @@ struct Capture {
     /// pause / resume / setPreferences requests, in arrival order.
     posts: Mutex<Vec<String>>,
     injected_infos: Mutex<Option<String>>,
+    fail_adds: std::sync::atomic::AtomicBool,
 }
 
 impl Capture {
@@ -26,8 +29,19 @@ impl Capture {
             deletes: Mutex::new(Vec::new()),
             posts: Mutex::new(Vec::new()),
             injected_infos: Mutex::new(None),
+            fail_adds: std::sync::atomic::AtomicBool::new(false),
         })
     }
+}
+
+fn added_ownership_tag(adds: &[String]) -> String {
+    adds.first()
+        .and_then(|req| {
+            req.split(|c: char| c == ',' || c.is_ascii_whitespace())
+                .find(|token| token.starts_with("crawler-media-owned-"))
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| downloader::ownership_tag("https://pt.example/download.php?id=1"))
 }
 
 fn match_fake_qbit_route(
@@ -43,16 +57,22 @@ fn match_fake_qbit_route(
         )
     } else if req.starts_with("POST /api/v2/torrents/add") {
         capture.adds.lock().push(req.to_string());
-        ("200 OK", "Ok.".into(), "")
-    } else if req.starts_with("GET /signed.torrent") {
+        if capture.fail_adds.load(std::sync::atomic::Ordering::SeqCst) {
+            ("200 OK", "Fails.".into(), "")
+        } else {
+            ("200 OK", "Ok.".into(), "")
+        }
+    } else if req.starts_with("GET /signed.torrent") || req.starts_with("GET /download.php") {
         // D-M4: must be a real bencoded torrent (dictionary with `info`).
-        (
-            "200 OK",
-            "d8:announce10:https://pt4:infod6:lengthi1e4:name1:a12:piece lengthi16384e6:pieces20:aaaaaaaaaaaaaaaaaaaaee".into(),
-            "",
-        )
+        ("200 OK", VALID_TORRENT.into(), "")
     } else if req.starts_with("GET /missing.torrent") {
         ("404 Not Found", "not found".into(), "")
+    } else if req.starts_with("GET /gone.torrent") {
+        ("410 Gone", "gone".into(), "")
+    } else if req.starts_with("GET /503.torrent") {
+        ("503 Service Unavailable", "unavailable".into(), "")
+    } else if req.starts_with("GET /429.torrent") {
+        ("429 Too Many Requests", "slow down".into(), "")
     } else if req.starts_with("GET /html-login.torrent") {
         (
             "200 OK",
@@ -65,13 +85,16 @@ fn match_fake_qbit_route(
         let injected = capture.injected_infos.lock().clone();
         let body = if let Some(custom) = injected {
             custom
-        } else if capture.adds.lock().is_empty() {
-            "[]".into()
         } else {
-            let tag = downloader::ownership_tag("https://pt.example/download.php?id=1");
-            format!(
-                r#"[{{"hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","name":"The.Matrix.1999.2160p.BluRay.x265-GROUP","progress":1.0,"save_path":"{save_path}","state":"stalledDL","tags":"other,crawler-media,{tag}","size":1000,"downloaded":1000,"uploaded":7,"dlspeed":128,"upspeed":64}}]"#
-            )
+            let adds = capture.adds.lock();
+            if adds.is_empty() {
+                "[]".into()
+            } else {
+                let tag = added_ownership_tag(&adds);
+                format!(
+                    r#"[{{"hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","name":"The.Matrix.1999.2160p.BluRay.x265-GROUP","progress":1.0,"save_path":"{save_path}","state":"stalledDL","tags":"other,crawler-media,{tag}","size":1000,"downloaded":1000,"uploaded":7,"dlspeed":128,"upspeed":64}}]"#
+                )
+            }
         };
         ("200 OK", body, "")
     } else if req.contains("/api/v2/torrents/files") {
@@ -121,11 +144,11 @@ fn connect(url: &str) -> QbitDownloader {
     .unwrap()
 }
 
-fn torrent() -> Torrent {
+fn torrent_at(enclosure: &str) -> Torrent {
     Torrent {
         site_id: SiteId::new(),
         title: "The.Matrix.1999.2160p.BluRay.x265-GROUP".into(),
-        enclosure: "https://pt.example/download.php?id=1".into(),
+        enclosure: enclosure.into(),
         size_bytes: Some(1000),
         seeders: Some(1),
         free: true,
@@ -139,6 +162,10 @@ fn torrent() -> Torrent {
         category: None,
         poster_url: None,
     }
+}
+
+fn torrent_for_server(url: &str) -> Torrent {
+    torrent_at(&format!("{url}/download.php?id=1"))
 }
 
 #[test]
@@ -155,13 +182,14 @@ fn adds_enclosure_as_qbittorrent_task_with_stopped_semantics() {
     })
     .unwrap();
 
-    dl.add(&torrent()).unwrap();
+    let magnet = "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567";
+    dl.add(&torrent_at(magnet)).unwrap();
 
     let adds = capture.adds.lock();
     assert_eq!(adds.len(), 1);
     let body = &adds[0];
     assert!(body.contains("name=\"urls\""));
-    assert!(body.contains("https://pt.example/download.php?id=1"));
+    assert!(body.contains(magnet));
     assert!(body.contains("name=\"stopped\"\r\n\r\nfalse"));
     assert!(body.contains("name=\"paused\"\r\n\r\nfalse"));
     assert!(
@@ -175,12 +203,9 @@ fn explicit_save_path_is_sent_to_qbittorrent() {
     let capture = Capture::new();
     let (url, _server) = serve(capture.clone(), "/downloads".into());
     let dl = connect(&url);
-    dl.add_with_options(
-        &torrent(),
-        "https://pt.example/download.php?id=1",
-        Some("/downloads/manual"),
-    )
-    .unwrap();
+    let t = torrent_for_server(&url);
+    dl.add_with_options(&t, &t.enclosure, Some("/downloads/manual"))
+        .unwrap();
     let adds = capture.adds.lock();
     assert_eq!(adds.len(), 1);
     assert!(adds[0].contains("name=\"savepath\"\r\n\r\n/downloads/manual"));
@@ -191,7 +216,7 @@ fn resolved_download_uses_signed_file_and_stable_torrent_tag() {
     let capture = Capture::new();
     let (url, _server) = serve(capture.clone(), "/downloads".into());
     let dl = connect(&url);
-    let torrent = torrent();
+    let torrent = torrent_at("https://pt.example/download.php?id=1");
     dl.add_resolved(&torrent, &format!("{url}/signed.torrent"))
         .unwrap();
     let adds = capture.adds.lock();
@@ -206,7 +231,7 @@ fn add_is_skipped_when_qbittorrent_already_has_the_torrent() {
     let capture = Capture::new();
     let (url, _server) = serve(capture.clone(), "/downloads".into());
     let dl = QbitDownloader::connect(QbitConfig {
-        url,
+        url: url.clone(),
         username: "admin".into(),
         password: "pass".into(),
         api_key: None,
@@ -214,7 +239,7 @@ fn add_is_skipped_when_qbittorrent_already_has_the_torrent() {
         path_maps: vec![],
     })
     .unwrap();
-    let torrent = torrent();
+    let torrent = torrent_for_server(&url);
     dl.add(&torrent).unwrap();
     dl.add(&torrent).unwrap();
     assert_eq!(capture.adds.lock().len(), 1);
@@ -228,7 +253,7 @@ fn completed_task_exposes_files_for_transfer() {
     let capture = Capture::new();
     let (url, _server) = serve(capture, dir.path().display().to_string().replace('\\', "/"));
     let dl = QbitDownloader::connect(QbitConfig {
-        url,
+        url: url.clone(),
         username: "admin".into(),
         password: "pass".into(),
         api_key: None,
@@ -237,8 +262,9 @@ fn completed_task_exposes_files_for_transfer() {
     })
     .unwrap();
 
-    dl.add(&torrent()).unwrap();
-    let files = dl.completed_files(&torrent()).unwrap();
+    let torrent = torrent_for_server(&url);
+    dl.add(&torrent).unwrap();
+    let files = dl.completed_files(&torrent).unwrap();
     assert_eq!(files, vec![file]);
 }
 
@@ -265,7 +291,10 @@ fn live_qbittorrent_add_is_manual() {
         path_maps: vec![],
     })
     .expect("login");
-    dl.add(&torrent()).expect("add");
+    dl.add(&torrent_at(
+        "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567",
+    ))
+    .expect("add");
 }
 
 #[test]
@@ -273,7 +302,7 @@ fn remove_deletes_task_by_hash_keeping_files() {
     let capture = Capture::new();
     let (url, _server) = serve(capture.clone(), "/downloads".into());
     let dl = QbitDownloader::connect(QbitConfig {
-        url,
+        url: url.clone(),
         username: "admin".into(),
         password: "pass".into(),
         api_key: None,
@@ -282,8 +311,9 @@ fn remove_deletes_task_by_hash_keeping_files() {
     })
     .unwrap();
 
-    dl.add(&torrent()).unwrap();
-    dl.remove(&torrent(), false).unwrap();
+    let torrent = torrent_for_server(&url);
+    dl.add(&torrent).unwrap();
+    dl.remove(&torrent, false).unwrap();
 
     let deletes = capture.deletes.lock();
     assert_eq!(deletes.len(), 1, "应发出删除请求");
@@ -371,8 +401,9 @@ fn task_snapshots_extract_our_tag_and_live_state() {
     let capture = Capture::new();
     let (url, _server) = serve(capture.clone(), "/downloads".into());
     let dl = connect(&url);
+    let torrent = torrent_for_server(&url);
     // The fake only reports tasks once something has been added.
-    dl.add(&torrent()).unwrap();
+    dl.add(&torrent).unwrap();
 
     let snapshots = dl.task_snapshots().unwrap();
     assert_eq!(snapshots.len(), 1, "应上报客户端里的全部任务");
@@ -383,9 +414,7 @@ fn task_snapshots_extract_our_tag_and_live_state() {
     );
     assert_eq!(
         snapshot.owned_tags,
-        vec![downloader::ownership_tag(
-            "https://pt.example/download.php?id=1"
-        )],
+        vec![downloader::ownership_tag(&torrent.enclosure)],
         "D-S1: per-torrent ownership tag must be exposed for HTTP identity"
     );
     assert_eq!(snapshot.state, "stalledDL");
@@ -420,7 +449,7 @@ fn same_size_unrelated_torrent_does_not_match() {
     // 客户端内存在一个同体积(1000字节)但标题完全不相关的已完成任务
     *capture.injected_infos.lock() = Some(r#"[{"hash":"unrelated-hash","name":"Other.Movie.2024.1080p","progress":1.0,"save_path":"/downloads","state":"uploading","tags":"crawler-media","size":1000,"downloaded":1000,"uploaded":7,"dlspeed":0,"upspeed":0}]"#.to_string());
 
-    let mut target = torrent();
+    let mut target = torrent_for_server(&url);
     target.title = "The.Matrix.1999.2160p".into();
     target.size_bytes = Some(1000);
 
@@ -457,8 +486,7 @@ fn same_name_different_hash_is_not_treated_as_owned() {
         r#"[{"hash":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","name":"The.Matrix.1999.2160p.BluRay.x265-GROUP","progress":1.0,"save_path":"/downloads","state":"uploading","tags":"crawler-media","size":1000}]"#
             .into(),
     );
-    let mut target = torrent();
-    target.enclosure = magnet.into();
+    let target = torrent_at(magnet);
     assert!(
         dl.completed_files(&target).unwrap().is_empty(),
         "同名不同 hash 绝不能被收集"
@@ -480,12 +508,11 @@ fn http_404_torrent_fetch_is_rejected_without_forwarding_url_to_qbit() {
     let capture = Capture::new();
     let (url, _server) = serve(capture.clone(), "/downloads".into());
     let dl = connect(&url);
-    let mut t = torrent();
-    t.enclosure = format!("{url}/missing.torrent");
+    let t = torrent_at(&format!("{url}/missing.torrent"));
 
     let err = dl.add(&t).unwrap_err();
     assert!(
-        matches!(err, downloader::DownloaderError::SourceRejected(_)),
+        matches!(err, DownloaderError::SourceRejected(_)),
         "expected SourceRejected for 404 .torrent fetch, got: {err:?}"
     );
     assert!(
@@ -499,16 +526,88 @@ fn html_body_torrent_fetch_is_rejected_as_source_error() {
     let capture = Capture::new();
     let (url, _server) = serve(capture.clone(), "/downloads".into());
     let dl = connect(&url);
-    let mut t = torrent();
-    t.enclosure = format!("{url}/html-login.torrent");
+    let t = torrent_at(&format!("{url}/html-login.torrent"));
 
     let err = dl.add(&t).unwrap_err();
     assert!(
-        matches!(err, downloader::DownloaderError::SourceRejected(_)),
+        matches!(err, DownloaderError::SourceRejected(_)),
         "expected SourceRejected for HTML body instead of .torrent, got: {err:?}"
     );
     assert!(
         capture.adds.lock().is_empty(),
         "HTML error body must NOT forward URL to qBittorrent"
     );
+}
+
+#[test]
+fn torrent_fetch_503_is_transient_not_source_rejected() {
+    let capture = Capture::new();
+    let (url, _server) = serve(capture.clone(), "/downloads".into());
+    let dl = connect(&url);
+    let stub = format!("{url}/503.torrent");
+    let err = dl
+        .add_with_options(&torrent_at(&stub), &stub, None)
+        .unwrap_err();
+    assert!(matches!(err, DownloaderError::Message(_)), "{err:?}");
+    assert!(capture.adds.lock().is_empty());
+}
+
+#[test]
+fn torrent_fetch_429_and_connection_refused_are_transient() {
+    let capture = Capture::new();
+    let (url, _server) = serve(capture.clone(), "/downloads".into());
+    let dl = connect(&url);
+
+    let rate_limited = format!("{url}/429.torrent");
+    let err = dl
+        .add_with_options(&torrent_at(&rate_limited), &rate_limited, None)
+        .unwrap_err();
+    assert!(matches!(err, DownloaderError::Message(_)), "{err:?}");
+
+    let closed_port = {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        port
+    };
+    let closed_url = format!("http://127.0.0.1:{closed_port}/t.torrent");
+    let err = dl
+        .add_with_options(&torrent_at(&closed_url), &closed_url, None)
+        .unwrap_err();
+    assert!(matches!(err, DownloaderError::Message(_)), "{err:?}");
+}
+
+#[test]
+fn torrent_fetch_404_is_source_rejected() {
+    let capture = Capture::new();
+    let (url, _server) = serve(capture.clone(), "/downloads".into());
+    let dl = connect(&url);
+
+    let missing = format!("{url}/missing.torrent");
+    let err = dl
+        .add_with_options(&torrent_at(&missing), &missing, None)
+        .unwrap_err();
+    assert!(matches!(err, DownloaderError::SourceRejected(_)), "{err:?}");
+
+    let gone = format!("{url}/gone.torrent");
+    let err = dl
+        .add_with_options(&torrent_at(&gone), &gone, None)
+        .unwrap_err();
+    assert!(matches!(err, DownloaderError::SourceRejected(_)), "{err:?}");
+}
+
+#[test]
+fn qbit_fails_reply_is_transient() {
+    let capture = Capture::new();
+    capture
+        .fail_adds
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let (url, _server) = serve(capture.clone(), "/downloads".into());
+    let dl = connect(&url);
+    let stub = format!("{url}/signed.torrent");
+
+    let err = dl
+        .add_with_options(&torrent_at(&stub), &stub, None)
+        .unwrap_err();
+    assert!(matches!(err, DownloaderError::Message(_)), "{err:?}");
 }

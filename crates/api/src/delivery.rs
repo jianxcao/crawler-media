@@ -131,7 +131,13 @@ fn submit_on(
         .as_ref()
         .map(|site| state.indexer.resolve_torrent_download(site, torrent))
         .transpose()
-        .map_err(|err| DownloaderError::SourceRejected(err.to_string()))?
+        .map_err(|err| {
+            if err.is_definitive_source_rejection() {
+                DownloaderError::SourceRejected(err.to_string())
+            } else {
+                DownloaderError::Message(err.to_string())
+            }
+        })?
         .flatten();
     match resolved_url {
         Some(url) => client.add_with_options(torrent, &url, save_path),

@@ -49,7 +49,7 @@ async fn probe_rejected_upgrade_is_not_resubmitted() {
             "POST",
             "/api/v1/search/admit",
             Some(TOKEN),
-            serde_json::json!({ "subscribe_id": id.to_string(), "enclosure": MATRIX_ENCLOSURE }),
+            serde_json::json!({ "subscribe_id": id.to_string(), "enclosure": h.enclosure(1) }),
         ),
     )
     .await

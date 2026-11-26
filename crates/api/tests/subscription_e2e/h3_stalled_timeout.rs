@@ -38,7 +38,7 @@ async fn no_progress_past_threshold_marks_stalled_and_switches_source() {
         .collect();
     assert_eq!(
         active,
-        vec![enclosure(2)],
+        vec![h.enclosure(2)],
         "stalled source is not picked again"
     );
 }

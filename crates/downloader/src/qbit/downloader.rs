@@ -163,44 +163,31 @@ impl Downloader for QbitDownloader {
             crate::ownership_tag(&torrent.enclosure)
         );
         const UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
-        let mut staged_bytes: Option<Vec<u8>> = None;
-        let mut fallback_url = true;
-        if download_url.starts_with("http://") || download_url.starts_with("https://") {
-            match self.download_torrent_bytes_raw(download_url, UA) {
-                Ok(bytes) => {
-                    // D-M4: only a bencoded dictionary with an `info` key is a
-                    // torrent; an HTML login page / error body is not uploaded.
-                    let Some(hash) = crate::torrent_info_hash(&bytes) else {
-                        tracing::warn!(torrent = %torrent.title, bytes = bytes.len(), "种子链接返回的不是 .torrent（可能站点 Cookie 失效），拒绝该来源");
-                        return Err(DownloaderError::SourceRejected(
-                            "种子链接返回的不是合法 .torrent（可能站点 Cookie 失效、已被删种或配额超限）".into(),
-                        ));
-                    };
-                    // D-H2: a task with the same info hash may already exist
-                    // without our tags (added by hand). Claim it instead of
-                    // failing every round with qBittorrent's `Fails.`.
-                    if self.claim_existing(&hash, &tag, &torrent.title)? {
-                        return Ok(());
-                    }
-                    staged_bytes = Some(bytes);
-                    fallback_url = false;
-                }
-                Err(err) if is_synthetic_test_host_dns_error(download_url, &err) => {
-                    tracing::debug!(torrent = %torrent.title, "离线测试域名跳过直取，保留 enclosure URL 交由下载器处理");
-                }
-                Err(err) => {
-                    tracing::warn!(torrent = %torrent.title, error = %err, "拉取 .torrent 种子文件失败，拒绝该来源以便自动换源");
-                    return Err(DownloaderError::SourceRejected(format!(
-                        "拉取 .torrent 失败: {err}"
-                    )));
-                }
+        let staged_bytes = if download_url.starts_with("http://")
+            || download_url.starts_with("https://")
+        {
+            let bytes = self
+                .download_torrent_bytes_raw(download_url, UA)
+                .map_err(|err| classify_torrent_fetch_error(&torrent.title, err))?;
+            // D-M4: only a bencoded dictionary with an `info` key is a
+            // torrent; an HTML login page / error body is not uploaded.
+            let Some(hash) = crate::torrent_info_hash(&bytes) else {
+                tracing::warn!(torrent = %torrent.title, bytes = bytes.len(), "种子链接返回的不是 .torrent（可能站点 Cookie 失效），拒绝该来源");
+                return Err(DownloaderError::SourceRejected(
+                    "种子链接返回的不是合法 .torrent（可能站点 Cookie 失效、已被删种或配额超限）"
+                        .into(),
+                ));
+            };
+            // D-H2: a task with the same info hash may already exist
+            // without our tags (added by hand). Claim it instead of
+            // failing every round with qBittorrent's `Fails.`.
+            if self.claim_existing(&hash, &tag, &torrent.title)? {
+                return Ok(());
             }
-        }
-        if staged_bytes.is_none() && fallback_url && download_url != torrent.enclosure {
-            return Err(DownloaderError::SourceRejected(
-                "failed to fetch resolved Torrent before the signed URL expired (站点 Cookie 失效或链接未返回 .torrent)".into(),
-            ));
-        }
+            Some(bytes)
+        } else {
+            None
+        };
         // The multipart form is consumed per request, so rebuild it for a
         // retry after re-login.
         let build_form = || {
@@ -220,7 +207,7 @@ impl Downloader for QbitDownloader {
                         .file_name("download.torrent"),
                 };
                 form = form.part("torrents", part);
-            } else if fallback_url {
+            } else {
                 form = form.text("urls", download_url);
             }
             if let Some(category) = &self.config.category {
@@ -637,7 +624,7 @@ impl QbitDownloader {
         let body = read_body(response)?;
         if body.trim().eq_ignore_ascii_case("fails.") {
             tracing::error!(torrent = %title, "qBittorrent 拒绝了添加请求");
-            return Err(DownloaderError::SourceRejected(
+            return Err(DownloaderError::Message(
                 "qBittorrent rejected the add".into(),
             ));
         }
@@ -646,21 +633,15 @@ impl QbitDownloader {
     }
 }
 
-/// Offline unit/E2E fixtures use RFC 2606 `.example`/`.test`/`.invalid` URLs
-/// with mock downloaders that inspect the forwarded URL instead of serving bytes.
-fn is_synthetic_test_host_dns_error(url: &str, err: &ureq::Error) -> bool {
-    let host = url
-        .split_once("://")
-        .map(|(_, rest)| rest.split('/').next().unwrap_or_default())
-        .map(|auth| auth.rsplit('@').next().unwrap_or(auth))
-        .map(|hp| hp.split(':').next().unwrap_or(hp).to_ascii_lowercase())
-        .unwrap_or_default();
-    let synthetic =
-        host.ends_with(".example") || host.ends_with(".test") || host.ends_with(".invalid");
-    synthetic
-        && (matches!(err, ureq::Error::HostNotFound)
-            || (matches!(err, ureq::Error::Io(_))
-                && err
-                    .to_string()
-                    .contains("failed to lookup address information")))
+fn classify_torrent_fetch_error(title: &str, err: ureq::Error) -> DownloaderError {
+    match err {
+        ureq::Error::StatusCode(status @ (404 | 410)) => {
+            tracing::warn!(torrent = %title, status, "种子链接返回 {status}，判定该来源失效");
+            DownloaderError::SourceRejected(format!("拉取 .torrent 返回 HTTP {status}"))
+        }
+        other => {
+            tracing::warn!(torrent = %title, error = %other, "拉取 .torrent 暂时失败，保留该来源供后续重试");
+            DownloaderError::Message(format!("拉取 .torrent 失败: {other}"))
+        }
+    }
 }
