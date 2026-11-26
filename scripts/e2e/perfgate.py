@@ -31,6 +31,72 @@ ABSOLUTE_P95_FLOOR_MS = 1.0
 RESERVED_REPORT = None
 
 
+def _pid_is_alive(pid_file):
+    try:
+        raw = pid_file.read_text(encoding='utf-8', errors='ignore').strip()
+        if not raw.isdigit():
+            return False
+        pid = int(raw)
+        if pid <= 0:
+            return False
+        os.kill(pid, 0)
+        return True
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+
+
+def resolve_token(cli_token=None, repo_root=None, base_url=None):
+    if cli_token and cli_token.strip():
+        return cli_token.strip()
+    for key in ('CRAWLER_MEDIA_TOKEN', 'TOKEN'):
+        value = os.environ.get(key, '').strip()
+        if value:
+            return value
+    repo = Path(repo_root).expanduser() if repo_root is not None else HERE.parents[1]
+    raw_data_dir = os.environ.get('DATA_DIR', '').strip()
+    raw_test_root = os.environ.get('TEST_ROOT', '').strip()
+    if not raw_data_dir and not raw_test_root and base_url is not None:
+        raw_port = os.environ.get('BACKEND_PORT', '').strip()
+        try:
+            dev_port = int(raw_port) if raw_port else 18765
+        except ValueError:
+            dev_port = 18765
+        parts = urllib.parse.urlsplit(base_url)
+        target_port = parts.port or (443 if parts.scheme == 'https' else 80 if parts.scheme == 'http' else None)
+        if target_port != dev_port:
+            return 'changeme'
+    test_root = Path(raw_test_root).expanduser() if raw_test_root else (Path.home() / 'Downloads/crawler-media')
+    if not test_root.is_absolute():
+        test_root = repo / test_root
+    if raw_data_dir:
+        data_dir = Path(raw_data_dir).expanduser()
+        if not data_dir.is_absolute():
+            data_dir = repo / data_dir
+    else:
+        data_dir = test_root / 'data'
+    if not raw_data_dir or raw_test_root or data_dir == test_root / 'data':
+        run_dir = test_root / 'run'
+        active_token_file = run_dir / 'backend.token'
+        try:
+            if _pid_is_alive(run_dir / 'backend.pid') and active_token_file.is_file():
+                active = active_token_file.read_text(encoding='utf-8', errors='ignore').strip()
+                if active:
+                    return active
+        except OSError:
+            pass
+    token_file = data_dir / '.dev-api-token'
+    try:
+        if token_file.is_file():
+            saved = token_file.read_text(encoding='utf-8', errors='ignore').strip()
+            if saved:
+                return saved
+    except OSError:
+        pass
+    return 'changeme'
+
+
 def uncovered_routes(routes, cases):
     covered = {(case['surface'], case['route']) for case in cases if case.get('route')}
     return [route for route in routes if route['method'] == 'get'
@@ -403,6 +469,7 @@ def main():
     parser.add_argument('--baseline', type=Path)
     parser.add_argument('--out', type=Path)
     parser.add_argument('--base-url', default=os.environ.get('PERF_BASE_URL', 'http://127.0.0.1:18766'))
+    parser.add_argument('--token', default=None, help='Management API bearer token')
     parser.add_argument('--manifest', type=Path, default=Path('/tmp/e2e-stress/perf-dataset.json'))
     parser.add_argument('--cases', type=Path, default=HERE / 'perf-cases.json')
     parser.add_argument('--restart-command', help='Argument string executed without a shell before each cold case')
@@ -442,7 +509,7 @@ def main():
         parser.error('--n must be positive')
     manifest = json.loads(args.manifest.read_text())
     password = os.environ.get('PERF_USER_PASSWORD', 'local-perf-user-password')
-    admin = Client(args.base_url, os.environ.get('CRAWLER_MEDIA_TOKEN', 'changeme'))
+    admin = Client(args.base_url, resolve_token(args.token, route_root, base_url=args.base_url))
     rng = random.Random(20261029)
     selected = [case for case in config['cases'] if case['id'].startswith(args.only)]
     if not selected:

@@ -129,3 +129,17 @@ test("Vite allows CM_DEV_ALLOWED_HOSTS entries while rejecting unlisted Host hea
     },
   );
 });
+
+test("Vite normalizes mixed-case CM_DEV_ALLOWED_HOSTS entries for lowercase browser Host headers", async () => {
+  await withEnv({ CM_DEV_ALLOWED_HOSTS: "Mac-Mini.local" }, async () => {
+    const vite = await createTestViteServer();
+    try {
+      const { port } = vite.httpServer.address();
+      assert.equal(await requestStatus(port, "mac-mini.local"), 200);
+      assert.equal(await requestStatus(port, `mac-mini.local:${port}`), 200);
+      assert.equal(await requestStatus(port, "evil.example"), 403);
+    } finally {
+      await closeViteServer(vite);
+    }
+  });
+});

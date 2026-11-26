@@ -10,7 +10,7 @@ import path from "node:path";
 export default defineConfig((): UserConfig => {
   const extraAllowedHosts = (process.env.CM_DEV_ALLOWED_HOSTS ?? "")
     .split(",")
-    .map((host) => host.trim())
+    .map((host) => host.trim().toLowerCase())
     .filter(Boolean);
   const backendTarget = process.env.VITE_BACKEND_TARGET || "http://127.0.0.1:18765";
 

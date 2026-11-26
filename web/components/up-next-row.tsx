@@ -1,5 +1,6 @@
 "use client";
 
+import { useRef, useState } from "react";
 import { Link } from "react-router-dom";
 
 import { HScroller } from "@/components/h-scroller";
@@ -126,6 +127,8 @@ export function UpNextRow({
 
 function UpNextCard({ item, onCleared }: { item: UpNextItem; onCleared?: () => void }) {
   const toast = useToast();
+  const [removing, setRemoving] = useState(false);
+  const removingRef = useRef(false);
   const tapGuard = useTapGuard();
   // 播放键自己也要过一遍误触保护：横滑最近观看这一行时，手指常常正好停在
   // 卡片中央，没有它一划就起播了（比误进详情页糟得多——会真的起转码会话）。
@@ -234,15 +237,16 @@ function UpNextCard({ item, onCleared }: { item: UpNextItem; onCleared?: () => v
             </span>
           )}
           <DropdownMenu.Root>
-            <DropdownMenu.Trigger asChild>
+            <DropdownMenu.Trigger asChild disabled={removing}>
               <button
                 type="button"
+                disabled={removing}
                 aria-label={`操作《${item.title}》`}
                 onClick={(e) => {
                   e.preventDefault();
                   e.stopPropagation();
                 }}
-                className="pointer-events-auto grid size-6 place-items-center rounded-full bg-black/60 text-white/75 opacity-0 backdrop-blur-md transition hover:bg-black/85 hover:text-white group-hover/recent:opacity-100 focus-visible:opacity-100 data-[state=open]:opacity-100 [@media(hover:none)]:opacity-100"
+                className="pointer-events-auto grid size-6 place-items-center rounded-full bg-black/60 text-white/75 opacity-0 backdrop-blur-md transition hover:bg-black/85 hover:text-white disabled:pointer-events-none disabled:opacity-40 group-hover/recent:opacity-100 focus-visible:opacity-100 data-[state=open]:opacity-100 [@media(hover:none)]:opacity-100"
               >
                 <MoreIcon className="size-3.5" />
               </button>
@@ -255,7 +259,14 @@ function UpNextCard({ item, onCleared }: { item: UpNextItem; onCleared?: () => v
                 onClick={(e) => e.stopPropagation()}
               >
                 <DropdownMenu.Item
-                  onSelect={() => {
+                  disabled={removing}
+                  onSelect={(e) => {
+                    if (removingRef.current) {
+                      e.preventDefault();
+                      return;
+                    }
+                    removingRef.current = true;
+                    setRemoving(true);
                     clearPlaybackHistory("item", {
                       mediaItemId: item.media_item_id,
                     })
@@ -263,9 +274,13 @@ function UpNextCard({ item, onCleared }: { item: UpNextItem; onCleared?: () => v
                         toast.success(`已移出《${item.title}》`);
                         onCleared?.();
                       })
-                      .catch((e) => toast.error((e as Error).message));
+                      .catch((err) => toast.error((err as Error).message))
+                      .finally(() => {
+                        removingRef.current = false;
+                        setRemoving(false);
+                      });
                   }}
-                  className="glass-row nav-item cursor-pointer px-3 py-2 text-caption font-medium !text-[var(--danger)] outline-none hover:!bg-[var(--danger)]/10 hover:!text-[var(--danger)] data-[highlighted]:!bg-[var(--danger)]/10 data-[highlighted]:!text-[var(--danger)]"
+                  className="glass-row nav-item cursor-pointer px-3 py-2 text-caption font-medium !text-[var(--danger)] outline-none hover:!bg-[var(--danger)]/10 hover:!text-[var(--danger)] data-[disabled]:pointer-events-none data-[disabled]:opacity-50 data-[highlighted]:!bg-[var(--danger)]/10 data-[highlighted]:!text-[var(--danger)]"
                 >
                   从继续观看中移出
                 </DropdownMenu.Item>

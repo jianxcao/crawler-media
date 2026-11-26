@@ -102,6 +102,7 @@ local_curl() {
 }
 
 pid_file() { echo "$RUN_DIR/$1.pid"; }
+backend_token_file() { echo "$RUN_DIR/backend.token"; }
 
 prepare_runtime_dirs() {
   mkdir -p "$DATA_DIR" "$LOG_DIR" "$RUN_DIR" "$QB_HOST_DOWNLOADS"
@@ -140,6 +141,43 @@ resolve_dev_token() {
   fi
   (umask 077 && printf '%s\n' "$generated" >"$token_file")
   TOKEN="$generated"
+}
+
+peek_active_token() {
+  local saved=""
+  if is_running "$(pid_file backend)" && [[ -s "$(backend_token_file)" ]]; then
+    saved="$(tr -d '[:space:]' < "$(backend_token_file)" 2>/dev/null || true)"
+    if [[ -n "$saved" ]]; then
+      printf '%s' "$saved"
+      return 0
+    fi
+  fi
+  if [[ -n "${TOKEN:-}" ]]; then
+    printf '%s' "$TOKEN"
+    return 0
+  fi
+  local token_file="$DATA_DIR/.dev-api-token"
+  if [[ -s "$token_file" ]]; then
+    saved="$(tr -d '[:space:]' < "$token_file" 2>/dev/null || true)"
+    if [[ -n "$saved" ]]; then
+      printf '%s' "$saved"
+      return 0
+    fi
+  fi
+  printf '%s' "(未初始化，首次 start 时自动生成于 $token_file)"
+}
+
+backend_accepts_token() {
+  local expected="$1"
+  local active_file recorded=""
+  active_file="$(backend_token_file)"
+  if [[ -s "$active_file" ]]; then
+    recorded="$(tr -d '[:space:]' < "$active_file" 2>/dev/null || true)"
+    if [[ -n "$recorded" && "$recorded" != "$expected" ]]; then
+      return 1
+    fi
+  fi
+  local_curl -sf -H "Authorization: Bearer $expected" "http://127.0.0.1:$BACKEND_PORT/api/v1/auth/me" >/dev/null 2>&1
 }
 
 read_pid() {
@@ -185,35 +223,120 @@ detect_lan_ip() {
   return 1
 }
 
+append_csv_unique() {
+  local list="$1" item="$2"
+  [[ -n "$item" ]] || { printf '%s' "$list"; return 0; }
+  case ",$list," in
+    *,"$item",*) printf '%s' "$list" ;;
+    *)
+      if [[ -z "$list" ]]; then
+        printf '%s' "$item"
+      else
+        printf '%s,%s' "$list" "$item"
+      fi
+      ;;
+  esac
+}
+
 build_dev_allowed_hosts() {
   local allowed_hosts="127.0.0.1,localhost"
-  local lan_ip="" local_host=""
+  local lan_ip="" local_host="" listen_host=""
   lan_ip="$(detect_lan_ip || true)"
   if [[ -n "$lan_ip" ]]; then
-    allowed_hosts="$allowed_hosts,$lan_ip"
+    lan_ip="$(printf '%s' "$lan_ip" | tr '[:upper:]' '[:lower:]')"
+    allowed_hosts="$(append_csv_unique "$allowed_hosts" "$lan_ip")"
   fi
   if command -v scutil >/dev/null 2>&1; then
     local_host="$(scutil --get LocalHostName 2>/dev/null || true)"
+    local_host="$(printf '%s' "${local_host%.local}" | tr '[:upper:]' '[:lower:]')"
     if [[ -n "$local_host" ]]; then
-      allowed_hosts="$allowed_hosts,${local_host%.local}.local"
+      allowed_hosts="$(append_csv_unique "$allowed_hosts" "${local_host}.local")"
     fi
   fi
-  case "${LISTEN_HOST:-}" in
+  listen_host="$(printf '%s' "${LISTEN_HOST:-}" | tr '[:upper:]' '[:lower:]')"
+  case "$listen_host" in
     ""|0.0.0.0|::|"[::]"|127.0.0.1|localhost) ;;
     *)
-      allowed_hosts="$allowed_hosts,$LISTEN_HOST"
+      allowed_hosts="$(append_csv_unique "$allowed_hosts" "$listen_host")"
       ;;
   esac
   printf '%s' "$allowed_hosts"
 }
 
-listener_matches_host() {
-  local port="$1" host="$2"
-  if [[ "$host" == "0.0.0.0" ]]; then
-    lsof -nP -iTCP:"$port" -sTCP:LISTEN 2>/dev/null | grep -Eq "(\\*|0\\.0\\.0\\.0):${port}\\b"
-    return $?
+build_cors_origins() {
+  local cors_origins="http://127.0.0.1:$FRONTEND_PORT,http://localhost:$FRONTEND_PORT"
+  local lan_ip="" local_host="" listen_host="" origin_host=""
+  lan_ip="$(detect_lan_ip || true)"
+  if [[ -n "$lan_ip" ]]; then
+    lan_ip="$(printf '%s' "$lan_ip" | tr '[:upper:]' '[:lower:]')"
+    cors_origins="$(append_csv_unique "$cors_origins" "http://$lan_ip:$FRONTEND_PORT")"
   fi
-  return 0
+  if command -v scutil >/dev/null 2>&1; then
+    local_host="$(scutil --get LocalHostName 2>/dev/null || true)"
+    local_host="$(printf '%s' "${local_host%.local}" | tr '[:upper:]' '[:lower:]')"
+    if [[ -n "$local_host" ]]; then
+      cors_origins="$(append_csv_unique "$cors_origins" "http://${local_host}.local:$FRONTEND_PORT")"
+    fi
+  fi
+  listen_host="$(printf '%s' "${LISTEN_HOST:-}" | tr '[:upper:]' '[:lower:]')"
+  case "$listen_host" in
+    ""|0.0.0.0|::|"[::]"|127.0.0.1|localhost) ;;
+    *)
+      if [[ "$listen_host" == *:* && "$listen_host" != \[*\] ]]; then
+        origin_host="[$listen_host]"
+      else
+        origin_host="$listen_host"
+      fi
+      cors_origins="$(append_csv_unique "$cors_origins" "http://$origin_host:$FRONTEND_PORT")"
+      ;;
+  esac
+  printf '%s' "$cors_origins"
+}
+
+listener_matches_host() {
+  local port="$1"
+  local host
+  host="$(printf '%s' "$2" | tr '[:upper:]' '[:lower:]')"
+  if ! command -v lsof >/dev/null 2>&1; then
+    return 0
+  fi
+  local listeners
+  listeners="$(lsof -nP -iTCP:"$port" -sTCP:LISTEN 2>/dev/null || true)"
+  [[ -n "$listeners" ]] || return 1
+  case "$host" in
+    0.0.0.0)
+      printf '%s\n' "$listeners" | grep -Eq "(\\*|0\\.0\\.0\\.0):${port}([^0-9]|$)"
+      return $?
+      ;;
+    ::|"[::]")
+      printf '%s\n' "$listeners" | grep -Eq "(\\*|\\[::\\]):${port}([^0-9]|$)"
+      return $?
+      ;;
+    127.0.0.1|localhost)
+      if printf '%s\n' "$listeners" | grep -Eq "(\\*|0\\.0\\.0\\.0|\\[::\\]):${port}([^0-9]|$)"; then
+        return 1
+      fi
+      printf '%s\n' "$listeners" | grep -Eq "(127\\.0\\.0\\.1|\\[::1\\]):${port}([^0-9]|$)"
+      return $?
+      ;;
+    *)
+      if printf '%s\n' "$listeners" | grep -Eq "(\\*|0\\.0\\.0\\.0|\\[::\\]):${port}([^0-9]|$)"; then
+        return 1
+      fi
+      if [[ "$host" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        local escaped_host="${host//./\\.}"
+        printf '%s\n' "$listeners" | grep -Eq "(^|[^0-9.])${escaped_host}:${port}([^0-9]|$)"
+        return $?
+      fi
+      if [[ "$host" == *:* ]]; then
+        local bare_v6="${host#[}"
+        bare_v6="${bare_v6%]}"
+        printf '%s\n' "$listeners" | grep -Eq "\\[${bare_v6}\\]:${port}([^0-9]|$)"
+        return $?
+      fi
+      return 0
+      ;;
+  esac
 }
 
 # lsof 可能吐出多个 PID（换行分隔）。逐个 SIGTERM，仍占端口再 SIGKILL。
@@ -257,7 +380,12 @@ start_backend() {
   local force="${1:-false}"
   prepare_runtime_dirs
   resolve_dev_token
-  if [[ "$force" != "true" ]] && is_running "$(pid_file backend)" && listener_matches_host "$BACKEND_PORT" "$LISTEN_HOST" && local_curl -sf --connect-timeout 1 -m 2 "http://127.0.0.1:$BACKEND_PORT/api/v1/health" >/dev/null 2>&1; then
+  if [[ "$force" != "true" ]] \
+    && is_running "$(pid_file backend)" \
+    && listener_matches_host "$BACKEND_PORT" "$LISTEN_HOST" \
+    && local_curl -sf --connect-timeout 1 -m 2 "http://127.0.0.1:$BACKEND_PORT/api/v1/health" >/dev/null 2>&1 \
+    && backend_accepts_token "$TOKEN"; then
+    (umask 077 && printf '%s\n' "$TOKEN" >"$(backend_token_file)")
     log "后端已在运行且健康 ($LISTEN_HOST:$BACKEND_PORT)，跳过重复启动"
     return 0
   fi
@@ -274,18 +402,8 @@ start_backend() {
   # 确保端口彻底释放，无任何 TIME_WAIT 或残留监听
   free_port "$BACKEND_PORT"
 
-  local cors_origins="http://127.0.0.1:$FRONTEND_PORT,http://localhost:$FRONTEND_PORT"
-  local lan_ip="" local_host=""
-  lan_ip="$(detect_lan_ip || true)"
-  if [[ -n "$lan_ip" ]]; then
-    cors_origins="$cors_origins,http://$lan_ip:$FRONTEND_PORT"
-  fi
-  if command -v scutil >/dev/null 2>&1; then
-    local_host="$(scutil --get LocalHostName 2>/dev/null || true)"
-    if [[ -n "$local_host" ]]; then
-      cors_origins="$cors_origins,http://${local_host}.local:$FRONTEND_PORT"
-    fi
-  fi
+  local cors_origins
+  cors_origins="$(build_cors_origins)"
 
   log "启动后端 (监听 $LISTEN_HOST:$BACKEND_PORT)..."
   printf '\n=== [START BACKEND %s] ===\n' "$(date)" >>"$BACKEND_LOG"
@@ -302,6 +420,7 @@ start_backend() {
     CRAWLER_MEDIA_CORS_ORIGINS="${CRAWLER_MEDIA_CORS_ORIGINS:-$cors_origins}" \
     CRAWLER_MEDIA_LISTEN="$LISTEN_HOST:$BACKEND_PORT" \
     "$BACKEND_BIN" serve
+  (umask 077 && printf '%s\n' "$TOKEN" >"$(backend_token_file)")
 
   # 等待后端 HTTP 存活探针就绪
   local i
@@ -312,12 +431,14 @@ start_backend() {
     fi
     # 如果进程已经意外退出，立刻报错并打印日志，绝不空等
     if ! is_running "$(pid_file backend)"; then
+      rm -f "$(backend_token_file)"
       fail "后端进程已提前退出，见 $BACKEND_LOG"
       tail -20 "$BACKEND_LOG"
       return 1
     fi
     sleep 0.5
   done
+  rm -f "$(backend_token_file)"
   fail "后端启动超时（已等待 15 秒），见 $BACKEND_LOG"
   tail -20 "$BACKEND_LOG"
   return 1
@@ -434,6 +555,9 @@ stop_service() {
     log "已停止 $name (PID $pid)"
   fi
   rm -f "$file"
+  if [[ "$name" == "backend" ]]; then
+    rm -f "$(backend_token_file)"
+  fi
 }
 
 stop_all() {
@@ -463,9 +587,10 @@ status_all() {
   fi
   printf '  后端: %s\n  前端: %s\n  qB:   %s\n  mock: %s\n' "$backend" "$frontend" "$qb" "$mock"
   printf '\n  数据目录: %s\n  日志目录: %s\n  下载目录: %s\n' "$DATA_DIR" "$LOG_DIR" "$QB_HOST_DOWNLOADS"
-  resolve_dev_token
+  local active_token
+  active_token="$(peek_active_token)"
   printf '\n  本机页面:   http://127.0.0.1:%s   (账号 admin / 密码 %s)\n' "$FRONTEND_PORT" "$ADMIN_PASSWORD"
-  printf '  本机 API:   http://127.0.0.1:%s   (CLI Bearer Token: %s)\n' "$BACKEND_PORT" "$TOKEN"
+  printf '  本机 API:   http://127.0.0.1:%s   (CLI Bearer Token: %s)\n' "$BACKEND_PORT" "$active_token"
   local lan_ip=""
   lan_ip="$(detect_lan_ip || true)"
   if [[ "$LISTEN_HOST" == "0.0.0.0" && -n "$lan_ip" ]]; then
