@@ -470,4 +470,53 @@ impl crate::LibraryConnection<'_> {
         }
         Ok(out)
     }
+
+    pub(super) fn media_exhausted_by_history_window(
+        &self,
+        user_id: UserId,
+        candidates: &[MediaId],
+        cutoff: i64,
+    ) -> Result<Vec<MediaId>, StoreError> {
+        if candidates.is_empty() {
+            return Ok(Vec::new());
+        }
+        let candidate_json = serde_json::to_string(candidates)?;
+        let mut statement = self.library.prepare(
+            "SELECT DISTINCT c.value
+             FROM json_each(?3) c
+             WHERE (
+                 EXISTS (
+                     SELECT 1 FROM playback_units u1
+                     WHERE u1.user_id = ?1
+                       AND u1.media_id = c.value
+                       AND u1.watch_activity_at >= ?2
+                       AND (u1.played <> 0 OR u1.position_ms > 0 OR u1.play_count > 0)
+                 )
+                 OR EXISTS (
+                     SELECT 1 FROM playback_logs l
+                     WHERE l.user_id = ?1
+                       AND l.media_id = c.value
+                       AND l.started_at >= ?2
+                 )
+             )
+             AND NOT EXISTS (
+                 SELECT 1 FROM playback_units u2
+                 WHERE u2.user_id = ?1
+                   AND u2.media_id = c.value
+                   AND u2.watch_activity_at < ?2
+                   AND (u2.played <> 0 OR u2.position_ms > 0 OR u2.play_count > 0)
+             )",
+        )?;
+        let rows = statement.query_map(
+            params![user_id.to_string(), cutoff, candidate_json],
+            |row| row.get::<_, String>(0),
+        )?;
+        let mut out = Vec::new();
+        for row in rows {
+            if let Ok(id) = row?.parse() {
+                out.push(id);
+            }
+        }
+        Ok(out)
+    }
 }

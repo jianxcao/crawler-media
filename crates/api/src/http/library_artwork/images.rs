@@ -53,7 +53,25 @@ fn user_id(
     })
 }
 
-fn candidate_paths(path: &FsPath, kind: Kind) -> Vec<PathBuf> {
+fn dir_within_roots(dir: &FsPath, roots: &[PathBuf], canon_roots: &[PathBuf]) -> bool {
+    match std::fs::canonicalize(dir) {
+        Ok(canon_dir) => canon_roots.iter().any(|root| canon_dir.starts_with(root)),
+        Err(_) => roots.iter().any(|root| dir.starts_with(root)),
+    }
+}
+
+fn candidate_paths(
+    path: &FsPath,
+    roots: &[PathBuf],
+    canon_roots: &[PathBuf],
+    kind: Kind,
+) -> Vec<PathBuf> {
+    let Some(parent) = path
+        .parent()
+        .filter(|dir| dir_within_roots(dir, roots, canon_roots))
+    else {
+        return Vec::new();
+    };
     if matches!(kind, Kind::Still) {
         return crate::episode_still::candidates(path);
     }
@@ -62,16 +80,14 @@ fn candidate_paths(path: &FsPath, kind: Kind) -> Vec<PathBuf> {
     } else {
         "fanart.jpg"
     };
-    let Some(parent) = path.parent() else {
-        return Vec::new();
-    };
-    [
-        Some(parent.join(name)),
-        parent.parent().map(|p| p.join(name)),
-    ]
-    .into_iter()
-    .flatten()
-    .collect()
+    let mut out = vec![parent.join(name)];
+    if let Some(grandparent) = parent
+        .parent()
+        .filter(|dir| dir_within_roots(dir, roots, canon_roots))
+    {
+        out.push(grandparent.join(name));
+    }
+    out
 }
 
 fn is_missing_io(error: &std::io::Error) -> bool {
@@ -121,12 +137,31 @@ fn read_error_response(kind: Kind, image: &FsPath, error: &std::io::Error) -> Re
 
 fn read_sidecar_bytes(
     path: &FsPath,
+    roots: &[PathBuf],
     kind: Kind,
     files: &dyn crate::file_stat_read::FileStatRead,
 ) -> Result<Option<Vec<u8>>, Response> {
-    for candidate in candidate_paths(path, kind) {
+    let canon_roots: Vec<PathBuf> = roots
+        .iter()
+        .filter_map(|root| std::fs::canonicalize(root).ok())
+        .collect();
+    for candidate in candidate_paths(path, roots, &canon_roots, kind) {
+        if let Ok(sym_meta) = files.symlink_metadata(&candidate)
+            && sym_meta.file_type().is_symlink()
+        {
+            continue;
+        }
         if files.is_file(&candidate) {
-            match std::fs::read(&candidate) {
+            let Ok(canon_candidate) = std::fs::canonicalize(&candidate) else {
+                continue;
+            };
+            if !canon_roots
+                .iter()
+                .any(|root| canon_candidate != *root && canon_candidate.starts_with(root))
+            {
+                continue;
+            }
+            match std::fs::read(&canon_candidate) {
                 Ok(bytes) => return Ok(Some(bytes)),
                 Err(error) if is_missing_io(&error) => continue,
                 Err(error) => return Err(read_error_response(kind, &candidate, &error)),
@@ -144,6 +179,7 @@ fn read_sidecar_bytes(
 async fn local_bytes(
     state: &ApiState,
     path: PathBuf,
+    roots: Vec<PathBuf>,
     kind: Kind,
 ) -> Result<Option<Vec<u8>>, Response> {
     let files = state.file_stats.clone();
@@ -154,7 +190,7 @@ async fn local_bytes(
         .map_err(|_| store_wait::busy_response())?;
     reservation
         .run(IMAGE_READ, move || {
-            read_sidecar_bytes(&path, kind, files.as_ref())
+            read_sidecar_bytes(&path, &roots, kind, files.as_ref())
         })
         .await
         .map_err(super::super::library::browse_work_error)?
@@ -182,17 +218,18 @@ async fn artwork_bytes(
                     coverage.file.publication == domain::FilePublication::Published
                 })?;
             let media = store.get_media(coverage.file.media_id).ok().flatten()?;
-            super::super::library::file_visible_to_user(store, &coverage.file, &media, user)
-                .then_some(coverage)
+            let library = super::super::library::library_for_file(store, &coverage.file, &media)
+                .filter(|library| super::super::library::library_visible(store, library, user))?;
+            Some((coverage.file.path, library.root_paths))
         },
     )
     .await;
-    let coverage = match captured {
+    let (file_path, root_paths) = match captured {
         Ok(Some(facts)) => facts,
         Ok(None) => return kind.missing(),
         Err(error) => return error.response(),
     };
-    match local_bytes(&state, coverage.file.path, kind).await {
+    match local_bytes(&state, file_path, root_paths, kind).await {
         Ok(Some(bytes)) => {
             let mime = image_content_type(&bytes);
             conditional_image(&headers, bytes, mime, true)

@@ -584,3 +584,122 @@ async fn stat_permission_and_generic_io_errors_return_500_with_permission_prompt
             .contains("权限")
     );
 }
+
+#[tokio::test]
+async fn flat_library_file_does_not_read_or_500_on_parent_above_library_root() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let outer = tmp.path().join("outer");
+    let lib_root = outer.join("lib_root");
+    std::fs::create_dir_all(&lib_root).unwrap();
+    let video = lib_root.join("Movie.mkv");
+    std::fs::write(&video, b"video").unwrap();
+    let outer_poster = outer.join("poster.jpg");
+    let outer_fanart = outer.join("fanart.jpg");
+    std::fs::write(&outer_poster, valid_jpeg()).unwrap();
+    std::fs::write(&outer_fanart, valid_jpeg()).unwrap();
+
+    let state = ApiState::new(
+        Store::open(tmp.path().join("data")).unwrap(),
+        ADMIN_TOKEN.into(),
+        ProfileSet::load(None).unwrap(),
+        Arc::new(NoFetch),
+        Arc::new(MemoryDownloader::new(tmp.path().join("stage"))),
+    )
+    .unwrap();
+    let store = state.store();
+    store
+        .create_library(
+            MediaKind::Movie,
+            "FlatMovies",
+            &[lib_root.to_str().unwrap()],
+            "everyone",
+            true,
+            &[],
+        )
+        .unwrap();
+    let media = Media {
+        id: MediaId::new(),
+        kind: MediaKind::Movie,
+        title: "Movie".into(),
+        year: Some(2024),
+        original_title: None,
+        aliases: Vec::new(),
+        tmdb_id: None,
+        douban_id: None,
+        tvdb_id: None,
+        bangumi_id: None,
+        anilist_id: None,
+    };
+    store.insert_media(&media).unwrap();
+    let file_id = LedgerId::new();
+    publish_fixture_file(
+        &store,
+        &FixtureFile {
+            file_id: Some(file_id),
+            media_id: media.id,
+            path: video.display().to_string(),
+            quality_source: QualitySource::Probe,
+            confidence: Confidence::High,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    drop(store);
+
+    let app = router(state);
+    for uri in [
+        format!("/api/v1/posters/{file_id}"),
+        format!("/api/v1/fanart/{file_id}"),
+    ] {
+        let (status, body) = get_status(&app, &uri, None).await;
+        assert_eq!(
+            status,
+            StatusCode::NOT_FOUND,
+            "must not read above root: {uri}"
+        );
+        assert_eq!(body["error"]["code"], "poster.missing");
+    }
+
+    std::fs::set_permissions(&outer_poster, std::fs::Permissions::from_mode(0o000)).unwrap();
+    std::fs::set_permissions(&outer_fanart, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let poster_res = get_status(&app, &format!("/api/v1/posters/{file_id}"), None).await;
+    let fanart_res = get_status(&app, &format!("/api/v1/fanart/{file_id}"), None).await;
+    std::fs::set_permissions(&outer_poster, std::fs::Permissions::from_mode(0o644)).unwrap();
+    std::fs::set_permissions(&outer_fanart, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+    assert_eq!(poster_res.0, StatusCode::NOT_FOUND);
+    assert_eq!(poster_res.1["error"]["code"], "poster.missing");
+    assert_eq!(fanart_res.0, StatusCode::NOT_FOUND);
+    assert_eq!(fanart_res.1["error"]["code"], "poster.missing");
+}
+
+#[tokio::test]
+async fn sidecar_symlink_escaping_library_root_is_not_served() {
+    let fx = Fixture::new();
+    let app = router(fx.state.clone());
+
+    let secret_txt = fx._tmp.path().join("secret.txt");
+    std::fs::write(&secret_txt, b"secret-token-data").unwrap();
+    let outside_jpg = fx._tmp.path().join("outside-poster.jpg");
+    std::fs::write(&outside_jpg, valid_jpeg()).unwrap();
+
+    std::os::unix::fs::symlink(&secret_txt, fx.item_dir.join("poster.jpg")).unwrap();
+    std::os::unix::fs::symlink(&outside_jpg, fx.item_dir.join("fanart.jpg")).unwrap();
+    std::os::unix::fs::symlink(&outside_jpg, fx.item_dir.join("Film-thumb.jpg")).unwrap();
+
+    for uri in [
+        format!("/api/v1/posters/{}", fx.file_id),
+        format!("/api/v1/fanart/{}", fx.file_id),
+        format!("/api/v1/stills/{}", fx.file_id),
+    ] {
+        let (status, body) = get_status(&app, &uri, None).await;
+        assert_eq!(
+            status,
+            StatusCode::NOT_FOUND,
+            "symlink sidecar must 404: {uri}"
+        );
+        assert_eq!(body["error"]["code"], "poster.missing");
+    }
+}

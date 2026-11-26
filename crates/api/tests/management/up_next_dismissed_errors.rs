@@ -435,3 +435,300 @@ async fn clear_all_history_leaves_library_history_intact_when_dismissed_write_fa
     assert_eq!(clear_ok.status(), StatusCode::OK);
     assert!(get_up_next_ids(&app).await.is_empty());
 }
+
+fn hold_library_writer(
+    store: Arc<api::Store>,
+) -> (mpsc::SyncSender<()>, std::thread::JoinHandle<()>) {
+    let (entered_tx, entered_rx) = mpsc::sync_channel(1);
+    let (release_tx, release_rx) = mpsc::sync_channel(1);
+    let handle = std::thread::spawn(move || {
+        let _ = store.with_writer(api::store::Db::Library, |_| {
+            let _ = entered_tx.send(());
+            let _ = release_rx.recv_timeout(Duration::from_secs(10));
+            Ok(())
+        });
+    });
+    entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    (release_tx, handle)
+}
+
+async fn record_tv_episode_progress(
+    app: &axum::Router,
+    clock: &SeqClock,
+    at_secs: i64,
+    media_id: &str,
+    episode: u32,
+    stop_pos_ms: i64,
+) {
+    clock
+        .0
+        .store(at_secs * 1000, std::sync::atomic::Ordering::SeqCst);
+    let open = app
+        .clone()
+        .oneshot(request(
+            "POST",
+            "/api/v1/playback/sessions",
+            Some("management-secret"),
+            json!({
+                "media_item_id": media_id,
+                "device_id": format!("dev-ep-{episode}"),
+                "season_number": 1,
+                "episode_number": episode,
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(open.status(), StatusCode::OK);
+    let sid = json_data(open).await["play_session_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    for (event, offset_ms, pos_ms) in [("start", 0, 120_000), ("stop", 30_000, stop_pos_ms)] {
+        clock.0.store(
+            at_secs * 1000 + offset_ms,
+            std::sync::atomic::Ordering::SeqCst,
+        );
+        let resp = app
+            .clone()
+            .oneshot(request(
+                "POST",
+                "/api/v1/playback/progress",
+                Some("management-secret"),
+                json!({
+                    "event_sequence": crate::common::next_playback_sequence(),
+                    "device_id": format!("dev-ep-{episode}"),
+                    "media_item_id": media_id,
+                    "play_session_id": sid,
+                    "season_number": 1,
+                    "episode_number": episode,
+                    "event": event,
+                    "position_ms": pos_ms,
+                    "duration_ms": 2_400_000,
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+}
+
+#[tokio::test]
+async fn clear_all_history_rolls_back_app_dismissal_when_library_write_is_rejected_or_busy() {
+    let tmp = tempfile::tempdir().unwrap();
+    let clock = Arc::new(SeqClock(std::sync::atomic::AtomicI64::new(
+        1_700_000_000 * 1000,
+    )));
+    let (app, store) = app_with_clock(&tmp, clock);
+    let admin = store.admin_user_id().unwrap();
+    let (_lib, show_id, _, _) =
+        seed_subscribed_tv_show(&store, &tmp.path().join("tv-rb"), "RollbackShow", admin);
+    assert_eq!(get_up_next_ids(&app).await, vec![show_id.to_string()]);
+
+    // 1. library.db writer busy (503): app.db dismissal must roll back outside admission deadline.
+    let (release_tx, blocker) = hold_library_writer(store.clone());
+    let busy_res = app
+        .clone()
+        .oneshot(request(
+            "DELETE",
+            "/api/v1/playback/history",
+            Some("management-secret"),
+            Value::Null,
+        ))
+        .await
+        .unwrap();
+    let _ = release_tx.send(());
+    blocker.join().unwrap();
+    assert_eq!(busy_res.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(json_error(busy_res).await["code"], "runtime.busy");
+    assert_eq!(get_up_next_ids(&app).await, vec![show_id.to_string()]);
+
+    // 2. library.db Protected write barrier (409 during media merge): app.db dismissal must roll back.
+    let merge_dir = tmp.path().join("movies-merge");
+    std::fs::create_dir_all(&merge_dir).unwrap();
+    store
+        .create_library(
+            domain::MediaKind::Movie,
+            "MergeMovies",
+            &[merge_dir.to_str().unwrap()],
+            "everyone",
+            true,
+            &[],
+        )
+        .unwrap();
+    let survivor = domain::MediaId::new();
+    let loser = domain::MediaId::new();
+    for (id, title) in [(survivor, "MergeSurvivor"), (loser, "MergeLoser")] {
+        store
+            .insert_media(&domain::Media {
+                id,
+                kind: domain::MediaKind::Movie,
+                title: title.into(),
+                year: Some(2024),
+                original_title: None,
+                aliases: Vec::new(),
+                tmdb_id: None,
+                douban_id: None,
+                bangumi_id: None,
+                anilist_id: None,
+                tvdb_id: None,
+            })
+            .unwrap();
+        let file_path = merge_dir.join(format!("{title}.mkv"));
+        std::fs::write(&file_path, b"movie bytes").unwrap();
+        store::test_support::publish_fixture_file(
+            &store,
+            &store::test_support::FixtureFile {
+                media_id: id,
+                path: file_path.display().to_string(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
+    store
+        .mutate_playback(
+            loser,
+            &store::playback::PlaybackMutation::marks(admin, -1, -1, Some(true), None),
+            500,
+        )
+        .unwrap();
+    store
+        .begin_media_merge(
+            &store::playback::MediaMergeRequest {
+                request_id: "00000000-0000-0000-0001-0000000000d1".into(),
+                survivor,
+                loser,
+                survivor_revision: 0,
+                loser_revision: 0,
+                refresh_targets: Default::default(),
+            },
+            1_000,
+        )
+        .unwrap();
+
+    let protected_res = app
+        .clone()
+        .oneshot(request(
+            "DELETE",
+            "/api/v1/playback/history",
+            Some("management-secret"),
+            Value::Null,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(protected_res.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        json_error(protected_res).await["code"],
+        "playback.protected"
+    );
+    assert_eq!(get_up_next_ids(&app).await, vec![show_id.to_string()]);
+}
+
+#[tokio::test]
+async fn clear_windowed_history_preserves_up_next_when_older_watch_history_remains() {
+    let tmp = tempfile::tempdir().unwrap();
+    let clock = Arc::new(SeqClock(std::sync::atomic::AtomicI64::new(1_000 * 1000)));
+    let (app, store) = app_with_clock(&tmp, clock.clone());
+    let admin = store.admin_user_id().unwrap();
+    let show_dir = tmp.path().join("tv-window");
+    let (_lib, show_id, _, _) = seed_subscribed_tv_show(&store, &show_dir, "WindowShow", admin);
+    let ep2_path = show_dir.join("WindowShow.S01E02.mkv");
+    std::fs::write(&ep2_path, b"finite video").unwrap();
+    store::test_support::publish_fixture_file_units(
+        &store,
+        &store::test_support::FixtureFile {
+            file_id: Some(domain::LedgerId::new()),
+            media_id: show_id,
+            path: ep2_path.display().to_string(),
+            season: Some(1),
+            episode: Some(2),
+            resolution: Some("1080p".into()),
+            quality_source: domain::QualitySource::Probe,
+            confidence: domain::Confidence::High,
+            ..Default::default()
+        },
+        &[domain::UnitKey::new(1, 2)],
+    )
+    .unwrap();
+
+    // Watch S01E02 to completion at t = 1000 (with S01E01 unwatched), then progress S01E01 at t = 2000.
+    record_tv_episode_progress(&app, &clock, 1_000, &show_id.to_string(), 2, 2_380_000).await;
+    record_tv_episode_progress(&app, &clock, 2_000, &show_id.to_string(), 1, 150_000).await;
+
+    clock
+        .0
+        .store(2_500 * 1000, std::sync::atomic::Ordering::SeqCst);
+    let clear_res = app
+        .clone()
+        .oneshot(request(
+            "DELETE",
+            "/api/v1/playback/history?scope=all&since=1500",
+            Some("management-secret"),
+            Value::Null,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(clear_res.status(), StatusCode::OK);
+
+    let ep1 = store.unit_state(admin, show_id, 1, 1).unwrap().unwrap();
+    assert_eq!(ep1.position_ms, 0);
+    assert!(!ep1.played);
+    let ep2 = store.unit_state(admin, show_id, 1, 2).unwrap().unwrap();
+    assert!(ep2.played, "pre-window S01E02 state must remain");
+    assert!(ep2.updated_at < 1_500);
+    assert_eq!(get_up_next_ids(&app).await, vec![show_id.to_string()]);
+}
+
+#[tokio::test]
+async fn failed_overlapping_subscription_preserves_existing_up_next_dismissal() {
+    let tmp = tempfile::tempdir().unwrap();
+    let clock = Arc::new(SeqClock(std::sync::atomic::AtomicI64::new(
+        1_700_000_000 * 1000,
+    )));
+    let (app, store) = app_with_clock(&tmp, clock);
+    let admin = store.admin_user_id().unwrap();
+    let (lib_id, show_id, _sub_id, filter_id) =
+        seed_subscribed_tv_show(&store, &tmp.path().join("tv-overlap"), "OverlapShow", admin);
+    assert_eq!(get_up_next_ids(&app).await, vec![show_id.to_string()]);
+
+    let dismiss = app
+        .clone()
+        .oneshot(request(
+            "DELETE",
+            &format!("/api/v1/playback/history?scope=item&media_item_id={show_id}"),
+            Some("management-secret"),
+            Value::Null,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(dismiss.status(), StatusCode::OK);
+    assert!(get_up_next_ids(&app).await.is_empty());
+
+    let mut overlap_body = subscribe_payload_with_filter("search", Some(&filter_id));
+    overlap_body["media"] = json!({
+        "kind": "tv",
+        "title": "OverlapShow",
+        "year": 2025,
+        "tmdb_id": "99-OverlapShow",
+    });
+    overlap_body["coverage"] =
+        json!({ "kind": "tv", "season": 1, "episode_from": 3, "episode_to": 8 });
+    overlap_body["library_id"] = json!(lib_id);
+
+    let overlap_res = app
+        .clone()
+        .oneshot(request(
+            "POST",
+            "/api/v1/subscriptions",
+            Some("management-secret"),
+            overlap_body,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(overlap_res.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        json_error(overlap_res).await["code"],
+        "subscription.overlap"
+    );
+    assert!(get_up_next_ids(&app).await.is_empty());
+}
