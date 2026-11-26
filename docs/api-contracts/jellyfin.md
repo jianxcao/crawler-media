@@ -21,9 +21,9 @@
 | 协议认证 | MediaBrowser / Emby Authorization、X-Emby-Authorization、token header 与支持的播放 URL 凭据生效；`Users/Logout` 与 `Sessions/Logout` 吊销当前会话 token（后续请求返回 401）；无效凭据及跨用户访问拒绝 | `jellyfin/authentication_routes.rs`、`jellyfin/visibility.rs`、`playback_read_regression/stream_credentials.rs` |
 | User 与 Library | 登录用户、资料、Views 的身份和权限一致；隐藏 Library 的直接条目、字幕和视频地址不能绕过授权 | `jellyfin/protocol.rs`、`jellyfin/visibility.rs` |
 | 列表与详情 | Movie / Series / Episode 身份、类型、父子关系、数量和元数据一致；搜索、分类命中可打开同一详情；分页不丢失、不重复 | `jellyfin/library_routes.rs`、`jellyfin/catalog/`、`jellyfin/metadata_parity.rs`、`jellyfin/filters.rs` |
-| 播放信息与取流 | 可播放详情有 MediaSources；稳定来源下与 PlaybackInfo 一致；消费源和 SID 后的实际字节正确；首选变化和缺 DeviceId 不破坏有效绑定 | `jellyfin/playback.rs`、`jellyfin/playback_contract.rs`、`jellyfin/event_sources/playback_info_race.rs`、`jellyfin_stream_binding.rs` |
+| 播放信息与取流 | 可播放详情有 MediaSources；稳定来源下与 PlaybackInfo 一致；消费源和 SID 后的实际字节正确；首选变化和缺 DeviceId 不破坏有效绑定 | `jellyfin/playback.rs`、`jellyfin/playback_contract.rs`、`jellyfin/event_sources/playback_info_race.rs`、`jellyfin_stream_binding.rs`（`api_suite_4`） |
 | 字幕 | 消费详情与 PlaybackInfo 的版本化来源 URL；交付选定来源字节；拒绝用户、设备、单元、来源、会话及配置冲突 | `jellyfin/event_sources/subtitle_source.rs`、`jellyfin/event_sources/shared_episode_binding.rs` |
-| 分类范围 | Genres/Studios 缺省 ParentId 时查可见范围，明确未知或隐藏 ParentId 时返回空页 | `jellyfin_coarse_routes.rs` |
+| 分类范围 | Genres/Studios 缺省 ParentId 时查可见范围，明确未知或隐藏 ParentId 时返回空页 | `jellyfin_coarse_routes.rs`（`api_suite_4`） |
 | 播放事件 | 来源绑定、空位置、迟到事件、持久进度、日志、关闭会话和用户隔离一致 | `jellyfin/playback.rs`、`jellyfin/playback_contract.rs`、`jellyfin/event_sources.rs`、`jellyfin/playback_null_position.rs`、`playback_event_identity.rs` |
 | 收藏与已播放 | 设置/撤销、详情重入、过滤查询与持久事实一致；覆盖 POST Delete、跨用户和隐藏条目拒绝 | `jellyfin/user_marks_routes.rs`、`jellyfin/visibility.rs`、`jellyfin/filters.rs` |
 | 图片 | 自有静态 poster / fanart / still / chapter / Library cover 匿名可读，Content-Type 与实际字节正确；Jellyfin 图片按独立规则验证 | `jellyfin/protocol.rs`、`executor_library_admin/images.rs` |
@@ -45,23 +45,6 @@
 | 包含额外 JSON 字段 | 忽略额外字段并正常验证凭据 |
 
 自动化用例位于 `crates/api/tests/jellyfin/authentication_routes.rs`。
-
-### 双客户端实机回归记录
-
-2026-11-25 使用同一服务和用户，在 SenPlayer 的 `jel` 与 VidHub 的 Jellyfin 服务器中测试《书卷一梦》。以下步骤也可用于复测。收藏和已观看状态测试后恢复。
-
-| 用例与操作 | SenPlayer | VidHub |
-|---|---|---|
-| 登录并打开服务器 | 成功，显示 3 个 Library | 成功 |
-| 搜索剧名并打开结果 | 成功 | 成功 |
-| 浏览 Library、选择分类 | 国产剧按悬疑筛选成功 | 首页显示国产剧；打开完整列表时辅助功能自动化检查触发客户端崩溃，未完成筛选验证 |
-| 进入剧集列表，选择季和单集，查看详情 | 成功 | 成功，显示季及 1–40 集分页 |
-| 切换收藏，再恢复原状态 | 成功，剧集收藏 | 成功，单集收藏 |
-| 标记第 2 集已观看，再取消并回读服务端 | 成功，`Played` 由 false 变为 true 再恢复 false | 未完成，界面旗标操作未观察到 `Played` 变化 |
-| 播放第 1 集、暂停、快进和退出 | 多次尝试后未观察到播放器出画，原因待查 | 成功出画并退出 |
-| 退出后回读进度，另一客户端查看 | 读取到 VidHub 写入的续播位置 | 成功写入并显示续播位置 |
-
-VidHub 的崩溃报告显示辅助功能读取调用位于调用栈中，不能据此判断手动操作是否会崩溃。SenPlayer 的播放入口仍需进一步排查，不能据此判断具体原因。测试使第 1 集的进度变为约 03:41。
 
 ## 客户端初始化与身份
 
@@ -114,14 +97,16 @@ Playing / Progress / Stopped 中缺失或 null PositionTicks 不代表零。活�
 
 ## 重构完成条件
 
-协议路由、认证、DTO、来源构造或 Store provider 改动必须同时验证 `media-server` 和 `api` 的公开 Router。按资源约束串行运行；下列命令独占构建锁：
+协议路由、认证、DTO、来源构造或 Store provider 改动必须同时验证 `media-server` 和 `api` 的公开 Router。按资源约束使用构建锁包装器（常规回归复用共享 `dev`/`test` 产物）：
 
 ```sh
-python3 scripts/with-build-lock.py --exclusive cargo test --release -j8 -p media-server -- --test-threads=8
-python3 scripts/with-build-lock.py --exclusive cargo test --release -j8 -p api \
-  --test jellyfin --test playback_event_identity --test playback_read_regression -- --test-threads=8
-python3 scripts/with-build-lock.py --exclusive cargo test --release -j8 -p api \
-  --test api_suite_4 jellyfin_stream_binding:: -- --test-threads=8
+python3 scripts/with-build-lock.py cargo nextest run --build-jobs 4 --test-threads 4 -p media-server
+python3 scripts/with-build-lock.py cargo nextest run --build-jobs 4 --test-threads 4 -p api \
+  --test jellyfin --test playback_event_identity --test playback_read_regression
+python3 scripts/with-build-lock.py cargo test -j4 -p api \
+  --test api_suite_4 jellyfin_stream_binding:: -- --test-threads=4
+python3 scripts/with-build-lock.py cargo test -j4 -p api \
+  --test api_suite_4 jellyfin_coarse_routes:: -- --test-threads=4
 ```
 
 分页、搜索、ACL 或图片变化还需运行表中相应目标。最终稳定代码按仓库规则运行一次 workspace 全套。记录实际命令、退出码、ignored 和失败，不以定向重跑覆盖原失败。

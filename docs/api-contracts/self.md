@@ -34,9 +34,9 @@
 
 ### Site
 
-`{id, name, url, profile_id, cookie?, api_key?, rss_url?, proxy?, rate_limit_per_minute?, cdp_url?, downloader_id?, enabled, boost?}`
+`{id, name, url, profile_id, cookie, api_key, rss_url, proxy, rate_limit_per_minute?, cdp_url, downloader_id?, enabled, maintenance_via: "http"|"browser", auth_type: "apikey"|"cookie"|"none"}`
 
-凭证列表/读取时遮盖；刚写入时可回显一次。
+`cookie` 与 `api_key` 在列表、详情及新建/更新回显中始终为 `null`（从不明文回显）；非管理员读取时 `url` 置空串、`rss_url`/`proxy`/`cdp_url` 置 `null`。站点上传激励状态由 `/sites/boost-stats` 与 `PATCH /sites/{id}/boost` 独立暴露。
 
 ### MediaView
 
@@ -44,7 +44,7 @@
 
 Media 的权威身份与别名位于 `library.db.media` / `media_aliases`；别名键为 `(source, kind, external_id)`，同一来源可保留多个别名、至多一个 refresh target。上面的五个可空 `*_id` 是单值投影，不代表完整别名集合。`Store::update_media` 保留未被本次编辑替换的别名，并在事务中更新相关卡片。
 
-章节与片头片尾的正式范围属于选中的 `(file_id, FileVersion, UnitKey)`。自有章节、播放会话及 Jellyfin 展示只读取当前登记版本匹配的范围；同 Media 同集的另一文件、Whole 与 E01、旧源版本的人工锁均不能共享。启用 TheIntroDB 后，云端结果可作为明确的 `theintrodb` 来源写入当前文件标记并用于播放 overlay；它不表示本文件声纹 `verified`，也不触发声纹或其他音频读取。仅对单文件单集、已知当前文件时长、v4 响应坐标一致、已知 release 群组时长与文件时长差不超过 300,000ms，且合法范围位于文件时长内的结果采纳。请求使用 `duration_ms`、`details=true`、`merge_unknown=false`；云端未匹配时会回退热门 release，客户端必须检查 `group_duration_ms`，未知或不匹配的范围仍是候选。已有正式标记（含人工锁和更高可信来源）优先，发布仍复查当前文件版本、时长和覆盖。`no_submissions` 是正常缺少云端提交，`episode_not_found` / `media_not_found` 是身份或坐标不匹配，旧路由 404、认证、网络及响应错误不能记录为已确认没有标记。章节列表的 `image_url` 是 opaque URL：公开 `GET /chapters/{file_id}/{canonical_target_index}` 必须携带 `generation`、`artifact` query，只返回当前登记源及当前目标对应的 DB published 不可变 JPEG；旧身份查询返回 404，缺失 query 拒绝。规范化目标序号不等于显示数组下标；客户端直接使用服务器 URL。缺失/损坏文件不返回图片 URL，显式生成仅修复缺失目标。
+章节与片头片尾的正式范围属于选中的 `(file_id, FileVersion, UnitKey)`。自有章节、播放会话及 Jellyfin 展示只读取当前登记版本匹配的范围；同 Media 同集的另一文件、Whole 与 E01、旧源版本的人工锁均不能共享。启用 TheIntroDB 后，云端结果可作为明确的 `theintrodb` 来源写入当前文件标记并用于播放 overlay；它不表示本文件声纹 `verified`，也不触发声纹或其他音频读取。仅对单文件单集且已知正整数当前文件时长的条目发起 `/v4/media` 请求（`duration_ms`、`details=true`、`merge_unknown=false`；未知时长直接跳过网络请求并保持已缓存章节免写锁只读）；云端未匹配时会回退热门 release，客户端必须检查 `group_duration_ms`，仅在响应坐标一致、已知 release 群组时长与文件时长差不超过 300,000ms 且范围合法位于文件时长内时采纳，未通过校验的结果直接丢弃并记入短期负缓存。已有正式标记（含人工锁和更高可信来源）优先，发布仍复查当前文件版本、时长和覆盖。`no_submissions`、空单段范围、未采纳结果与 `episode_not_found` / `media_not_found` 记入负缓存；429 区分配额耗尽、单条目限制与突发限流，全局冷却按 `(base_url, api_key)` 隔离且不受无关刮削设置保存影响，401/403、5xx 与传输失败进入对应上游冷却而不能记录为已确认没有标记。章节列表的 `image_url` 是 opaque URL：公开 `GET /chapters/{file_id}/{canonical_target_index}` 必须携带 `generation`、`artifact` query，只返回当前登记源及当前目标对应的 DB published 不可变 JPEG；旧身份查询返回 404，缺失 query 拒绝。规范化目标序号不等于显示数组下标；客户端直接使用服务器 URL。缺失/损坏文件不返回图片 URL，显式生成仅修复缺失目标。公开本地侧车图片（`/posters/{ledger_id}`、`/fanart/{ledger_id}`、`/stills/{ledger_id}`）严格限制在所属 Library `root_paths` 内并拒绝符号链接，缺失返回 404 `poster.missing`，权限或 IO 错误返回 500 `poster.permission_denied` / `poster.io_error`（`Cache-Control: no-store`）。
 
 章节详情接口必须指定有效可播的 `file_id`；TV 还须提供完整 `season`/`episode`，电影省略季集。`GET /libraries/{id}/items/{item_id}/chapters` 保持数组响应；`POST .../chapters/refresh` 返回选中文件的章节，指纹任务仍覆盖整季；条目 `/probe` 仍覆盖全部文件。服务端先验证 Library 可见性、Media、file/Unit 和登记版本，拒绝错误组合，不接受路径或自动改选其他版本。
 
@@ -79,7 +79,9 @@ HTTP 路径是 `/rule-sets`；表名仍是 `filters`。这是有意的 API 别�
 
 ### Downloader
 
-`{id, name, kind: "qbittorrent"|"transmission", url, username?, password?, api_key?, auth_type: "password"|"apikey", has_api_key, has_password, category?, path_maps: [{from, to}], is_default, status, last_error?}`（响应回显省略明文 `password`/`api_key`）。
+响应 DTO：`{id, name, kind: "qbittorrent"|"transmission", url, username?, auth_type: "password"|"apikey", has_api_key, has_password, category?, path_maps: [{from, to}], is_default, enabled, status: "disabled"|"active"|"failed"|"pending", last_error?}`。
+
+`password` 与 `api_key` 仅为 `POST /downloaders` / `PATCH /downloaders/{id}` 的只写输入字段，响应 JSON 永不输出这两个键。`transmission` 仅支持 `auth_type: "password"`（传 `apikey` 返回 400 `downloader.invalid`，切换为非 qBittorrent 时清除已存 `api_key`）。`PATCH` 在单个 `app.db` `IMMEDIATE` 事务（`Store::mutate_downloader`）中原子执行读改写：省略凭据保留原值，传空串清空对应凭据；切为 `auth_type: "password"` 时同步清除 `api_key`，切为 `"apikey"` 时清除 `password`（及未显式传入的 `username`）；连接、鉴权、分类或路径映射变化时同事务重置验证状态与 `last_error`。
 
 ### Library
 
@@ -93,7 +95,7 @@ HTTP 路径是 `/rule-sets`；表名仍是 `filters`。这是有意的 API 别�
 
 `GET /settings/metadata-language` 返回 `{language, revision, operations:[{library_id, operation_id, state, error}]}`；`PATCH /settings/metadata-language` 只接受 `{expected_revision, language}`，拒绝未知字段或缺失字段（400 `settings.invalid`）。revision 过期、已有互斥 Library 操作或非 ready 库返回 409 `settings.conflict`。语言实际改变时，在一个 `library.db` 事务内更新默认语言及 revision，并为每个 Library 登记可恢复的 `default_locale` 操作；有操作时返回 202，无变化或无库时返回 200。同值保存仅返回当前状态，保留现有工作及 pending/failed 操作，不派发 driver；failed 操作通过显式 retry 恢复。`PUT /settings/metadata` 不接受 `language`，返回 400 `settings.language_moved`。单库 `display_locale` 优先于实例默认语言；二者切换都重建唯一的查询投影。
 
-`PATCH /libraries/{id}`：带 `root_paths`（或 `display_locale`）时是一段可恢复、可观测的重配置，返回 **202** 操作对象（与下面 GET 同字段，`state` 此时为 `frozen`）；只改名称/可见性等同步字段仍返回 **200** Library 本体，不带 `operation_id`。同一请求的名称、权限、开关与重配置登记在一个 Library 事务内提交；路径校验、生命周期或 revision 冲突、操作登记失败时全部回滚，不取消已有任务。仅在提交成功后发布内存屏障、取消任务并启动 driver。缺少 `display_locale` 表示保留原配置，显式 `""` 表示清除单库覆盖并重建；新建和默认 Library 均继承实例语言，实例未配置时有效默认值为 `zh-CN`。重配置期间该库处于 `reindexing`：`POST /libraries/{id}/scan` 等写请求返回 **409** `library.reindexing`，`error.operation_id` 提供可供轮询的操作 ID；操作轮询仍可用，查询投影未就绪的读返回下述 typed 503。`GET /libraries/{id}/operations/{operation_id}` 返回 `{operation_id, library_id, kind, state, cursor, error}`（`kind` 为 `roots|locale|default_locale|integrity|scrape`，`cursor` 是批处理游标）；不存在的 operation、以及属于其他 Library 的 operation 一律 **404**。「冻结」是与操作 `frozen` 行同事务提交的 `libraries.lifecycle_state='reindexing'` + `config_revision` 自增，首批之前等待排空。依据 `crates/api/src/http/library_config.rs`、`http/library_operations.rs`、`crates/api/tests/storage_operations_runtime.rs`。
+`PATCH /libraries/{id}`：带 `root_paths`（或 `display_locale`）时是一段可恢复、可观测的重配置，返回 **202** 操作对象（与下面 GET 同字段，`state` 此时为 `frozen`）；只改名称/可见性等同步字段仍返回 **200** Library 本体，不带 `operation_id`。同一请求的名称、权限、开关与重配置登记在一个 Library 事务内提交；路径校验、生命周期或 revision 冲突、操作登记失败时全部回滚，不取消已有任务。仅在提交成功后发布内存屏障、取消任务并启动 driver。缺少 `display_locale` 表示保留原配置，显式 `""` 表示清除单库覆盖并重建；新建和默认 Library 均继承实例语言，实例未配置时有效默认值为 `zh-CN`。重配置期间该库处于 `reindexing`：`POST /libraries/{id}/scan` 等写请求返回 **409** `library.reindexing`，`error.operation_id` 提供可供轮询的操作 ID；操作轮询仍可用，查询投影未就绪的读返回下述 typed 503。`GET /libraries/{id}/operations/{operation_id}` 返回 `{operation_id, library_id, kind, state, cursor, error}`（`kind` 为 `roots|locale|default_locale|integrity|scrape`，`cursor` 是批处理游标）；不存在的 operation、以及属于其他 Library 的 operation 一律 **404**。「冻结」是与操作 `frozen` 行同事务提交的 `libraries.lifecycle_state='reindexing'` + `config_revision` 自增，首批之前等待排空。依据 `crates/api/src/http/library_config.rs`、`http/library_operations.rs`、`crates/api/tests/storage_operations_runtime.rs`（合并于 `api_suite_3`）。
 
 读取唯一投影尚未就绪的 Library 查询返回 typed **503** `library.reindexing`；客户端应轮询操作，不能将空页或旧语言结果视为成功。`POST /libraries/{id}/operations/{operation_id}/retry` 仅接受同库、持有当前 durable owner 且处于 failed 的 `roots|locale|default_locale|integrity` 操作，保留原 operation ID 与游标并返回 **202** `{operation_id,state}`；缺失或其他库的 ID 为 404，错误状态/owner 或已有 driver 为 409（`library.operation_running`）。已受理的操作会等待 filesystem blocking budget 容量，满载不会丢弃冻结操作；driver 错误会以 owner/revision CAS 持久化为 failed，保留已提交游标供 retry 或启动恢复。此 retry 是冻结写门的唯一精确路径例外。
 
@@ -109,7 +111,7 @@ retry 的空 body 表示继续原计划。failed roots 操作在首个批次提�
 
 ### Media 合并操作
 
-`POST /media/merges`（`{request_id, survivor, loser, survivor_revision, loser_revision, refresh_targets?}`）返回 **202** `{operation_id}`，且 `operation_id == request_id`：同一份 payload 用同一个 `request_id` 重发返回同一个操作（幂等，不产生第二份冻结），同一 `request_id` 换 payload 返回 **409** `media.merge_conflict`。`GET /media/operations/{id}` 返回 `{operation_id, phase, state, error}`，未知 id **404** `media.operation_missing`。阶段推进由持有数据目录写租约的进程在 job loop 内驱动，GET/POST 都不推进；重启后未完成的操作继续推进。依据 `crates/api/src/http/media_operations.rs`、`crates/api/src/storage_operations.rs`、`crates/api/tests/storage_operations_runtime.rs`。
+`POST /media/merges`（`{request_id, survivor, loser, survivor_revision, loser_revision, refresh_targets?}`）返回 **202** `{operation_id}`，且 `operation_id == request_id`：同一份 payload 用同一个 `request_id` 重发返回同一个操作（幂等，不产生第二份冻结），同一 `request_id` 换 payload 返回 **409** `media.merge_conflict`。`GET /media/operations/{id}` 返回 `{operation_id, phase, state, error}`，未知 id **404** `media.operation_missing`。阶段推进由持有数据目录写租约的进程在 job loop 内驱动，GET/POST 都不推进；重启后未完成的操作继续推进。依据 `crates/api/src/http/media_operations.rs`、`crates/api/src/storage_operations.rs`、`crates/api/tests/storage_operations_runtime.rs`（合并于 `api_suite_3`）。
 
 metadata/discovery/Playback 及独立 Jellyfin/Emby Router 的变更统一经过实例只读/维护写门禁（409 `instance.read_only` / 503 `runtime.busy` + Retry-After）。Playback 同事务拒绝 merging/retired 身份：self mark 为 409 `playback.protected`，错误信息包含可用 survivor；Jellyfin 可见的冻结项为 409，已退役且不可见项为 404。不重定向已退役 ID；已签发的迟到事件为 IgnoredStale。门禁只控制新准入，不取消或排空已准入 worker。
 
@@ -288,6 +290,8 @@ Web 的 persisted pagehide 保存位置和播放意图，提交递增 sequence �
 **Unidentified/Downloader：** Unidentified 列表从登记的 library_id/root_id 返回并在 SQL 按 library_id 过滤，不按路径猜 Movie/TV。Claim 的独立 unidentified_id/source revision 在文件发布事务内 CAS 消费（删除再停放不会复用身份）；明确 IdentifyAndTransfer 允许改变最终 kind/Library。默认 Downloader 从 downloaders 行及明确支持的环境覆盖选择。
 
 **Subscribe 请求字段：** 创建/PATCH 使用 `coverage` 和 `filter_id`；`POST /subscriptions/{id}/upgrade-runs` body 为 `{filter_id?, wash_cut?}`，回执也返回 `filter_id`。
+
+**Playback 历史清除与继续观看隐藏：** `DELETE /playback/history` 支持 `scope=item|library|all`（配合对应 `media_item_id` / `library_id`）及可选非负秒级时间戳 `since`，在同一 `library.db` 事务中清除观看恢复/断言、播放日志与 QoE 指标，返回 `{deleted_states, deleted_metrics}`。对范围内的活跃 TV 订阅（提供 `since` 时仅限窗口外已无更早观看状态的 Media），先经 `Store::mutate_setting` 原子写入 `app.db` 的 `user.<id>.up_next.dismissed`；若随后 `library.db` 写入被拒绝或失败（如 409 `playback.protected` / 503 `runtime.busy`），在写准入预算外执行逐 Media 补偿回滚以防静默隐藏。`GET /playback/up-next` 与 `POST /playback/up-next/{media_item_id}/dismiss` 的存储错误如实传播（读池忙返回 503 `runtime.busy`，数据损坏返回 500 `up_next.store`，绝不降级返回空隐藏表而泄漏已移除条目）；重新创建同 Media 订阅时清除对应隐藏记录，创建失败则恢复原时间戳。
 
 **Playback marks 目标：** 字段为 `season_number` / `episode_number`，支持整项、整季与合法 TV S00E00。GET/POST 拒未知键、重复坐标与坏类型；坐标按 0..2147483647 checked conversion，越界 400，不饱和或截断。坏请求不写 playback_units。
 

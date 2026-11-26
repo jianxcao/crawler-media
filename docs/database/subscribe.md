@@ -130,7 +130,7 @@ CREATE TABLE subscribe_wanted(subscribe_id TEXT NOT NULL REFERENCES subscribes(i
 | `score` | `INTEGER` | — | 是 | 无 | 提交时评分。 |
 | `torrent_json` | `TEXT` | — | 是 | 无 | 已提交 Torrent 的序列化事实，可包含 Site、实际 Downloader、Release override 等；DDL 不验证 JSON。 |
 | `submitted_at` | `INTEGER` | — | 是 | `0` | 提交时间，Unix 秒；0 表示没有有效提交时间记录。 |
-| `state` | `TEXT` | — | 是 | `'active'` | 状态文本；业务使用 active、imported、stalled、rejected，DDL 无枚举 CHECK。 |
+| `state` | `TEXT` | — | 是 | `'active'` | 状态文本；业务使用 `active`、`imported`、`stalled`、`rejected`、`orphan`，DDL 无枚举 CHECK。 |
 | `last_progress` | `REAL` | — | 否 | 无 | 最近记录的增长进度，调用者约定范围 0..=1；DDL 不限制数值。 |
 | `last_progress_at` | `INTEGER` | — | 否 | 无 | 最近检测到进度增长的时间，Unix 秒；并非每次轮询都更新。 |
 | `info_hash` | `TEXT` | — | 否 | 无 | Downloader 分配的 Torrent info hash；写入者转为小写。 |
@@ -150,7 +150,7 @@ CREATE TABLE pending_downloads(subscribe_id TEXT NOT NULL REFERENCES subscribes(
 CREATE INDEX pending_downloads_sub_state_idx ON pending_downloads(subscribe_id,state);
 ```
 
-**使用注意**：`active` 表示在途；`imported` 是 Transfer 后仍保留用于跟踪的记录，不代表仍待 Transfer；`stalled` 不再占用覆盖槽。进度没有增长时不会刷新 `last_progress_at`，读取停滞时间可回退到非零 `submitted_at`。这些行为不等于数据库触发器或 CHECK。
+**使用注意**：`active` 表示在途；`imported` 是 Transfer 后仍保留用于跟踪的记录，不代表仍待 Transfer；`stalled` 不再占用覆盖槽；`rejected` 表示种子源被确定性拒绝、Wash-cut 探测质量未达标或 `probe_wait` 超限，`load_rejected_enclosures` 同时加载 `rejected` 与 `stalled` 使自动轮次永久跳过该 enclosure（仅用户显式手动提交才会重新激活）；`orphan` 在目标 Downloader 被删除时由 `mark_pending_orphaned` 写入，停止原下载器的 Transfer 轮询，但允许自动轮次在其他可用下载器上重新选中并恢复为 `active`。进度没有增长时不会刷新 `last_progress_at`，读取停滞时间可回退到非零 `submitted_at`。这些行为不等于数据库触发器或 CHECK。
 
 ## subscribe_jobs_cleanup
 

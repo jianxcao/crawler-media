@@ -4,15 +4,15 @@
 
 [返回数据库总览](README.md)
 
-唯一生产 DDL 的文件身份为 `application_id=1129139249`、`user_version=7`。本库保存权威事实，不可按缓存清空。
+唯一生产 DDL 的文件身份为 `application_id=1129139249`、`user_version=8`。本库保存权威事实，不可按缓存清空。
 
-结构为 **66张业务表（含1张FTS5虚拟表）、668字段、115个显式命名索引、45组FK、133个CHECK、0生产触发器**，不计SQLite自动索引、FTS5的4张内部影子表及虚拟表隐藏列；668字段按 `PRAGMA table_info` 统计。影子表另有10字段，物理表总数为70、物理声明字段678。字段以[生产DDL](../../crates/store/src/schema/v1/library.sql)为准，复核方法见[数据库总览](README.md#结构复核方法)。
+结构为 **66张业务表（含1张FTS5虚拟表）、686字段、125个显式命名索引、45组FK、137个CHECK、0生产触发器**，不计SQLite自动索引、FTS5的4张内部影子表及虚拟表隐藏列；686字段按 `PRAGMA table_info` 统计（另含 `library_files.parent_dir_key` 1个 `VIRTUAL` 生成列，非隐藏声明列共687）。影子表另有10字段，物理表总数为70、物理 `table_info` 字段696（含虚拟生成列为697）。字段以[生产DDL](../../crates/store/src/schema/v1/library.sql)为准，复核方法见[数据库总览](README.md#结构复核方法)。
 
 Subscribe retention 是孤儿 Media 保留权威；创建、释放、补偿和合并通过 generation fence 及持久阶段跨库恢复，Collection 删除及 orphan 候选按窗口处理。关闭的 fence 和终态记录可能累积。`collections.created_at` 和 `collection_items.added_at` 为 INTEGER 毫秒；集合 cursor 按 `(sort_order, added_at, media_id)` 排序并严格使用数值时间。`items_roster_stats` / `files_roster_stats` 覆盖索引减少回表，精确聚合仍随目标库大小线性增长。
 
 `library_operations.resource_key` 和 `nfo_export_active_path` 保证活跃 NFO 导出独占 sidecar 路径；`nfo_export_pending_age` 限定恢复窗口。`library_integrity_owner` 服务于 Library/Media 写屏障，failed 操作仍冻结以供恢复。Integrity 在 reader 中准备有限输入，释放读租约后用短 writer 事务校验 owner revision 与游标并提交；一次 advance 可只推进当前 Media 的一页。失败保留游标和冻结，显式重试恢复。卡片、收藏和用户统计读取沿用完整性屏障。FTS 准备、最终计数/重叠核对及单 Media 已采用元数据的成本仍取决于输入规模，不把整个 operation 描述为恒定工作量。`hdr_observed` 区分未观察与确认 SDR。终态清理按年龄窗口执行。
 
-删除意图保存 `path_key` 和 `deletion_id`，分别标识固定规范路径与本次删除；`pending_deletions_path_key` 保证每个路径最多一个意图，`pending_file_renames_file` 支持检查文件已有改名工作。
+删除意图保存 `path_key`、`deletion_id`、`scope`（`media_with_leftovers` / `exact_path`）以及源与可选去重目标的磁盘身份；`pending_deletions_path_key` 保证每个路径最多一个意图，`pending_file_renames_active_file` / `pending_file_renames_active_to` / `pending_file_renames_active_from` 约束与检索活动改名工作。
 
 ## 实现边界
 
@@ -39,7 +39,7 @@ Subscribe retention 是孤儿 Media 保留权威；创建、释放、补偿和�
 - [library_protocol_terms](#library_protocol_terms) — 4 字段；当前查询投影/成员/计数模型。
 - [library_protocol_people](#library_protocol_people) — 9 字段；当前查询投影/成员/计数模型。
 - [pending_root_reassignments](#pending_root_reassignments) — 6 个字段
-- [pending_file_renames](#pending_file_renames) — 28 字段；文件改名/改挂持久意图：版本/磁盘证据、sidecar决议、跨分区引用恢复及重试。
+- [pending_file_renames](#pending_file_renames) — 31 字段；文件改名/改挂持久意图：版本/磁盘证据、sidecar决议、跨分区引用恢复及重试。
 
 - [chapter_frame_tasks](#chapter_frame_tasks) — 12 字段；章节帧生成的源版本、目标、逐目标结果和不可变图片身份。
 - [collection_items](#collection_items) — 4 字段；以 canonical MediaId 保存成员关系与排序；Collection 成员保留无文件 Media；最后文件删除仅清理无 Collection/Subscribe 保留的孤儿 Media。
@@ -54,7 +54,7 @@ Subscribe retention 是孤儿 Media 保留权威；创建、释放、补偿和�
 - [fingerprint_season_models](#fingerprint_season_models) — 9 字段；季级指纹模型、成员/政策版本与模型体。
 - [libraries](#libraries) — 23 字段；Library 配置、显示语言、访问范围、生命周期与完整性状态；操作状态需结合正式operation验收。
 - [library_file_units](#library_file_units) — 5 字段；文件到逻辑单元的覆盖事实；一文件可覆盖多集，同集可有多版本。
-- [library_files](#library_files) — 35 字段；权威物理文件台账；显式 Library/root/Media/kind 与源版本、在位/发布状态、热质量字段。
+- [library_files](#library_files) — 38 字段（另含 1 个 `VIRTUAL` 生成列 `parent_dir_key`）；权威物理文件台账；显式 Library/root/Media/kind 与源版本、在位/发布状态、热质量与侧车规范键字段。
 - [library_integrity_rows](#library_integrity_rows) — 10字段；Integrity 当前 Media 的分页归约临时事实，仅服务持久操作，完成后分批清理。
 - [library_item_terms](#library_item_terms) — 4 字段；公共卡片多值倒排；私有 Collection 不得混入公共 terms/facets；当前主键以 `media_id` 为第二列（每卡读取直接命中键前缀）。
 - [library_items](#library_items) — 39 字段；Library/Media 浏览摘要。依赖同事务维护，不保留完整文件数组或来源响应。
@@ -72,19 +72,19 @@ Subscribe retention 是孤儿 Media 保留权威；创建、释放、补偿和�
 - [media_metadata_overrides](#media_metadata_overrides) — 7 字段；实体/locale 人工字段覆盖；写入后同事务重合成/归约，Media merge 预检已有人工锁冲突拒绝。
 - [media_metadata_sources](#media_metadata_sources) — 13 字段；每实体/locale/来源的当前规范化快照与选择来源；不是响应缓存或历史表。
 - [media_operations](#media_operations) — 10 字段；Media 合并/改挂持久计划与阶段。冲突/冻结在 Store 内落库，HTTP（`POST /media/merges`、`GET /media/operations/{id}`）与 job loop 推进已接线；改挂仍非独立操作类型。
-- [pending_file_deletions](#pending_file_deletions) — 11 字段；待删除磁盘文件意图、身份检查与重试状态；不是浏览事件流。
+- [pending_file_deletions](#pending_file_deletions) — 20 字段；待删除磁盘文件意图、作用域、源与去重目标磁盘身份检查及重试状态；不是浏览事件流。
 - [playback_logs](#playback_logs) — 23 字段；终态会话历史；按稳定会话/generation 去重，不依赖文件仍存在。
-- [playback_metrics](#playback_metrics) — 13 字段；Playback QoE 指标；仅按明确保留策略清理，不作为用户播放次数来源。
+- [playback_metrics](#playback_metrics) — 13 字段；Playback QoE 指标；随保留策略或用户清除播放历史一并清理，不作为用户播放次数来源。
 - [playback_session_ids](#playback_session_ids) — 17 字段；签发会话的逻辑目标、物理源、生命周期、generation 与已提交事件序号。`Store::commit_playback_event` 写入前校验 `(user, device, session)` 的 generation/目标单元/文件版本/source_version 与库 `lifecycle_state`+`config_revision`+ACL，不匹配或序号不递增一律 `IgnoredStale` 不落事实；`pending` 会话的首个 progress 视为 Start 原子激活；`Stop` 只关闭上报会话并归档一条 play log，重复 Stop 因会话已 `closed` 而幂等。
 - [playback_sessions](#playback_sessions) — 31 字段；每用户/设备活动会话及源绑定、事件顺序、传输/观看统计。
-- [playback_units](#playback_units) — 20字段；用户逻辑观看/收藏事实及源绑定恢复包，不FK到物理文件。未完成 Progress 保留既有 played 断言；达到已知源时长90%阈值写 true 及毫秒断言时钟，人工 mark/unmark 写显式 true/false。目标按最新时钟、同时间 episode>season>whole 决议；effective assertion 与协议 SQL 使用同一规则。分集按请求单元/必要祖先分窗读取，在同一快照内归约。清历史清完整 resume 与断言，favorite 保留。
+- [playback_units](#playback_units) — 20字段；用户逻辑观看/收藏事实及源绑定恢复包，不FK到物理文件。未完成 Progress 保留既有 played 断言；达到已知源时长90%阈值写 true 及毫秒断言时钟，人工 mark/unmark 写显式 true/false。目标按最新时钟、同时间 episode>season>whole 决议；effective assertion 与协议 SQL 使用同一规则。分集按请求单元/必要祖先分窗读取，在同一快照内归约。清历史同事务清恢复与断言、播放日志和 QoE 指标（favorite 保留），并同步继续观看隐藏状态。
 - [probe_job_units](#probe_job_units) — 15 字段；Probe 文件单元、阶段与输出；活动单元/派发索引控制工作窗口。
 - [probe_jobs](#probe_jobs) — 17 字段；专用 Probe 作业与单元计数、阶段策略和历史；不同于 jobs.db 的通用 Job。
 - [probe_season_comparison_history](#probe_season_comparison_history) — 4 字段；每 Media/季最近比较摘要与发布时间，不是完整历史集合。
 - [probe_stage_state](#probe_stage_state) — 11 字段；每文件/上下文/阶段的退避、错误与活动作业状态。
 - [scan_operations](#scan_operations) — 11 字段；扫描作用域、generation、全量/定向意图与恢复报告。
 - [scan_seen](#scan_seen) — 6 字段；当前扫描 operation 已确认处理的路径版本；与源观察、物理 FileVersion 不是同一语义。
-- [scrape_sidecars](#scrape_sidecars) — 3 字段；文件的 NFO/图片 sidecar 路径；登记不等于导出 provenance 合同已完成。
+- [scrape_sidecars](#scrape_sidecars) — 4 字段；文件的 NFO/图片 sidecar 路径与规范键；登记不等于导出 provenance 合同已完成。
 - [unidentified](#unidentified) — 7 个字段
 - [user_library_items](#user_library_items) — 23字段；用户/Library/Media 稀疏摘要，卡片删除级联，重导入由仍存在的原始用户事实恢复；支持完整/增量维护，批量发布合并每个 Media 的用户摘要写入。
 - [library_removal_files](#library_removal_files) — 9 个字段
@@ -398,7 +398,7 @@ CREATE INDEX season_model_lookup ON fingerprint_season_models(media_id,season,ki
 
 ## libraries
 
-Library 配置、显示语言、访问范围、生命周期与完整性状态；后两类 operation 合同不等于已实现。
+Library 配置、显示语言、访问范围、生命周期与完整性状态；重配置、删除与完整性核对均通过持久操作驱动推进。
 
 
 | 字段 | SQLite 类型 | 主键顺位 | 显式 NOT NULL | DEFAULT | 含义 |
@@ -520,6 +520,10 @@ CREATE INDEX coverage_media ON library_file_units(media_id,season,episode,librar
 | `poster_path` | `TEXT` | — | 否 | 无 | 见本表生产定义。 |
 | `backdrop_path` | `TEXT` | — | 否 | 无 | 见本表生产定义。 |
 | `still_path` | `TEXT` | — | 否 | 无 | 见本表生产定义。 |
+| `poster_path_key` | `TEXT` | — | 否 | 无 | `poster_path` 对应的规范化路径键，与 `poster_path` 同为 NULL 或同时非空。 |
+| `backdrop_path_key` | `TEXT` | — | 否 | 无 | `backdrop_path` 对应的规范化路径键，与 `backdrop_path` 同为 NULL 或同时非空。 |
+| `still_path_key` | `TEXT` | — | 否 | 无 | `still_path` 对应的规范化路径键，与 `still_path` 同为 NULL 或同时非空。 |
+| `parent_dir_key` | `TEXT` | — | 否 | `GENERATED ALWAYS AS (...) VIRTUAL` | 从 `path_key` 派生的父目录规范键（`VIRTUAL` 生成列，`PRAGMA table_info` 不返回该列）。 |
 | `has_poster` | `INTEGER` | — | 是 | `0` | 见本表生产定义。 |
 | `has_backdrop` | `INTEGER` | — | 是 | `0` | 见本表生产定义。 |
 | `has_still` | `INTEGER` | — | 是 | `0` | 见本表生产定义。 |
@@ -540,7 +544,12 @@ CREATE TABLE library_files (
  confidence TEXT NOT NULL CHECK(confidence IN ('high','low')), filter_score INTEGER, release_quality TEXT,
  duration_ms INTEGER CHECK(duration_ms IS NULL OR duration_ms>=0), tracks_version INTEGER NOT NULL DEFAULT 0,
  poster_path TEXT, backdrop_path TEXT, still_path TEXT,
+ poster_path_key TEXT, backdrop_path_key TEXT, still_path_key TEXT,
+ parent_dir_key TEXT GENERATED ALWAYS AS (CASE WHEN rtrim(path_key, replace(path_key, '/', '')) = '/' THEN '/' ELSE substr(rtrim(path_key, replace(path_key, '/', '')), 1, length(rtrim(path_key, replace(path_key, '/', ''))) - 1) END) VIRTUAL,
  has_poster INTEGER NOT NULL DEFAULT 0, has_backdrop INTEGER NOT NULL DEFAULT 0, has_still INTEGER NOT NULL DEFAULT 0,
+ CHECK((poster_path IS NULL) = (poster_path_key IS NULL)),
+ CHECK((backdrop_path IS NULL) = (backdrop_path_key IS NULL)),
+ CHECK((still_path IS NULL) = (still_path_key IS NULL)),
  UNIQUE(file_id,library_id,media_id),
  FOREIGN KEY(root_id,library_id) REFERENCES library_roots(root_id,library_id),
  FOREIGN KEY(library_id,kind) REFERENCES libraries(library_id,kind), FOREIGN KEY(media_id,kind) REFERENCES media(media_id,kind)
@@ -550,14 +559,18 @@ CREATE TABLE library_files (
 **显式命名索引**
 
 ```sql
+CREATE INDEX files_backdrop_path_key ON library_files(backdrop_path_key,file_id) WHERE backdrop_path_key IS NOT NULL;
 CREATE INDEX files_kind_path ON library_files(kind,path_key);
 CREATE INDEX files_library_file ON library_files(library_id,file_id);
 CREATE INDEX files_library_media ON library_files(library_id,media_id,file_id);
 CREATE INDEX files_media_library ON library_files(media_id,library_id,file_id);
 CREATE INDEX files_missing ON library_files(library_id,missing_at,file_id) WHERE missing_at IS NOT NULL;
+CREATE INDEX files_parent_dir_key ON library_files(parent_dir_key,path_key,file_id);
+CREATE INDEX files_poster_path_key ON library_files(poster_path_key,file_id) WHERE poster_path_key IS NOT NULL;
 CREATE INDEX files_presence ON library_files(library_id,presence_state,file_id);
 CREATE INDEX files_root_path ON library_files(root_id,path_key);
 CREATE INDEX files_roster_stats ON library_files(library_id,presence_state,publication_state,path_key);
+CREATE INDEX files_still_path_key ON library_files(still_path_key,file_id) WHERE still_path_key IS NOT NULL;
 ```
 
 ## library_integrity_rows
@@ -922,7 +935,7 @@ CREATE INDEX metadata_inputs_media ON library_metadata_inputs(media_id);
 
 ## library_operations
 
-roots/locale/integrity/scrape 操作载体，由运行驱动推进并从持久游标恢复；终态以 owning module 为准，failed Scrape 为终态，failed Integrity 等仍可恢复。
+roots/locale/default_locale/integrity/scrape 操作载体，由运行驱动推进并从持久游标恢复；终态以 owning module 为准，failed Scrape 为终态，failed roots/locale/default_locale/integrity 仍可恢复。
 
 
 | 字段 | SQLite 类型 | 主键顺位 | 显式 NOT NULL | DEFAULT | 含义 |
@@ -1346,7 +1359,7 @@ CREATE INDEX media_operations_terminal_age ON media_operations(updated_at_ms,ope
 
 ## pending_file_deletions
 
-待删除磁盘文件意图、身份检查与重试状态；不是浏览事件流。
+待删除磁盘文件意图、删除作用域（`media_with_leftovers` / `exact_path`）、源与去重依赖目标磁盘身份校验及重试状态；不是浏览事件流。
 
 
 | 字段 | SQLite 类型 | 主键顺位 | 显式 NOT NULL | DEFAULT | 含义 |
@@ -1355,18 +1368,48 @@ CREATE INDEX media_operations_terminal_age ON media_operations(updated_at_ms,ope
 | `path_key` | `TEXT` | — | 是 | 无 | 见本表生产定义。 |
 | `deletion_id` | `TEXT` | — | 是 | 无 | 见本表生产定义。 |
 | `reason` | `TEXT` | — | 是 | 无 | 见本表生产定义。 |
+| `scope` | `TEXT` | — | 是 | 无 | 删除范围：`media_with_leftovers` 或 `exact_path`。 |
 | `attempts` | `INTEGER` | — | 是 | `0` | 见本表生产定义。 |
 | `next_retry_at` | `INTEGER` | — | 是 | `0` | 见本表生产定义。 |
 | `last_error` | `TEXT` | — | 否 | 无 | 见本表生产定义。 |
 | `file_id` | `TEXT` | — | 否 | 无 | 见本表生产定义。 |
 | `library_id` | `TEXT` | — | 否 | 无 | 入队时的 Library 归属；无外键，文件记录删除后仍用于取消与重试隔离。 |
 | `file_size` | `INTEGER` | — | 否 | 无 | 见本表生产定义。 |
+| `file_device` | `INTEGER` | — | 否 | 无 | 入队时观察到的设备号。 |
 | `file_inode` | `INTEGER` | — | 否 | 无 | 见本表生产定义。 |
+| `file_mtime_ns` | `INTEGER` | — | 否 | 无 | 入队时观察到的修改时间（纳秒）。 |
+| `require_target_path` | `TEXT` | — | 否 | 无 | 去重侧车清理前必须确认仍在位的替代目标路径。 |
+| `require_target_size` | `INTEGER` | — | 否 | 无 | 替代目标预期字节数。 |
+| `require_target_device` | `INTEGER` | — | 否 | 无 | 替代目标预期设备号。 |
+| `require_target_inode` | `INTEGER` | — | 否 | 无 | 替代目标预期 inode。 |
+| `require_target_mtime_ns` | `INTEGER` | — | 否 | 无 | 替代目标预期修改时间（纳秒）。 |
+| `companion_file_id` | `TEXT` | — | 否 | 无 | 替代目标消失放弃删除时用于恢复侧车引用的关联文件 ID。 |
 
 **生产表定义**
 
 ```sql
-CREATE TABLE pending_file_deletions (path TEXT PRIMARY KEY NOT NULL,path_key TEXT NOT NULL,deletion_id TEXT NOT NULL,reason TEXT NOT NULL,attempts INTEGER NOT NULL DEFAULT 0,next_retry_at INTEGER NOT NULL DEFAULT 0,last_error TEXT,file_id TEXT,library_id TEXT,file_size INTEGER,file_inode INTEGER);
+CREATE TABLE pending_file_deletions (
+ path TEXT PRIMARY KEY NOT NULL,
+ path_key TEXT NOT NULL,
+ deletion_id TEXT NOT NULL,
+ reason TEXT NOT NULL,
+ scope TEXT NOT NULL CHECK(scope IN ('media_with_leftovers','exact_path')),
+ attempts INTEGER NOT NULL DEFAULT 0,
+ next_retry_at INTEGER NOT NULL DEFAULT 0,
+ last_error TEXT,
+ file_id TEXT,
+ library_id TEXT,
+ file_size INTEGER,
+ file_device INTEGER,
+ file_inode INTEGER,
+ file_mtime_ns INTEGER,
+ require_target_path TEXT,
+ require_target_size INTEGER,
+ require_target_device INTEGER,
+ require_target_inode INTEGER,
+ require_target_mtime_ns INTEGER,
+ companion_file_id TEXT
+);
 ```
 
 **显式命名索引**
@@ -1432,7 +1475,7 @@ CREATE INDEX logs_user_started ON playback_logs(user_id,started_at DESC,id DESC)
 
 ## playback_metrics
 
-Playback QoE 指标；仅按明确保留策略清理，不作为用户播放次数来源。
+Playback QoE 指标；按 `data_retention` 保留策略或用户 `DELETE /api/v1/playback/history` 一并清理，不作为用户播放次数来源。
 
 
 | 字段 | SQLite 类型 | 主键顺位 | 显式 NOT NULL | DEFAULT | 含义 |
@@ -1839,7 +1882,7 @@ CREATE TABLE scan_seen (operation_id TEXT NOT NULL,path TEXT NOT NULL,path_key T
 
 ## scrape_sidecars
 
-文件的 NFO/图片 sidecar 路径；登记不等于导出 provenance 合同已完成。
+文件的 NFO/图片 sidecar 路径与规范键；登记不等于导出 provenance 合同已完成。
 
 
 | 字段 | SQLite 类型 | 主键顺位 | 显式 NOT NULL | DEFAULT | 含义 |
@@ -1847,11 +1890,18 @@ CREATE TABLE scan_seen (operation_id TEXT NOT NULL,path TEXT NOT NULL,path_key T
 | `file_id` | `TEXT` | 1 | 是 | 无 | 见本表生产定义。 |
 | `kind` | `TEXT` | 2 | 是 | 无 | 刮削产物的 sidecar 类型。 |
 | `path` | `TEXT` | — | 是 | 无 | 见本表生产定义。 |
+| `path_key` | `TEXT` | — | 是 | 无 | sidecar 路径对应的规范键。 |
 
 **生产表定义**
 
 ```sql
-CREATE TABLE scrape_sidecars (file_id TEXT NOT NULL REFERENCES library_files(file_id) ON DELETE CASCADE,kind TEXT NOT NULL,path TEXT NOT NULL,PRIMARY KEY(file_id,kind));
+CREATE TABLE scrape_sidecars (file_id TEXT NOT NULL REFERENCES library_files(file_id) ON DELETE CASCADE,kind TEXT NOT NULL,path TEXT NOT NULL,path_key TEXT NOT NULL,PRIMARY KEY(file_id,kind));
+```
+
+**显式命名索引**
+
+```sql
+CREATE INDEX scrape_sidecars_path_key ON scrape_sidecars(path_key,file_id);
 ```
 
 ## unidentified
@@ -1951,7 +2001,9 @@ CREATE INDEX user_items_resume ON user_library_items(user_id,resume_activity_at 
 | `rename_id` | `TEXT` | 1 | 是 | 无 | 见本表生产定义。 |
 | `file_id` | `TEXT` | — | 是 | 无 | 见本表生产定义。 |
 | `from_path` | `TEXT` | — | 是 | 无 | 见本表生产定义。 |
+| `from_path_key` | `TEXT` | — | 是 | 无 | 源路径的规范键。 |
 | `to_path` | `TEXT` | — | 是 | 无 | 见本表生产定义。 |
+| `to_path_key` | `TEXT` | — | 是 | 无 | 目标路径的规范键。 |
 | `expected_revision` | `INTEGER` | — | 是 | 无 | 见本表生产定义。 |
 | `expected_source_version` | `TEXT` | — | 是 | 无 | 见本表生产定义。 |
 | `from_library_id` | `TEXT` | — | 是 | 无 | 见本表生产定义。 |
@@ -1965,6 +2017,7 @@ CREATE INDEX user_items_resume ON user_library_items(user_id,resume_activity_at 
 | `source_device` | `INTEGER` | — | 是 | 无 | 见本表生产定义。 |
 | `source_inode` | `INTEGER` | — | 是 | 无 | 见本表生产定义。 |
 | `source_mtime_ns` | `INTEGER` | — | 是 | 无 | 见本表生产定义。 |
+| `source_digest` | `TEXT` | — | 否 | 无 | 可选源内容摘要（如 STRM）。 |
 | `dest_size` | `INTEGER` | — | 否 | 无 | 见本表生产定义。 |
 | `dest_device` | `INTEGER` | — | 否 | 无 | 见本表生产定义。 |
 | `dest_inode` | `INTEGER` | — | 否 | 无 | 见本表生产定义。 |
@@ -1984,7 +2037,9 @@ CREATE TABLE pending_file_renames (
  rename_id TEXT PRIMARY KEY NOT NULL,
  file_id TEXT NOT NULL,
  from_path TEXT NOT NULL,
+ from_path_key TEXT NOT NULL,
  to_path TEXT NOT NULL,
+ to_path_key TEXT NOT NULL,
  expected_revision INTEGER NOT NULL,
  expected_source_version TEXT NOT NULL,
  from_library_id TEXT NOT NULL,
@@ -1998,6 +2053,7 @@ CREATE TABLE pending_file_renames (
  source_device INTEGER NOT NULL,
  source_inode INTEGER NOT NULL,
  source_mtime_ns INTEGER NOT NULL,
+ source_digest TEXT,
  dest_size INTEGER,
  dest_device INTEGER,
  dest_inode INTEGER,
@@ -2016,6 +2072,9 @@ CREATE TABLE pending_file_renames (
 **显式命名索引**
 
 ```sql
+CREATE UNIQUE INDEX pending_file_renames_active_file ON pending_file_renames(file_id) WHERE phase <> 'failed';
+CREATE INDEX pending_file_renames_active_from ON pending_file_renames(from_path_key) WHERE phase <> 'failed';
+CREATE UNIQUE INDEX pending_file_renames_active_to ON pending_file_renames(to_path_key) WHERE phase <> 'failed';
 CREATE INDEX pending_file_renames_due ON pending_file_renames(next_retry_at, created_at_ms, rename_id) WHERE phase <> 'failed';
 CREATE INDEX pending_file_renames_file ON pending_file_renames(file_id);
 ```

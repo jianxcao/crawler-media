@@ -8,10 +8,12 @@
 |---|---|
 | [术语](../CONTEXT.md)、[工程约束](../AGENTS.md) | 产品边界、代码导航、资源与协作规则 |
 | [存储与数据性能设计](design/storage-performance.md) | 五库职责、读写隔离、查询投影、事务与内存边界 |
-| [片头片尾与章节图像优化](design/marker-optimization.md) | 音频指纹、模型与缓存、远程读取预算、章节图像任务 |
-| [数据库字典](database/README.md) | 表、字段、索引和数据关系；可执行 DDL 以源码为准 |
-| [部署](deploy.md) | 运行环境、数据目录与服务启动 |
-| [自有 API](api-contracts/self.md)、[Jellyfin API](api-contracts/jellyfin.md) | 鉴权、用户数据、播放与客户端协议 |
+| [片头片尾与章节图像优化](design/marker-optimization.md) | 音频指纹、TheIntroDB 候选/冷却、远程读取预算、章节图像任务 |
+| [远程媒体信息与跳转解析](design/remote-media-probing.md) | 远程 ffprobe 预算、STRM 302 预解析缓存与耗时边界 |
+| [元数据身份复核](design/metadata-identity-review.md) | 同名同年份条目只读预览与手动重识别 CAS |
+| [数据库字典](database/README.md)、[SQLite 补丁说明](../vendor/README.md) | 表、字段、索引、连接策略与内置 SQLite 初始化屏障补丁 |
+| [部署](deploy.md) | 运行环境、数据目录、环境变量与服务启动 |
+| [自有 API](api-contracts/self.md)、[Jellyfin API](api-contracts/jellyfin.md)、[探测设置](api-contracts/probe-settings.md) | 鉴权、用户数据、播放协议与后台探测速率控制 |
 | [领域导航](agents/domain.md) | 各领域实现与测试入口 |
 
 完整路由见 [HTTP router](../crates/api/src/http/mod.rs)、[路由表](../crates/api/src/http/routes/mod.rs) 和 `web/lib/api/*`。

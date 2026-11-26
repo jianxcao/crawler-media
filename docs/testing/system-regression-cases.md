@@ -45,12 +45,12 @@
 
 ### 当前可直接运行的检查
 
-在 web 目录运行：
+在仓库根目录通过构建锁包装器运行：
 
-- pnpm test：运行现有前端逻辑与组件契约测试。
-- pnpm typecheck：检查 TypeScript 类型。
-- pnpm lint：检查前端静态规则。
-- pnpm build：构建 Web 前端。
+- `python3 scripts/with-build-lock.py pnpm --dir web test`：运行现有前端逻辑与组件契约测试。
+- `python3 scripts/with-build-lock.py pnpm --dir web typecheck`：检查 TypeScript 类型。
+- `python3 scripts/with-build-lock.py pnpm --dir web lint`：检查前端静态规则。
+- `python3 scripts/with-build-lock.py pnpm --dir web build`：构建 Web 前端。
 
 后端对本次触及的 Rust crate 运行定向测试，稳定代码树收尾按仓库规则运行一次 workspace 全套。构建和测试经 `scripts/with-build-lock.py` 协调，正式性能测量独占资源。API 与 Playback 的测试使用 fake / fixture；不访问真实 Metadata source、Site、Downloader 或 Chromium。
 
@@ -94,9 +94,9 @@ VidHub 用例通过已安装的 VidHub app 连接隔离实例执行。第一次�
 | AUTH-03 | P0 | 管理员和成员分别打开设置入口、成员管理、Library A 和任务操作入口。 | 管理员看到允许的全局入口；成员只看到个人信息与外观设置；直接访问越权路由时不给出数据且显示可理解的拒绝状态。 |
 | NAV-01 | P1 | 从首页、详情、设置分区之间导航；用页面返回、浏览器后退和深层链接重复进入。 | 当前路由、标题、返回目标一致；查询参数和列表位置按设计恢复；不存在错误路由或空白页。 |
 | NAV-02 | P1 | 在桌面与窄屏视口分别遍历侧栏、底部导航、对话框、表单和列表；切换可用主题后刷新。 | 控件不被裁切或遮挡；主题与偏好持久化；所有操作可用键盘/触控完成；加载、空数据和错误状态均有内容。 |
-| HOME-01 | P1 | 打开首页，检查最近新增、继续观看、正在执行的 Job、收藏或发现入口；从每个卡片打开详情再返回。 | 卡片信息与对应数据一致；图片失败有 fallback；返回后保留合理的滚动位置和筛选。 |
-| HOME-02 | P1 | 首次配置不完整时，从概览提示进入 Site、Downloader 和 Library 配置，再返回首页。 | 下一步入口指向正确页面；完成状态及时更新；未配置时有可操作说明，不显示虚假成功。 |
-| MY-01 | P1 | 在 Netflix 主题移动端打开 /my；检查 User 信息和管理员快捷入口（包括新任务）；逐个打开 Subscribe、Transfer、Job、缓存、活动与设置入口；再以成员 User 检查入口；在 Silver 主题直接打开 /my。 | User 信息与活动角标正确；入口落到对应页面或创建界面；成员不显示管理员专属入口；首次加载主题偏好时页面不闪退到首页；Silver 主题按设计返回首页。 |
+| HOME-01 | P1 | 打开 `/`（自动跳转 `/library`）及库总览行，检查最近新增、继续观看、收藏或发现入口；从每个卡片打开详情再返回。 | 根路径稳定落到 `/library`；卡片信息与对应数据一致；图片失败有 fallback；返回后保留合理的滚动位置和筛选。 |
+| HOME-02 | P1 | 首次配置不完整时，从 `/settings/overview` 概览提示进入 Site、Downloader 和 Library 配置，再返回概览。 | 下一步入口指向正确页面；完成状态及时更新；未配置时有可操作说明，不显示虚假成功。 |
+| MY-01 | P1 | 在 Netflix 主题移动端打开 /my；检查 User 信息和管理员快捷入口；逐个打开 Subscribe、Transfer、缓存、活动与设置入口；再以成员 User 检查入口；在 Silver 主题直接打开 /my。 | User 信息与活动角标正确；有效入口落到对应页面；成员不显示管理员专属入口；首次加载主题偏好时页面不闪退到库页；Silver 主题按设计跳转首页入口。 |
 | MY-02 | P1 | 在 /my 打开切换账号列表并切换 User；随后退出登录；若浏览器还有其他已登录 User，再检查切换结果。 | 切换后头像、数据和权限均更新；退出后个人缓存清理且进入登录页或另一个可访问页面；不会恢复前一 User 的受保护内容。 |
 | ROUTE-01 | P2 | 打开 /health、任一未知路由和已失效的详情链接。 | health 页面呈现服务状态；未知路由显示 Not Found；失效数据显示空/不可用说明并提供返回入口。 |
 
@@ -107,7 +107,7 @@ VidHub 用例通过已安装的 VidHub app 连接隔离实例执行。第一次�
 | SEARCH-01 | P0 | 使用全局搜索分别选择 Media、Torrent、Library 垂直类别；输入命中、无命中和特殊字符查询；打开结果并返回。 | 类别切换不串数据；结果归属和摘要清楚；空结果可恢复查询；历史按 User 隔离并可清理；返回恢复查询上下文。 |
 | SEARCH-02 | P1 | 在 Torrent 搜索中按 Site、类别和关键词搜索；切换列表/图览/分组，排序、筛选、翻页并打开单条结果。 | 候选字段、免费/HR 标志、做种数和体积展示正确；单 Site 出错时仍显示其他 Site 结果与降级提示；排序和展示模式符合选择。 |
 | DISC-01 | P1 | 打开电影与 TV Media 发现页；调整年份、类型、评分、片长和排序；加载更多后进入 Media 详情再返回。 | 筛选可组合且结果同步更新；空结果、加载错误可恢复；返回保留筛选和滚动位置。 |
-| DISC-02 | P2 | 打开高分榜、榜单提示页、人物详情、Metadata source 发现合集详情和本地合集列表/详情。 | 静态路由不会被动态路由误匹配；榜单提示与实际路由行为一致；人物与合集 artwork、条目数和可点击 Media 正确。 |
+| DISC-02 | P2 | 打开高分榜重定向（`/discover/movie/high-score` → `/discover/movie/collections/douban/top-rated`）、Top250 提示页（`/discover/movie/top250`）、人物详情（`/discover/people/:id`）、Metadata source 发现合集详情和本地合集列表/详情。 | 静态路由不会被动态路由误匹配；重定向与提示页符合实际路由行为；人物与合集 artwork、条目数和可点击 Media 正确。 |
 | MEDIA-01 | P0 | 从搜索和发现分别打开电影 Media 与 TV Media 详情；核对概要、年份、评分、Metadata source、artwork、Library 状态和 Subscribe 状态。 | 同一 Media 的标识和元数据一致；缺字段有 fallback；海报、背景图和静态图片可加载；操作按钮根据现状显示正确。 |
 | MEDIA-02 | P1 | 从 Media 详情执行收藏/取消收藏、创建 Subscribe、打开播放入口、复制/分享链接；刷新后复核。 | 状态变更即时且持久化；重复点击不产生重复记录；分享地址可重开并落在相同 Media。 |
 | MEDIA-03 | P2 | 直接打开 Douban Media 路由及别名已合并的 Media。 | 别名解析到同一个内部 Media；无法匹配时呈现可继续操作的空状态，不创建重复 Media。 |
@@ -122,7 +122,7 @@ VidHub 用例通过已安装的 VidHub app 连接隔离实例执行。第一次�
 | SUB-04 | P0 | 对已拥有文件的 Subscribe 启用 Wash-cut；fake Indexer 返回较低、相同和更高 quality 的 Torrent，运行后检查每个 episode。 | 只接纳满足替换条件的候选；完成度按 episode 更新；新旧文件替换与清理符合 Transfer mode 规则；没有候选时保留现有 Library 文件。 |
 | SUB-05 | P1 | 在 Subscribe 列表按状态/Media 查询；查看 coverage、quality、最近执行和异常；删除一个测试 Subscribe。 | 列表与详情事实一致；删除需要明确确认；删除后其 Job 定义按产品约定处理，其他 User 的 Subscribe 不受影响。 |
 | FILTER-01 | P1 | 在设置中创建、编辑、复制和删除 Filter；配置内置和用户自定义 atom；在预演中输入匹配/拒绝 Torrent。 | 拒绝规则和最高命中 priority 的 score 结果清楚可解释；Filter 被 Subscribe 绑定后仍显示正确版本；无效条件给出字段提示。 |
-| JOB-01 | P0 | 在任务中心切换全部、进行中、需要处理、已结束；展开 Job 与下载条目阶段；按状态筛选并刷新。 | Job 与 Downloader 状态区分清楚；数量、时间线和阶段与事实一致；刷新不会重复创建或丢失操作结果。 |
+| JOB-01 | P0 | 在活动页任务中心（`/activity`，以及 `/tasks`、`/jobs` 重定向入口）切换全部、进行中、需要处理、定时、历史（`view=all|active|attention|scheduled|history`）；展开 Job 与下载条目阶段；按状态筛选并刷新。 | Job 与 Downloader 状态区分清楚；数量、时间线和阶段与事实一致；旧路由重定向正确，刷新不会重复创建或丢失操作结果。 |
 | JOB-02 | P1 | 对可重试 Job 执行重试/取消；忽略和撤销忽略；处理 fake Downloader 失联、任务缺失和 Site 超时。 | 仅允许合法状态转换；异常上下文可见且能定位 Site/Downloader；可恢复情形提供重试；不可恢复时保持原数据并说明原因。 |
 | DLT-01 | P1 | 对下载条目执行暂停、恢复、取消、移除和刷新状态；选择“只移除 Downloader 任务”与“连同文件处理”的可用选项。 | 操作作用于选中的 Torrent；文件删除/保留与所选动作一致并有明确确认；失败后仍可重试，其他 Downloader 任务不受影响。 |
 | ACT-01 | P1 | 打开活动页，切换 User/工作流范围，等待新的 fixture 事件；进入关联 Media、Subscribe 或 Job。 | 新事件按时间更新且不重复；范围筛选生效；每条事件跳到正确详情；空闲时不产生误报。 |
@@ -152,7 +152,7 @@ VidHub 用例通过已安装的 VidHub app 连接隔离实例执行。第一次�
 
 #### Library removal 自动化辅助验收与未覆盖项
 
-`crates/api/tests/library_delete_reimport.rs` 的公开 DELETE/status/创建/scan 路由用例包含 TV 两 User、电影整片、不同 NFO 别名不串进度、缓存删除和独立 Library 同 Media 保留等断言；此处列覆盖设计，不声明已执行通过。fixture 在没有 Tokio runtime 时创建 ApiState，随后进入 Tokio 执行 HTTP，避免启动真实 ffprobe worker；Catalog/Indexer 为离线 fake，STRM 不访问远程源。媒体详情位于 `file_details`；缓存需有有效 VideoTrack，不能用空 Tracks 的读取 miss 假装验证清理。
+`crates/api/tests/library_delete_reimport.rs`（合并于 `api_suite_2`）的公开 DELETE/status/创建/scan 路由用例包含 TV 两 User、电影整片、不同 NFO 别名不串进度、缓存删除和独立 Library 同 Media 保留等断言；此处列覆盖设计，不声明已执行通过。fixture 在没有 Tokio runtime 时创建 ApiState，随后进入 Tokio 执行 HTTP，避免启动真实 ffprobe worker；Catalog/Indexer 为离线 fake，STRM 不访问远程源。媒体详情位于 `file_details`；缓存需有有效 VideoTrack，不能用空 Tracks 的读取 miss 假装验证清理。
 
 这个 API 测试不是浏览器 E2E，不替代 LIB-07–11。新 ledger 没有复制缓存不等于新 probe 已成功；重启/取消竞态、无 ID 歧义、成员权限、Subscribe 失效和实际播放分别需要证据。只有实际命令退出码和 UI 证据齐全后才能标记 Pass。
 
@@ -169,8 +169,8 @@ VidHub 用例通过已安装的 VidHub app 连接隔离实例执行。第一次�
 | SET-07 | P0 | 新增/编辑/停用 Site；填写 fake 凭据和 Indexer 分类；执行连接检查、登录/Check-in 和搜索；查看一 Site 错误时另一 Site 返回的结果。 | 凭据不会在界面泄漏；连接状态清晰；Check-in 不生成 Torrent；搜索使用对应 Indexer 且支持单 Site 降级。 |
 | SET-08 | P0 | 分别配置 qBittorrent 和 Transmission fake Downloader；测试连接、路径映射、默认保存位置；切换启用项。 | 状态和路径映射正确；凭据隐藏；断连/路径不可达显示可读错误；不可用 Downloader 不接收新 Torrent。 |
 | SET-09 | P1 | 打开系统日志；按等级、时间和关键字过滤；等待 fake Job 写入新记录；查看错误上下文。 | 新日志可见且顺序合理；过滤组合生效；错误含关联 Job/Site/Downloader 信息；高频刷新不会阻断操作。 |
-| SET-10 | P1 | 打开定时 Job、Transfer、缓存页面；查看计划、运行记录和缓存项；对一个测试项手动运行、刷新或清理。 | 页面状态与定义/执行记录分开；操作有确认和结果；清理只影响目标测试项；记录可追踪。 |
-| SET-11 | P1 | 用管理员和成员分别打开 collections、activity、tasks、transfers、jobs、cache、settings 深层路由及其操作入口。 | 菜单显隐、路由守卫和后端授权一致；没有“只隐藏按钮但 API 仍允许”的越权。 |
+| SET-10 | P1 | 打开活动页定时任务视图（`/activity?view=scheduled`，含 `/jobs` 兼容跳转）、`/transfers`、`/cache` 页面；查看计划、运行记录和缓存项；对一个测试项手动运行、刷新或清理。 | 页面状态与定义/执行记录分开；操作有确认和结果；清理只影响目标测试项；记录可追踪。 |
+| SET-11 | P1 | 用管理员和成员分别打开 `/collections`、`/activity`（含 `/tasks`、`/jobs` 跳转）、`/transfers`、`/cache`、`/settings` 深层路由及其操作入口。 | 菜单显隐、路由守卫和后端授权一致；没有“只隐藏按钮但 API 仍允许”的越权。 |
 | SET-12 | P0 | 打开「媒体信息探测」分区，检查默认值；使用隔离本地 fixture 修改媒体信息并发、远程并发与间隔，保存、刷新、重启；运行中调低并发。 | 默认 1/1/500ms，两个并发范围 1–8，间隔 0–60000ms；非法值不能保存。保存即对后续读取生效，活动任务不被中断且新任务不超过调低后的上限；重启保留配置，普通成员不能修改。 |
 
 ### Web Playback
@@ -208,18 +208,17 @@ VidHub 用例通过已安装的 VidHub app 连接隔离实例执行。第一次�
 
 以下当前 Web 路由均应至少由一个用例进入或直接打开：
 
-- /login、/health、未知路由：AUTH-01、ROUTE-01
-- 首页、/activity、/my：HOME-01、ACT-01、MY-01/02
-- /search、/discover/:type、发现合集/人物与榜单路由：SEARCH-01/02、DISC-01/02
-- /media/:type/:id、/media/douban/:id：MEDIA-01/02/03
-- /subscriptions、/subscriptions/:id：SUB-01 至 SUB-05
-- /tasks：JOB-01/02
-- /library、/library/:id、/library/:id/item/:mediaItemId：LIB-01 至 LIB-05、PLAY-01 至 PLAY-05
-- /library/manage、/library/customize、/library/favorites：LIB-04/05/06、DUP-01
-- /collections、/collections/:id：DISC-02、SET-11
-- /transfers、/jobs、/cache：TRF-01/02、SET-10
-- /settings 与 /settings/:section：SET-01 至 SET-11
-- /play/:mediaItemId/:unit：PLAY-01 至 PLAY-06
+- `/login`、`/health`、未知路由：AUTH-01、ROUTE-01
+- `/`（跳转 `/library`）、`/activity`（含 `/tasks`、`/jobs` 重定向与 `view=all|active|attention|scheduled|history`）、`/my`：HOME-01、ACT-01、JOB-01/02、MY-01/02
+- `/search`、`/discover/:type`、`/discover/:type/collections/:provider/:collectionId`、`/discover/people/:id`、`/discover/movie/high-score`、`/discover/movie/top250`：SEARCH-01/02、DISC-01/02
+- `/media/:type/:id`、`/media/douban/:id`：MEDIA-01/02/03
+- `/subscriptions`、`/subscriptions/:id`：SUB-01 至 SUB-05
+- `/library`、`/library/:id`、`/library/:id/item/:mediaItemId`：LIB-01 至 LIB-05、PLAY-01 至 PLAY-05
+- `/library/manage`、`/library/customize`、`/library/favorites`：LIB-04/05/06、DUP-01
+- `/collections`、`/collections/:id`：DISC-02、SET-11
+- `/transfers`、`/cache`：TRF-01/02、SET-10/11
+- `/settings` 与 `/settings/:section`：HOME-02、FILTER-01、SET-01 至 SET-12
+- `/play/:mediaItemId/:unit?`：PLAY-01 至 PLAY-07
 - VidHub Jellyfin-compatible routes：VH-01 至 VH-10
 
 ## 结果记录

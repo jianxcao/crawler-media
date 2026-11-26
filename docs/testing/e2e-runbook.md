@@ -70,9 +70,9 @@ crawler-media/
 
 ## 页面与 VidHub
 
-浏览器操作遵循可用浏览器工具的说明。`mkurls.py`、`pages.mjs`、`net2.mjs` 可辅助建立页面清单、采集和网络诊断；使用前核对脚本与当前浏览器工具 API，不能因脚本退出成功就省略真实页面检查。
+浏览器操作遵循可用浏览器工具的说明。`mkurls.py` 可辅助建立待检查页面清单；使用前核对脚本与当前实例参数，不能因脚本退出成功就省略真实页面检查。
 
-页面覆盖首页、Library 列表/详情、Movie/Series/Season/Episode、搜索、分类、合集、发现、Subscribe、Transfer、Job、缓存、活动和设置。分别在空闲、probe、Scan/Transfer 和 Scrape 实际运行窗口执行，记录可操作内容与图片就绪时间、p50/p95/max、白屏/错误卡、挂起请求和断图。未观察到目标任务正在运行时，该样本不能代表对应负载阶段。
+页面覆盖 Library 列表/详情（根路径 `/` 重定向至 `/library`）、Movie/Series/Season/Episode、搜索、分类、合集、发现、Subscribe、Transfer、活动与任务中心（含定时任务 `/activity?view=scheduled`）、缓存和设置。分别在空闲、probe、Scan/Transfer 和 Scrape 实际运行窗口执行，记录可操作内容与图片就绪时间、p50/p95/max、白屏/错误卡、挂起请求和断图。未观察到目标任务正在运行时，该样本不能代表对应负载阶段。
 
 首入、离开后重入、刷新、窄屏和滚动触发的图片都检查。图片必须实际解码且尺寸正确；200、存在 URL 或缓存文件不能代替图片验证。API 集合性能不包含浏览器渲染与图片连接排队；页面慢而后端快时分别观察 queueing、stalled、TTFB 和正文，不从单一总耗时猜根因。
 

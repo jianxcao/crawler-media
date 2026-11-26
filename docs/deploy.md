@@ -21,7 +21,7 @@ cargo run -p api --bin crawler-media -- serve
 
 # 2. 前端（开发模式，浏览器同源请求由 Vite 代理到后端）
 cd web
-pnpm dev   # 监听 127.0.0.1:3334；可用 VITE_BACKEND_TARGET 指定后端
+pnpm dev   # 监听 127.0.0.1:3334；可用 VITE_BACKEND_TARGET 指定后端，局域网/mDNS 域名通过 CM_DEV_ALLOWED_HOSTS 放行
 
 # 3. 在仓库根目录另开终端：生产构建 + 单端口烟测
 pnpm --dir web build             # 产出 web/dist/
@@ -47,7 +47,7 @@ docker compose up --build
 
 回退规则：登录与签到只在**导航之前**失败（端点不可达、排队超时、target/WebSocket 建立失败、cookie 注入失败）时回退 HTTP 并 warn；导航之后失败直接报错，不会再发一次 HTTP 签到。回退不等于成功。浏览器全局并发默认 3，同一可注册域按公共后缀表串行。每个会话创建独立 BrowserContext，结束时 dispose；不发送 cookie 删除/清空命令，也不修改第三方浏览器的默认上下文。Site cookie 以当前 URL 经 `Network.setCookies` 做 host-only 注入，并经 `Network.getCookies{urls}` 定向回读；当前 Obscura 的回读另限制 path=`/`。不支持 BrowserContext 的端点在导航前失败并回退 HTTP。公共后缀 cookie 拒收能力缺少实测证据，不能宣称已验证。浏览器会话不使用 Site 代理，`maintenance_via = browser` 与 Site 代理在保存时互斥。实现见 `crates/indexer/src/cdp_page.rs`，验证方法见 [ADR-0007](adr/0007-cdp-browser-opt-in.md)。
 
-**数据库启动边界**：Store 初始化空文件并重开匹配五文件生产定义的数据库。启动在写入前只读核对文件身份与生产 DDL 的表/索引/视图定义（含约束），不自动修复不同定义。`library.db` 为 `application_id=1129139249`、`user_version=7`，其余身份见[数据库字典](database/README.md)。v7 的 Library 语言默认继承实例配置，v6 目录不匹配当前定义；保留原目录及一致备份，使用独立空目录验收，不自动迁移。首次评估使用独立空数据目录；已有目录不被启动过程重置。新 Site 默认 `maintenance_via = http`，CDP 默认关闭；Profile `render` 不控制搜索。依据：`crates/store/src/open.rs`、`schema/layout.rs`、`schema/definitions.rs`。
+**数据库启动边界**：Store 初始化空文件并重开匹配五文件生产定义的数据库。启动在写入前只读核对文件身份与生产 DDL 的表/索引/视图定义（含约束），不自动修复不同定义。`library.db` 为 `application_id=1129139249`、`user_version=8`，其余身份见[数据库字典](database/README.md)。v7 及更早目录不匹配当前定义；保留原目录及一致备份，使用独立空目录验收，不自动迁移。首次评估使用独立空数据目录；已有目录不被启动过程重置。新 Site 默认 `maintenance_via = http`，CDP 默认关闭；Profile `render` 不控制搜索。依据：`crates/store/src/open.rs`、`schema/layout.rs`、`schema/definitions.rs`。
 
 验证环境使用独立数据目录。在仓库根目录指定一个尚未用于实例的路径启动，例如：
 
@@ -76,7 +76,7 @@ CRAWLER_MEDIA_DATA=/absolute/path/to/new-data cargo run -p api --bin crawler-med
 
 ## 下载器
 
-qBittorrent / Transmission 通过 `/api/v1/downloaders` 配置（持久化到 SQLite）；进程也接受 `CRAWLER_MEDIA_QB_URL/USER/PASS` 环境变量覆盖。`docker-compose.yml` 只启动 crawler-media；qBittorrent / Transmission 需单独部署，文件中保留了可选 qBittorrent 配置示例。
+qBittorrent / Transmission 通过 `/api/v1/downloaders` 配置（持久化到 SQLite）；进程也接受 `CRAWLER_MEDIA_QB_URL/USER/PASS/API_KEY` 环境变量覆盖（`QB_URL + QB_API_KEY` 优先于账号密码及数据库记录）。`docker-compose.yml` 只启动 crawler-media；qBittorrent / Transmission 需单独部署，文件中保留了可选 qBittorrent 配置示例。部署配置与启动脚本语法可用 `bash scripts/check-deployment.sh` 离线静态核验。
 
 下载器可停用（`enabled = false`）：停用后不再被自动投递选中，手动提交仍可用。
 
@@ -87,36 +87,41 @@ qBittorrent / Transmission 通过 `/api/v1/downloaders` 配置（持久化到 SQ
 | 变量 | 默认 | 说明 |
 |---|---|---|
 | `CRAWLER_MEDIA_DATA` | `data` | 数据目录（SQLite / 缓存 / 图片 / 日志） |
-| `CRAWLER_MEDIA_TOKEN` | 必填 | 实例访问令牌（用于 CLI 与受信服务调用） |
-| `CRAWLER_MEDIA_ADMIN_PASSWORD` | 首次必填 | 管理员初始登录口令（不可与 TOKEN 相同，Argon2id 加盐哈希存储） |
+| `CRAWLER_MEDIA_TOKEN` | 必填 | 实例访问令牌（用于 CLI 与受信服务调用；CLI 子命令直接读取该环境变量，不支持 `_FILE`） |
+| `CRAWLER_MEDIA_ADMIN_PASSWORD` | 首次必填 | 管理员初始登录口令（不可与 TOKEN 相同，Argon2id 加盐哈希存储，支持 `_FILE`） |
 | `CRAWLER_MEDIA_LISTEN` | `127.0.0.1:18765` | 监听地址 |
+| `CRAWLER_MEDIA_URL` | `http://127.0.0.1:18765` | CLI 子命令访问本实例的基础 URL |
 | `CRAWLER_MEDIA_UI` | 空 | 前端静态产物目录 |
-| `CRAWLER_MEDIA_CORS_ORIGINS` | 空 | CORS 白名单（逗号分隔） |
+| `CRAWLER_MEDIA_CORS_ORIGINS` | `http://127.0.0.1:3334,http://localhost:3334` | CORS 白名单（逗号分隔） |
 | `CRAWLER_MEDIA_BROWSER` | 关 | 启动期 Browser 开关默认值（`1`/`true`/`yes`/`on`），仅在未保存过开关时生效。**只控制开关**：受管浏览器还需预置二进制或将设置项 `obscura.install` 改为 `download`，且至少一个选择浏览器登录/签到的 Site，否则不会启动（设置页显示原因） |
-| `CRAWLER_MEDIA_TMDB_KEY` | 空 | 非空 env／_FILE 固定 TMDB API Key 时，UI PUT 返回409；清除env pin后才可由UI修改 |
-| `CRAWLER_MEDIA_TVDB_KEY` | 空 | TVDB API Key |
-| `CRAWLER_MEDIA_QB_URL` / `_USER` / `_PASS` / `_CATEGORY` | 空 | qBittorrent 覆盖 |
+| `CRAWLER_MEDIA_OBSCURA_ALLOW_PRIVATE_NETWORK` | 关闭 | 允许受管 Obscura 访问局域网/私网地址（仅认 `1` 或 `true`，注意 SSRF 风险） |
+| `CRAWLER_MEDIA_TMDB_KEY` | 空 | 非空 env／`_FILE` 固定 TMDB API Key 时，UI `PUT /settings/metadata` 返回 409 `settings.env_pinned`；留空时 UI 保存即时生效 |
+| `CRAWLER_MEDIA_TVDB_KEY` | 空 | TVDB API Key（支持 `_FILE`；非空时同样锁定 `PUT /settings/metadata` 返回 409，UI 修改后需重启生效） |
+| `CRAWLER_MEDIA_QB_URL` / `_USER` / `_PASS` / `_API_KEY` / `_CATEGORY` | 空 | qBittorrent 覆盖（`_PASS` 与 v5.2+ `_API_KEY` 均支持 `_FILE`） |
 | `CRAWLER_MEDIA_QB_PATH_MAP` | 空 | qB 路径映射 `容器路径=宿主路径,...` |
 | `CRAWLER_MEDIA_TR_PATH_MAP` | 空 | Transmission 路径映射 |
-| `CRAWLER_MEDIA_METADATA_PROXY` | 空 | 元数据代理 URL (如 `socks5://127.0.0.1:1080`) |
-| `CRAWLER_MEDIA_METADATA_PROXY_USER` | 空 | 元数据代理认证用户名 |
-| `CRAWLER_MEDIA_METADATA_PROXY_PASS` | 空 | 元数据代理认证密码 (支持 `_FILE`) |
+| `CRAWLER_MEDIA_METADATA_PROXY` | 空 | 元数据代理 URL（如 `socks5://127.0.0.1:1080`；非空时锁定 `PUT /settings/proxy` 返回 409；未设时可回退通用 `ALL_PROXY` / `HTTP_PROXY` 而不锁定 UI） |
+| `CRAWLER_MEDIA_METADATA_PROXY_USER` | 空 | 元数据代理认证用户名（非空时锁定 `PUT /settings/proxy`） |
+| `CRAWLER_MEDIA_METADATA_PROXY_PASS` | 空 | 元数据代理认证密码（支持 `_FILE`，非空时锁定 `PUT /settings/proxy`） |
 | `CRAWLER_MEDIA_SLOW_REQUEST_MS` | `1000` | 慢请求日志阈值（毫秒），0 禁用 |
-| `CRAWLER_MEDIA_FFMPEG_LOG_LEVEL` | `warning` | ffmpeg 日志等级：error / warning / info / verbose / debug |
+| `CRAWLER_MEDIA_FFMPEG_LOG_LEVEL` | `info` | Chromaprint 声纹采集 ffmpeg 日志等级：`info` / `verbose` / `debug`（其他值回退 `info`） |
 | `CRAWLER_MEDIA_LEASE_HEARTBEAT_MS` | `20000` | 实例租约心跳间隔（毫秒） |
 | `CRAWLER_MEDIA_LEASE_TTL_MS` | `60000` | 实例租约失效窗口（正整数毫秒） |
 | `CRAWLER_MEDIA_LEASE_RETRY_MS` | TTL 的一半 | 只读实例重试获取租约的间隔（毫秒） |
 | `CRAWLER_MEDIA_ALLOW_MULTI_INSTANCE` | 关闭 | 显式绕过单实例租约，仅用于有意配置的隔离环境 |
+| `RUST_LOG` | `info` 级别默认过滤 | Rust tracing 日志过滤指令 |
 
 ### 密钥文件模式
 
-保密变量都支持 `_FILE` 变体，值为存放密钥的文件路径；直接变量优先于文件。
+服务端保密变量支持 `_FILE` 变体，值为存放密钥的文件路径；直接变量优先于文件。
 用于 Docker Swarm / Kubernetes Secret 卷，避免密钥出现在 `docker inspect`
 或 `/proc/<pid>/environ`：
 
 ```bash
 CRAWLER_MEDIA_TOKEN_FILE=/run/secrets/cm_token
+CRAWLER_MEDIA_ADMIN_PASSWORD_FILE=/run/secrets/cm_admin_password
 CRAWLER_MEDIA_QB_PASS_FILE=/run/secrets/qb_pass
+CRAWLER_MEDIA_QB_API_KEY_FILE=/run/secrets/qb_api_key
 CRAWLER_MEDIA_TMDB_KEY_FILE=/run/secrets/tmdb_key
 CRAWLER_MEDIA_TVDB_KEY_FILE=/run/secrets/tvdb_key
 CRAWLER_MEDIA_METADATA_PROXY_PASS_FILE=/run/secrets/proxy_pass

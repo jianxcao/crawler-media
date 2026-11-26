@@ -60,13 +60,12 @@ CREATE TABLE users(id TEXT PRIMARY KEY NOT NULL,login TEXT NOT NULL UNIQUE,enabl
 用户删除通过 `DELETE /api/v1/users/{id}` 发起，采用分阶段幂等与故障可续模型：
 1. **202 异步合同**：删除请求立即返回 `202 Accepted` 与 `operation_id`，不使用 200 掩盖尚未完成的跨库清理。
 2. **凭据立即失效与阶段持久化**：
-   - 首先在 `settings` 持久化操作状态：键为 `user_removal.<id>`，版本为 `version: 1`，包含 `operation_id`、`phase`（`disabling` → `cleaning` → `finalizing`）、`cursor`、`error` 与 `updated_at`。
-   - 立即将用户设置为禁用（`enabled = 0`）并物理撤销 `user_tokens` 中该用户的全部会话 token。在整个删除执行与可能的故障恢复期间，被删除用户的 token 访问必须保证立即 401（Unauthorized）。
+   - 在单个 `app.db` `IMMEDIATE` 事务内将用户设为禁用（`enabled = 0`）、物理撤销 `user_tokens` 中该用户的全部会话 token（级联清除 `playback_device_credentials`），并在 `settings` 持久化操作状态：键为 `user_removal.<id>`，`version: 1`，包含 `operation_id`、`user_id`、`phase`（直接进入 `cleaning` → `finalizing`；`disabling` 仅保留作兼容恢复分支）、`cursor`、`error` 与 `updated_at`。在整个删除执行与故障恢复期间，被删除用户的 token 访问立即返回 401（Unauthorized）。
 3. **资源所有权与清理边界**：
    - 保留现行产品行为：被删除用户的 Subscribe 所有权转移至系统管理员（`admin`），私有 Collection 亦转移至管理员，不静默删除用户创建的长期订阅与合集。
-   - 原始播放记录（`playback_units`、`playback_sessions`、`playback_session_ids`、`playback_logs`、`playback_metrics`）及稀疏用户摘要（`user_library_items`）被一并清理，不产生孤儿稀疏摘要。
-   - 跨库清理完成后，删除 `users` 记录；先在 `user_removal.result.<operation_id>` 保存终态结果、在 `user_removal.done.<user_id>` 保存操作 id，再清除 `user_removal.<id>` 在途项。重启可幂等重做 `finalizing`，终态回执继续可查。
-4. **故障恢复**：开机启动时扫描 `user_removal.` 前缀的在途操作，沿用 lease 模式继续完成未决阶段。
+   - 原始播放记录（`playback_units`、`playback_sessions`、`playback_session_ids`、`playback_logs`、`playback_metrics`）及稀疏用户摘要（`user_library_items` 及其级联 `user_library_continue_units`）被一并清理，并在 `finalizing` 阶段从各 `libraries.member_ids_json` 中移除该用户 ID。
+   - 跨库清理完成后，删除 `users` 记录；先在 `user_removal.result.<operation_id>`（`phase = "succeeded"`，保留 7 天后修剪）保存终态结果、在 `user_removal.done.<user_id>` 保存操作 id，再清除 `user_removal.<id>` 在途项。重启可幂等重做 `finalizing`，终态回执继续可查。
+4. **故障恢复**：进程启动与 `job_loop` 扫描 `user_removal.` 前缀的在途操作，直接驱动继续完成未决阶段。
 
 ## sites
 
@@ -121,7 +120,7 @@ CREATE TABLE filters(id TEXT PRIMARY KEY NOT NULL,name TEXT NOT NULL,atoms_json 
 
 ## user_tokens
 
-认证 token 到 User 的映射及签发时间。
+认证 token 到 User 的映射及签发时间。普通登录/Jellyfin 会话 token 有效期为 30 天（`SESSION_TTL_SECS`）；当前管理员 CLI Bearer token（记录于 `settings['auth.cli_token.current']`）不受 30 天过期限制，替换时旧值立即移除。
 
 
 | 字段 | SQLite 类型 | 主键顺位 | 显式 NOT NULL | DEFAULT | 含义 |
@@ -144,7 +143,7 @@ CREATE INDEX user_tokens_user_idx ON user_tokens(user_id);
 
 ## playback_device_credentials
 
-将 User/设备与已签发 token 关联，用于设备凭证撤销。不是 Playback 事实表。一个设备可关联多个 token；DDL 不保证 token 在该表全局唯一。token 外键级联响应凭据撤销。
+将 User/设备与已签发 token 关联，用于设备凭证撤销。不是 Playback 事实表。一个设备可关联多个 token；DDL 不保证 token 在该表全局唯一。管理员 CLI token 与占位设备标识（空串、`jellyfin-client`、`unidentified:*`）不写入本表；设备撤销会删除关联 `user_tokens` 与本表行，并将 `{user_id}:{device_id}` 记录到 `settings['playback.revoked_devices']`。token 外键级联响应凭据撤销。
 
 
 | 字段 | SQLite 类型 | 主键顺位 | 显式 NOT NULL | DEFAULT | 含义 |
@@ -167,7 +166,7 @@ CREATE INDEX playback_credentials_token ON playback_device_credentials(token);
 
 ## settings
 
-实例级 key/value 配置，也承载特定维护游标命名空间；不能把所有值当作可弃缓存。
+实例级 key/value 配置，也承载凭据扩展、用户偏好与维护游标命名空间（如 `auth.cli_token.current`、`downloader.<id>.{api_key,verified,last_error}`、`playback.revoked_devices`、`user.<user_id>.up_next.dismissed`、`user_removal.*`、`probe.settings`、`probe.remote_reads` 等）；不能把所有值当作可弃缓存。
 
 Transfer/Watch 与原始 Scrape 配置以 Library 的 `transfer_settings` / `scrape_settings` 单例为唯一权威；app settings 不接受 `transfer.settings`、`metadata.scrape` 或 `metadata.language`，默认语言亦由 Library 查询配置管理。
 
@@ -204,7 +203,7 @@ CREATE TABLE search_snapshots(id TEXT PRIMARY KEY NOT NULL,vertical TEXT NOT NUL
 
 ## downloaders
 
-Downloader 连接、启用开关、默认选择和路径映射配置。
+Downloader 连接、启用开关、默认选择和路径映射配置。qBittorrent v5.2+ 的 API Key 以及连接校验状态存放在同库 `settings` 表（`downloader.<id>.api_key`、`downloader.<id>.verified`、`downloader.<id>.last_error`），在新建、原子修改（`Store::mutate_downloader`）与删除的同一 `IMMEDIATE` 事务中同步维护或清理。
 
 
 | 字段 | SQLite 类型 | 主键顺位 | 显式 NOT NULL | DEFAULT | 含义 |

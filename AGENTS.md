@@ -10,7 +10,7 @@ crawler-media：自托管媒体抓取/订阅/入库/播放服务。Rust workspac
 | crate | 职责 |
 |---|---|
 | `domain` | 纯类型，无 IO |
-| `store` | SQLite system of record（ADR-0008），依赖 `domain`、`downloader`、`library`、`media` |
+| `store` | SQLite system of record（ADR-0008），依赖 `domain`、`downloader`、`library`、`marker`、`media` |
 | `indexer` | 站点索引/抓取（ADR-0006；CDP 浏览器 opt-in，ADR-0007） |
 | `media` | TMDB 等 catalog 客户端与缓存 |
 | `downloader` | qBittorrent 等下载器适配 |
@@ -23,10 +23,10 @@ crawler-media：自托管媒体抓取/订阅/入库/播放服务。Rust workspac
 | `cover-generator` | 库封面生成 |
 | `api` | axum HTTP 服务，组装以上所有 crate |
 
-依赖方向以各 crate 的 `Cargo.toml` 为准；禁止其他 crate 依赖 `api`。`domain` 是无 IO 的基础类型层；`store` 使用 `domain`、`downloader`、`library`、`media`，`library` 使用 `domain`、`release`、`marker`，`subscribe` 组装 `domain`、`downloader`、`filter`、`hooks`、`library`、`release`；不能把现有依赖图简化为只依赖 `domain`/`store`。
+依赖方向以各 crate 的 `Cargo.toml` 为准；禁止其他 crate 依赖 `api`。`domain` 是无 IO 的基础类型层；`store` 使用 `domain`、`downloader`、`library`、`marker`、`media`，`library` 使用 `domain`、`release`、`marker`，`subscribe` 组装 `domain`、`downloader`、`filter`、`hooks`、`library`、`release`；不能把现有依赖图简化为只依赖 `domain`/`store`。
 
 ### 前端（`web/`）
-Vite + React + TS，pnpm。`web/src/main.tsx` 入口，`web/app/` 路由页面，`web/components/` 组件，`web/lib/` 逻辑，`web/lib/api/*` API 客户端，`web/test/` 测试（`node --test`）。dev server :3334，`vite.config.ts` 把 `/api`、`/posters` 代理到后端 :18765 —— 前端始终同源调用 `/api/v1`，不要写死后端地址。
+Vite + React + TS，pnpm。`web/src/main.tsx` 入口，`web/app/` 路由页面，`web/components/` 组件，`web/lib/` 逻辑，`web/lib/api/*` API 客户端，`web/test/` 测试（`node --test`）。dev server :3334，`vite.config.ts` 把 `/api` 代理到后端 :18765（额外启用 Host 校验，局域网域名经 `CM_DEV_ALLOWED_HOSTS` 放行）—— 前端始终同源调用 `/api/v1`（含公开图片路径），不要写死后端地址。
 
 ### 关键位置
 - **每库单写者**：`Store` 共享 `Arc<Writers>`（`crates/store/src/writers.rs`），app/subscribe/library/cache 每库唯一 writer 连接和独立 Mutex。API 写入口是 `store_write`（`crates/api/src/http/store_wait.rs`，`STORE_WRITE_WAIT = 1s`），在实际目标库 writer 获取后复查写入准入。实际数据库 writer 不允许嵌套（debug/release 均检查）；跨库不承诺原子提交。Jobs reservation 是有界准入门，不占实际 writer。
@@ -36,7 +36,7 @@ Vite + React + TS，pnpm。`web/src/main.tsx` 入口，`web/app/` 路由页面�
 - **图片代理**：`crates/api/src/http/image_proxy.rs`（+`runtime.rs`，`IMAGE_CONCURRENCY = 8`）。
 - **任务 SSE 流**：`crates/api/src/http/jobs.rs`（`Sse::new(ReceiverStream)`）。
 - **路由表**：`crates/api/src/http/mod.rs`（`/api/v1`）+ `http/routes/{mod,member,admin}.rs`。API 约定：`docs/api-contracts/self.md`。
-- ADR：`docs/adr/`；E2E：`docs/testing/e2e-runbook.md`、`docs/testing/system-regression-cases.md`。
+- 文档总索引：[docs/README.md](docs/README.md)；ADR：`docs/adr/`；E2E：`docs/testing/e2e-runbook.md`、`docs/testing/system-regression-cases.md`。
 
 ## 硬性规则
 
@@ -49,7 +49,7 @@ Vite + React + TS，pnpm。`web/src/main.tsx` 入口，`web/app/` 路由页面�
 4. **探测默认值与配置**：媒体信息 worker 默认 1、远程读取并发默认 1、远程读取间隔默认 500ms。管理员可在界面配置；两个并发均为 1~8，间隔为 0~60000ms。保存即对后续任务生效，降低并发不打断活动读取，也不能让新任务超过新上限。默认值不能被无关改动提高。
 5. **删除 Library（ADR-0012）**：先隐藏 → 立即取消该库所有任务 → 删除 → 清理孤儿 Media（含 favorites / playback 进度）。某 Media 最后一个文件被删时，其 favorites / 进度一并清除。
 6. **Git**：只在当前分支提交；绝不 push `main`，绝不 force push，未经询问不开 PR。不要提交 `docs/test-reports/`、`.e2e/`，不要夹带无关改动。
-7. **静态图片端点不鉴权**：`/posters/*`、`/fanart/*`、`/stills/*`、`/chapters/*`、`/libraries/{id}/cover` 必须留在 public router（`<img>` 不带 `Authorization`）。需要用户上下文时注入 `Option<axum::Extension<Option<domain::UserId>>>`。Jellyfin 视频流按 Jellyfin 协议鉴权。
+7. **静态图片端点不鉴权**：`/api/v1` 下的 `/posters/*`、`/fanart/*`、`/stills/*`、`/chapters/*`、`/libraries/{id}/cover` 必须留在 `public_routes`（`<img>` 不带 `Authorization`）。需要用户上下文时注入 `Option<axum::Extension<Option<domain::UserId>>>`。Jellyfin 视频流按 Jellyfin 协议鉴权。
 8. **Issue**：除非用户明确要求，不创建/评论/关闭 GitHub issue。只做用户当前请求，不扩散。
 
 ## 资源规则（Mac mini，磁盘/CPU 紧张）
@@ -71,7 +71,7 @@ python3 scripts/with-build-lock.py cargo nextest run --build-jobs 4 --test-threa
 python3 scripts/with-build-lock.py cargo nextest run --build-jobs 4 --test-threads 4 -p api -E 'test(<name>)' # 定向
 python3 scripts/with-build-lock.py --exclusive cargo nextest run --build-jobs 8 --test-threads 8 --workspace --no-fail-fast # 收尾全量，仅一次（约 8.5m；Agent 伪终端加 --show-progress=none --status-level=slow --final-status-level=fail）
 python3 scripts/with-build-lock.py cargo test -j4 -p <crate> -- --test-threads=4                     # cargo test 兼容命令
-python3 scripts/with-build-lock.py cargo test -j4 -p api --test <file> <name> -- --test-threads=4     # 定向 cargo test（如 --test store_suite_4 perf_baseline::）
+python3 scripts/with-build-lock.py cargo test -j4 -p <crate> --test <suite> <name> -- --test-threads=4 # 定向 cargo test（如 -p store --test store_suite_4 perf_baseline::）
 
 # Web（仓库根目录）
 python3 scripts/with-build-lock.py pnpm --dir web lint

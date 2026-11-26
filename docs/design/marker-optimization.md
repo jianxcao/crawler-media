@@ -52,11 +52,11 @@ AAC-LC、44100/48000Hz、双声道、1024 native samples/frame、已验证 ASC �
 
 TheIntroDB 开关授权使用云端时间戳，声纹开关独立；禁用声纹不影响云端查询，也不会为了采用云端结果读取音频。`source=theintrodb` 表示云端采纳，不代表本文件声纹 `verified`。已有正式标记优先。
 
-按官方 [v4 OpenAPI](https://theintrodb.org/openapi.yaml) 使用 `GET /v4/media`，传 TMDB id、成对的 season/episode、已知本文件 `duration_ms`、`details=true`、`merge_unknown=false`。API key 可选；配置后用 `Authorization: Bearer`。匿名只返回已接受的提交；带 key 可能包含该用户自己的待审提交并赋予 10 倍权重。响应 intro/credits 为毫秒数组；Intro 的 null start 表示零，Credits 的 null end 以已知文件时长补齐，零长表示无该段。当前单范围标记无法无损表达一个 kind 的多段，因此该 kind 不采纳，不把多个区间连成一个跳过范围。
+按官方 [v4 OpenAPI](https://theintrodb.org/openapi.yaml) 使用 `GET /v4/media`，传 TMDB id、成对的 season/episode、已知本文件正整数 `duration_ms`、`details=true`、`merge_unknown=false`。文件时长未知或非正时在准入阶段直接跳过云端查询，既不消耗上游配额，也保持已缓存物理章节走纯只读快路径而不竞争 `library.db` writer。API key 可选；配置后用 `Authorization: Bearer`。匿名只返回已接受的提交；带 key 可能包含该用户自己的待审提交并赋予 10 倍权重。响应 intro/credits 为毫秒数组；Intro 的 null start 表示零，Credits 的 null end 以已知文件时长补齐，零长表示无该段。当前单范围标记无法无损表达一个 kind 的多段，因此该 kind 不采纳，不把多个区间连成一个跳过范围。
 
-采纳须满足：单文件单集、当前文件时长为正、响应 type/season/episode 一致、群组时长已知且与文件时长差不超过官方 5 分钟匹配窗口、每个区间非负/递增且不超出文件结束、Intro 与 Outro 不重叠。官方选择器无匹配时会退回最热门 release，因此发送时长并不充分，必须检查 `group_duration_ms`。这些是云端信任条件，不证明两种剪辑的边界完全相同。未知时长、错误坐标、缺少已知 release 时长或范围冲突不能发布。
+采纳须满足：单文件单集、当前文件时长为正、响应 type/season/episode 一致、群组时长已知且与文件时长差不超过官方 5 分钟匹配窗口、每个区间非负/递增且不超出文件结束、Intro 与 Outro 不重叠。官方选择器无匹配时会退回最热门 release，因此发送时长并不充分，必须检查 `group_duration_ms`。这些是云端信任条件，不证明两种剪辑的边界完全相同。错误坐标、缺少已知 release 时长、超出匹配窗口或范围冲突的结果直接丢弃，不保留为候选，也不生成章节截图任务。
 
-发布重用文件版本、来源观察、覆盖与 Library 生命周期屏障；写入前再次检查文件仍绑定查询时的 Media、该 Media 当前的类型与 TMDB ID、文件时长及正式标记，不能覆盖查询期间新发布的人工锁、章节或声纹结果。物理章节空缓存不表示云端已经确认无数据。明确 `no_submissions` 与成功但没有任何范围的响应均作为负结果，以 `(file_id, FileVersion, UnitKey, duration_ms, TMDB ID, client configuration scope)` 为身份写入进程内负缓存，TTL 为 5 分钟、最多 4096 项；配置修订变化会形成不同的配置身份，显式 refresh 会清除该文件的负结果。错误、时长未知及有范围但未通过采纳校验的候选不缓存。播放与章节 API 在后台按需调度查询，不阻塞 PlaybackInfo。`no_submissions` 表示真实 Media/集暂时没有可返回提交；`episode_not_found` 和 `media_not_found` 反映映射问题；其他 HTTP、鉴权、网络和响应失败单独记录，不能宣称标记已完成。云端数据是否存在由第三方提交覆盖决定，接通 API 不能保证每集有结果。
+发布重用文件版本、来源观察、覆盖与 Library 生命周期屏障；写入前再次检查文件仍绑定查询时的 Media、该 Media 当前的类型与 TMDB ID、文件时长及正式标记，不能覆盖查询期间新发布的人工锁、章节或声纹结果。物理章节空缓存不表示云端已经确认无数据。`no_submissions`、成功但无可用单段范围、未通过采纳校验的结果、`episode_not_found`/`media_not_found`/坐标或边界不匹配，均以 `(file_id, FileVersion, UnitKey, duration_ms, TMDB ID, cache_scope)` 写入进程内负缓存（默认 TTL 5 分钟、最多 4096 项），其中 `cache_scope` 绑定 `(base_url, api_key, configuration_revision)`，显式 refresh 会清除该文件的负结果；单条目配额限制（HTTP 429 `SpecificMedia`）按响应 `retry_after_ms`（`60s..=86400s`）写入同一负缓存。全局冷却则绑定独立的 `cooldown_scope`（仅哈希 `(base_url, api_key)`，**不含** `configuration_revision`，使保存无关刮削设置不会清掉生效中的上游冷却，最多 64 个 scope，显式 refresh 同样遵守）：HTTP 429 按 `DailyQuota`（`code=usage_limit_exceeded` 或 `x-usagelimit-remaining=0` 优先，`60s..=86400s`）→ `SpecificMedia` → `Burst`（当 `remaining > 0` 时忽略说明性 `x-usagelimit-reset`，仅解析 `Retry-After` 秒数/HTTP-date 或 `x-ratelimit-reset`，`1s..=900s`）分级；HTTP 401/403 触发 1 小时全局冷却，5xx 与传输错误触发 60 秒全局冷却。播放与章节 API 在后台按需调度查询，不阻塞 PlaybackInfo。云端数据是否存在由第三方提交覆盖决定，接通 API 不能保证每集有结果。
 
 ## Intro 与 Outro 独立发布
 
@@ -120,7 +120,7 @@ generation 包含 file、source version、规范化 targets 和 renderer 身份�
 
 显式生成/恢复发现 published 图片缺失时，只按预期 attempt、generation 和精确 artifact 将仍匹配的目标改 pending，保留其他图片。清理先在 SQL 中退休精确身份，再锁外 unlink；不能按 generation/index 通配删除仍发布或待恢复收养的图片。
 
-章节、指纹、TheIntroDB 候选及人工边界修改共用确保当前截图任务存在的入口。标记/章节与截图义务在 Library 事务中共同登记，启动恢复依赖持久义务，不依赖内存 enqueue 永久成功。没有有效 targets 时返回 empty。
+章节、指纹、TheIntroDB 已采纳标记及人工边界修改共用确保当前截图任务存在的入口。标记/章节与截图义务在 Library 事务中共同登记，启动恢复依赖持久义务，不依赖内存 enqueue 永久成功。没有有效 targets 时返回 empty。
 
 生成 API 返回真实 task_id、generation、state 和 counts；有权限的状态 API 用于进度查看。前端仅在 queued/running 时每秒轮询，终态重取章节，切集/版本或卸载停止轮询，partial/failed 提供缺失数和重试。静态 `/chapters/*` 保持公开访问，URL 必须匹配当前 published artifact；已开始的不可变文件响应不承诺被后续 SQL 变更即时撤回。
 

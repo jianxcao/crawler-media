@@ -36,6 +36,14 @@
 
 暂停覆盖媒体信息、声纹、图片和章节的后续远程读取。已获准的读取可完成，等待读取在恢复后继续，并沿用当前并发与间隔。重启仍应用已保存的状态。这个开关只控制后台读取。
 
+## 运行期探测队列控制
+
+管理员另可通过 `/api/v1/probe/*` 查看与控制进程内后台探测队列（不修改持久化的 `probe.remote_reads` 设置）：
+
+- `GET /api/v1/probe/status`：返回当前后台探测队列的 `paused`、`remote_reads_paused`、排队/运行统计与活动单元摘要。
+- `POST /api/v1/probe/pause` / `POST /api/v1/probe/resume`：暂停或恢复进程内后台探测派发（重启后不保留该内存暂停状态，不同于持久化的 STRM 远程读取暂停）。
+- `POST /api/v1/probe/cancel`：取消待处理或运行中的后台探测任务。
+
 ## 验证
 
 - `crates/api/tests/probe_settings_runtime.rs`：默认读取行为、HTTP 保存/读回/参数错误/权限、重建实例后持久化、媒体信息并发热升降、后加入文件不越过旧等待文件、共享远程并发热修改及启动读取间隔。

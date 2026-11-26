@@ -70,6 +70,8 @@ WAL。进程内通过Queue mutex串行访问 writer 连接，**不是专用单�
 
 `subscribe_search` 将 Torrent 加入 Downloader 后结束；独立的 `transfer` Job 读取已完成文件并发布 Library 文件事实。两个阶段各自持久化状态与结果。
 
+投递候选时严格区分「源确定性拒绝」与「暂时性错误」：仅当 Indexer 解析下载地址或 Downloader 拉取种子明确确认源不可用（HTTP 404/410、API 成功回执但下载地址为空、响应体确定为非种子且非 Cloudflare 质询页面）或下载任务已损坏时，才持久化为 `rejected` 永久排除并在同轮内回退尝试后续候选（每组最多回退 8 次）；网络/DNS/超时、401/403/429/5xx、Cloudflare 质询、截断传输以及 qBittorrent 返回 `Fails.` 均归为暂时错误，仅记入本轮 `add_errors` 供后续轮次继续重试，避免短暂故障永久拉黑可用种子源。
+
 手动关键词搜索是没有 **Subscribe** 的 `subscribe_search` 一次性 Job（payload 有 `query` + `filter_id`）。同一 runner，同一 UI 日志行。
 
 ## 默认（启用）

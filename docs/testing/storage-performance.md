@@ -38,10 +38,10 @@
 
 精确 facets、任意筛选交集、协议精确 total 和深 offset 的固有遍历成本单独报告；不能把简单索引页的边界套成所有查询 O(1)。记录 `VmStep`、`FullscanStep`、`Sort`、SQL 返回/解码行、字节和公开结果。`EXPLAIN QUERY PLAN` 可辅助定位，但不能用 SQL 文本相同代替行为和实际工作量。
 
-已存在的回归入口包括：
+已存在的回归入口包括（`store` 与 `api` 关闭 `autotests`，括号内注明所属合并套件，未注明的为独立 `[[test]]` 二进制）：
 
-- Store：`storage_work_bounds`、`library_read_pool`、`reader_lease_scope`、`read_writer_independence`、`writer_rank_errors`、`writer_diagnostics`、`scan_operations`、`library_integrity_facts`、`library_integrity_media_pages`、`integrity_guard_work`。
-- API：`reads_during_scan`、`writer_isolation`、`library_reads_off_writer`、`probe_backlog_capacity`、`storage_query_scale`、`library_statistics_scale`、`storage_integrity_runtime`、`playback_writer_latency`。
+- Store：`writer_rank_errors`（`store_suite_1`）；`storage_work_bounds`、`library_read_pool`、`reader_lease_scope`、`library_integrity_facts`（`store_suite_2`）；`scan_operations`、`library_integrity_media_pages`（`store_suite_3`）；`read_writer_independence`、`writer_diagnostics`、`integrity_guard_work`（`store_suite_4`）。
+- API：`writer_isolation`、`library_statistics_scale`（`api_suite_1`）；独立二进制 `reads_during_scan`、`library_reads_off_writer`、`probe_backlog_capacity`、`storage_query_scale`、`storage_integrity_runtime`、`playback_writer_latency`。
 - 协议：按 [Jellyfin 合同](../api-contracts/jellyfin.md) 同时跑 media-server 和 API Router，不能只测 DTO 或手工播放事件。
 
 先检查目标源码对应的具体场景，再选择命令；目标名称存在不证明覆盖上述全部矩阵。

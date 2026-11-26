@@ -4,8 +4,8 @@
 #   1. Web 管理员密码: CRAWLER_MEDIA_ADMIN_PASSWORD (或 _FILE 变量)
 #      用于网页登录 (admin 账号)。生产部署请务必设置强密码！
 #   2. CLI Bearer Token: CRAWLER_MEDIA_TOKEN (或 _FILE 变量)
-#      用于命令行工具与自动化脚本认证 (默认 changeme)。
-#   3. 第三方服务凭据: qBittorrent 密码、TMDB Key、网络代理等。
+#      用于命令行工具与受信自动化调用 (必填，无默认值，不可与管理员密码相同)。
+#   3. 第三方服务凭据: qBittorrent 密码/API Key、TMDB/TVDB Key、网络代理等。
 #
 # 快速启动：
 #   CRAWLER_MEDIA_TOKEN=myclitoken CRAWLER_MEDIA_ADMIN_PASSWORD=myadminpassword docker compose up -d --build
@@ -44,22 +44,25 @@ services:
       CRAWLER_MEDIA_UI: /usr/share/crawler-media/ui
       # 浏览器直连时的 CORS 白名单（反向代理同域时可留空）。
       CRAWLER_MEDIA_CORS_ORIGINS: ${CRAWLER_MEDIA_CORS_ORIGINS:-}
-      # 可选：qBittorrent（不配则后端用内存下载器，启动不依赖）。
+      # 可选：qBittorrent 环境变量覆盖（启动本身不依赖下载器在线；也可在 Web 设置中配置）。
       CRAWLER_MEDIA_QB_URL: ${CRAWLER_MEDIA_QB_URL:-}
       CRAWLER_MEDIA_QB_USER: ${CRAWLER_MEDIA_QB_USER:-}
       CRAWLER_MEDIA_QB_PASS: ${CRAWLER_MEDIA_QB_PASS:-}
+      CRAWLER_MEDIA_QB_API_KEY: ${CRAWLER_MEDIA_QB_API_KEY:-}
       CRAWLER_MEDIA_QB_PATH_MAP: ${CRAWLER_MEDIA_QB_PATH_MAP:-/downloads=/downloads}
-      # 可选：TMDB API Key（界面 设置→元数据源 也能填，重启生效）。
+      # 可选：TMDB API Key（非空环境变量会锁定该项，UI 保存返回 409；留空时可在界面 设置→刮削与整理 即时配置生效）。
       CRAWLER_MEDIA_TMDB_KEY: ${CRAWLER_MEDIA_TMDB_KEY:-}
-      # 可选：元数据专属网络代理（界面 设置→元数据源 也能填，支持 http:// 与 socks5://）。
+      # 可选：元数据专属网络代理（非空时同样锁定 UI 修改，支持 http:// 与 socks5://）。
       CRAWLER_MEDIA_METADATA_PROXY: ${CRAWLER_MEDIA_METADATA_PROXY:-}
       # 密钥文件模式（可选，Docker Swarm / K8s Secret 卷场景）：
       # 保密变量都支持 `_FILE` 变体，值为「存放密钥的文件路径」，优先级低于同名直接变量：
       #   CRAWLER_MEDIA_TOKEN_FILE: /run/secrets/cm_token
       #   CRAWLER_MEDIA_ADMIN_PASSWORD_FILE: /run/secrets/cm_admin_password
       #   CRAWLER_MEDIA_QB_PASS_FILE: /run/secrets/qb_pass
+      #   CRAWLER_MEDIA_QB_API_KEY_FILE: /run/secrets/qb_api_key
       #   CRAWLER_MEDIA_TMDB_KEY_FILE: /run/secrets/tmdb_key
       #   CRAWLER_MEDIA_TVDB_KEY_FILE: /run/secrets/tvdb_key
+      #   CRAWLER_MEDIA_METADATA_PROXY_PASS_FILE: /run/secrets/proxy_pass
     volumes:
       - crawler-data:/data
       # 下载目录与 qB 共享（可选；qB 容器同样挂载此路径）。

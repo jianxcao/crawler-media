@@ -130,7 +130,7 @@ TMDB 请求采用有限尝试和共享上游总预算，429 的退避服从截�
 
 图片超时诊断区分读准入、blocking 排队、缓存读取、fill 名额、上游 headers/正文、磁盘预留和发布。504 本身不能证明网关、DNS、TLS 或上游故障。观察者超时和共享 fill 最终结果通过不透明 ID 关联，日志不输出凭据、URL query 或敏感路径。
 
-`/posters/*`、`/fanart/*`、`/stills/*`、`/chapters/*` 和 Library cover 保持 public router，供不携带 Authorization 的图片请求使用。视频流按 Jellyfin 协议鉴权，两种权限合同不能互换。
+`/api/v1` 下的 `/posters/*`、`/fanart/*`、`/stills/*`、`/chapters/*` 和 Library cover 保持 `public_routes`，供不携带 Authorization 的图片请求使用。本地侧车图片（poster/fanart/still）严格限制在所属 Library 的 `root_paths` 边界内并拒绝符号链接，文件缺失返回 404 `poster.missing`，权限或真实磁盘读取故障返回 500 `poster.permission_denied` / `poster.io_error`（带 `Cache-Control: no-store`，不伪装成缓存 404）。视频流按 Jellyfin 协议鉴权，两种权限合同不能互换。
 
 ## 优化证据与持续边界
 

@@ -8,7 +8,8 @@
 - [ADR](<../adr>) —— 仅阅读与你将工作的区域相关的决策
 - [AGENTS.md](<../../AGENTS.md>) —— 工作范围、测试 seam、Rust 体积限制
 - 存储架构：[ADR-0008](../adr/0008-sqlite-system-of-record.md)、[存储性能设计](../design/storage-performance.md)、[数据库字典](../database/README.md)。
-- 标记工作：[片头片尾与章节图像设计](../design/marker-optimization.md)。
+- 探测、身份与标记：[远程媒体探测](../design/remote-media-probing.md)、[元数据身份复核](../design/metadata-identity-review.md)、[片头片尾与章节图像设计](../design/marker-optimization.md)。
+- 协议与 API 契约：[自有 API](../api-contracts/self.md)、[Jellyfin API](../api-contracts/jellyfin.md)、[探测设置](../api-contracts/probe-settings.md)。
 - 验证方法：[存储性能测试](../testing/storage-performance.md)、[系统回归](../testing/system-regression-cases.md)。
 
 若这些文件中有任何不存在，**静默继续**。不要标记其缺失；不要主动建议创建它们。`/domain-modeling` skill（经 `/grill-with-docs` 与 `/improve-codebase-architecture` 触达）在术语或决策实际被解析时才惰性创建它们。
@@ -20,10 +21,14 @@
 ```
 /
 ├── CONTEXT.md
+├── AGENTS.md
 ├── docs/adr/
+├── docs/api-contracts/
+├── docs/database/
 ├── docs/design/
 ├── docs/testing/
-└── crates/
+├── crates/
+└── web/
 ```
 
 ## 使用 glossary 的词汇

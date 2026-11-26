@@ -25,11 +25,11 @@ A normalized candidate from a **Site** search or RSS pull: title, size, seeders,
 _Avoid_: 资源 (too vague), SearchResult (implementation name), magnet (one enclosure form)
 
 **Downloader**:
-An external BitTorrent client the system talks to (qBittorrent or Transmission). The system adds **Torrents** to it and later reads completed files; it does not download bytes itself.
+An external BitTorrent client the system talks to (qBittorrent or Transmission). The system adds **Torrents** to it and later reads completed files; it does not download bytes itself. Only definitive source failures (HTTP 404/410 or non-torrent content) permanently reject an enclosure and fall back to the next candidate; transient network, challenge, or add errors stay retryable on later **Subscribe** rounds.
 _Avoid_: 下载模块 (the code package), client (too generic)
 
 **Library**:
-The authoritative on-disk collection the instance owns: which **Media** we have, at what quality, at which path. **Subscribe**, **Transfer**, **Scrape**, and **Playback** all read this, not the **Downloader** save path. A **Library** has a kind (movie or TV), one or more root paths, and a ledger of files. Ledger quality (resolution, codec, HDR) comes from probing the file at **Transfer** time; the **Release** parsed from a name is fallback only.
+The authoritative on-disk collection the instance owns: which **Media** we have, at what quality, at which path. **Subscribe**, **Transfer**, **Scrape**, and **Playback** all read this, not the **Downloader** save path. A **Library** has a kind (movie, TV, or video), one or more root paths, and a ledger of files. Ledger quality (resolution, codec, HDR) comes from probing the file at **Transfer** time; the **Release** parsed from a name is fallback only.
 _Avoid_: 媒体库路径 (as the concept), collection (MoviePilot uses this for TMDB collections), Jellyfin library (that's a view over this)
 
 **Transfer**:
@@ -37,7 +37,7 @@ Moving completed files from a **Downloader** (or an intake **Watch directory**) 
 _Avoid_: 整理 (too broad; includes **Scrape**), 入库 (the outcome, not the action)
 
 **Naming template**:
-An instance-global relative-path pattern for **Transfer**, one for movie **Media** and one for TV **Media**. Placeholders expand from **Media**, **Release**, and the probed file. Empty values omit empty parentheses. Stored in SQLite; defaults live in `library::default_pattern`.
+An instance-global relative-path pattern for **Transfer**, composed from four persisted segments (`naming_entry_dir`, `naming_movie_file`, `naming_season_dir`, `naming_episode_file`) into movie and TV **Media** patterns. Placeholders expand from **Media**, **Release**, and the probed file. Empty values omit empty `(...)` and `[...]` groups; substituted values strip unsafe path/control characters and reject traversal segments. Stored in SQLite; defaults live in `library::default_pattern`.
 _Avoid_: Jinja, format string (too generic), 重命名规则 (synonym — use **Naming template**)
 
 **Transfer mode**:

@@ -29,4 +29,5 @@ web/tsconfig.tsbuildinfo
 *.db-shm
 docs/test-reports/
 .e2e/
+.superpowers/
 .env.local

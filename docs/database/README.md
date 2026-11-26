@@ -14,12 +14,12 @@
 | 文件 | application_id / user_version | 表数 | 字段数 | 职责 | 可按缓存清空 |
 |---|---|---:|---:|---|---|
 | [app.db](app.md) | 1129139248 / 1 | 9 | 48 | User/凭证、Site、Downloader、Filter、设置、搜索快照、实例锁 | 否 |
-| [library.db](library.md) | 1129139249 / 7 | 66 | 668 | Media/采用元数据、Library/根、文件/覆盖/摘要、Collection、Playback、Transfer/Scrape 配置、持久工作 | 否 |
+| [library.db](library.md) | 1129139249 / 8 | 66 | 686 | Media/采用元数据、Library/根、文件/覆盖/摘要、Collection、Playback、Transfer/Scrape 配置、持久工作 | 否 |
 | [subscribe.db](subscribe.md) | 1129139250 / 2 | 10 | 68 | Subscribe策略、覆盖/搜索事实、在途记录 | 否 |
-| [cache.db](cache.md) | 1129139251 / 1 | 6 | 30 | 六来源原始响应 | 是，受控清理 |
+| [cache.db](cache.md) | 1129139251 / 1 | 6 | 30 | 五个 Metadata source 与 fanart 的原始响应 | 是，受控清理 |
 | [jobs.db](jobs.md) | 1129139252 / 1（Jobs自有预检） | 6 | 39 | Job定义/执行/重试、更新计数、保留游标 | 否 |
 
-合计96张业务表、852字段，含Library的FTS5虚拟表，不计4张影子表、隐藏列及 sqlite_sequence。Store四库137个命名索引、50组FK、142个CHECK、0触发器；Jobs另11个命名索引、0 FK、3个CHECK、6触发器。SQLite自动索引不计入命名索引；跨文件没有FK或原子提交。
+合计97张业务表、871字段（按 `PRAGMA table_info` 统计；另含 `library_files.parent_dir_key` 1个 `VIRTUAL` 生成列），含Library的FTS5虚拟表，不计4张影子表、隐藏列及 sqlite_sequence。Store四库147个命名索引、50组FK、146个CHECK、0触发器；Jobs另11个命名索引、0 FK、3个CHECK、6触发器。SQLite自动索引不计入命名索引；跨文件没有FK或原子提交。
 
 `probe_job_units` 使用 `analysis_context_json`、`analysis_claim_token`、`analysis_refresh_json` 持久化 Analysis 上下文、领取身份与刷新需求。`probe_analysis_season` 对排队 Analysis 上下文中的 Media/season 建部分表达式索引，窗口16逐页派发；`season_model_lookup` 包含 policy/model 排序键。持久上下文、wanted-reference 与 keyset 游标承担采集交接、独立后续 Job 及重启恢复。
 
@@ -50,7 +50,7 @@ flowchart TD
 
 写事务统一IMMEDIATE；文件发布在同一library事务维护覆盖、卡片、terms与摘要。100文件批次按 Media 在同事务批末合并用户摘要、协议 genre/person 成员和边际计数；查询语言投影按单库权威语言维护。rename意图保存版本、源/目标磁盘证据与阶段，跨subscribe引用按持久阶段恢复。
 
-章节截图任务按 file/source/规范化 targets/renderer version 绑定 generation，持久记录 attempt 与每个目标的结果。claim 先登记不可变 candidate artifact（attempt + 唯一 id），完成 CAS 只采用该 claim 的登记身份；partial 重试保留成功目标的 published 身份。恢复先 fence 旧 claim，再锁外验证并按精确 candidate 引用收养；缺图修复按预期 attempt/generation/精确 published 引用 CAS，只重排缺失目标。文件观察、JPEG 校验、发布和清理都在 DB lease 与其他锁外，清理先退休身份并保护仍被引用的图片。Library 冻结在同一事务取消 queued/running 截图任务。
+章节截图任务按 file/source/规范化 targets/renderer version 绑定 generation，持久记录 attempt 与每个目标的结果。claim 先登记不可变 candidate artifact（attempt + 唯一 id），完成 CAS 只采用该 claim 的登记身份；partial 重试保留成功目标的 published 身份。恢复先 fence 旧 claim，再锁外验证并按精确 candidate 引用收养；缺图修复按预期 attempt/generation/精确 published 引用 CAS，只重排缺失目标。文件观察、JPEG 校验、发布和清理都在 DB lease 与其他锁外，清理先退休身份并保护仍被引用的图片。Library 删除冻结（`library_removals`）在同一事务取消 queued/running 截图任务；重配置冻结（`roots`/`locale`/`default_locale`）在准入检查时收敛为 cancelled，而 `integrity` 冻结延迟 queued 任务并重排 running claim 而不取消。
 
 嵌套根迁移使用≤100文件事务和持久游标；NFO按批迁移，源/目标冻结暂停且公平轮转，API driver 在解冻后继续并批间放锁。root_reassignment_state 保留可查询状态、稳定 operation_id、配置版本与错误。Unidentified 登记 path_key/library/root/revision，独立索引 seek 窗口≤100候选，游标前错归属来源会重置相应游标，正确新事实保持向前进度。删除先冻结目标库，indexed snapshot/cleanup 每窗口≤100文件，无关库路径不会触发磁盘观察。
 
@@ -62,7 +62,7 @@ Store 共享 `Arc<Writers>`，四库各有唯一 writer；任何实际 writer �
 
 `sql_result_value_bytes` 是 SQLite 结果值逻辑字节：TEXT UTF-8、BLOB 实际字节，INTEGER/FLOAT 各8，NULL 为0；不是网络、SQLite 页、解码对象或 native heap。writer wait/hold 是准入和 mutex 持有墙钟时间；`covered_owned_write_tx_*` 仅覆盖 `write_tx` 自行拥有的事务，排除 raw rusqlite 事务、失败 BEGIN 和读事务。观测是同步线程局部作用域，不能推断全部事务耗时。
 
-待删除路径持久保存规范键和意图 generation；入队前在锁外观察磁盘身份，入队后阻止对应路径被发布/换源/改名。后台按持久身份重验和重试，完成磁盘动作后再清除对应文件事实。重命名附属文件的删除入队失败会保留可恢复阶段。
+待删除路径持久保存规范键、意图 generation、`scope`（`media_with_leftovers` / `exact_path`）、源 `(size, device, inode, mtime_ns)` 磁盘身份，以及去重侧车所需的 `require_target_*` + `companion_file_id` 目标在位证明；入队前在锁外观察磁盘身份，入队后阻止对应路径被发布/换源/改名。后台按持久身份重验和重试，完成磁盘动作后再清除对应文件事实；若去重依赖目标消失则回退恢复侧车引用。重命名附属文件的删除入队失败会保留可恢复阶段。
 
 - kind 先收窄授权 Library，查询使用同库精确成员、边际计数和页内选源；QueryWorkStats 纳入 exact count/辅助 SQL。规模与工作量验证见[性能测试方法](../testing/storage-performance.md)。
 - Probe/Claim/Watch/fs watcher/根配置的 filesystem 观察使用 owned 快照移出 Store；最终发布校验原归属、配置和源版本。mutation 统一经过准入门禁，Playback 使用同事务身份屏障；operation/补图按有界窗口执行。
