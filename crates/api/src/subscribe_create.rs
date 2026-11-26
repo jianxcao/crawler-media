@@ -37,47 +37,37 @@ pub(crate) fn create(
         .jobs
         .reserve()
         .map_err(crate::jobs_writer::JobsMutationError::Acquire)?;
-    let (media, creation) = {
-        let store = state.store.as_ref();
-        let (media, previous) = store.ensure_media_with_previous(incoming)?;
-        subscribe.media_id = media.id;
-        let creation = match store.begin_compensatable_subscribe_creation(
-            &subscribe,
-            &media,
-            previous.as_ref(),
-        ) {
-            Ok(creation) => creation,
-            Err(error) => {
-                store.undo_ensured_media(&media, previous.as_ref())?;
-                return Err(error.into());
-            }
-        };
-        let inserted = (|| -> Result<(), StoreError> {
-            if let Some(filter) = filter {
-                store.insert_filter(filter)?;
-            }
-            store.retain_subscribe_creation(&creation)?;
-            store.commit_subscribe_creation(&creation, &subscribe, true)
-        })();
-        if let Err(error) = inserted {
-            if let Err(rollback) = rollback_store(&store, &creation, &subscribe, filter) {
+    let (media, creation, prev_dismissed) =
+        stage_store_creation(state.store.as_ref(), incoming, &mut subscribe, filter)?;
+
+    let intent = match state.store.subscribe_job_sync(subscribe.id) {
+        Ok(intent) => intent,
+        Err(error) => {
+            restore_if_dismissed(
+                state.store.as_ref(),
+                subscribe.user_id,
+                media.id,
+                prev_dismissed,
+            );
+            if let Err(rollback) =
+                rollback_store(state.store.as_ref(), &creation, &subscribe, filter)
+            {
                 return Err(CreateError::Compensation(format!(
                     "{error}; compensation incomplete: {rollback}"
                 )));
             }
-            return Err(match error {
-                StoreError::SubscribeOverlap { subscribe_id } => CreateError::Overlap(subscribe_id),
-                error => error.into(),
-            });
+            return Err(error.into());
         }
-        (media, creation)
     };
-
-    let intent = state.store.subscribe_job_sync(subscribe.id)?;
     if let Err(error) = seed_jobs(&reservation, &media, &subscribe, intent.as_ref()) {
         tracing::error!(subscribe_id = %subscribe.id, error = %error, "创建订阅任务失败");
-        if let Err(rollback) = rollback_store(&state.store.as_ref(), &creation, &subscribe, filter)
-        {
+        restore_if_dismissed(
+            state.store.as_ref(),
+            subscribe.user_id,
+            media.id,
+            prev_dismissed,
+        );
+        if let Err(rollback) = rollback_store(state.store.as_ref(), &creation, &subscribe, filter) {
             return Err(CreateError::Compensation(format!(
                 "{error}; compensation incomplete; Jobs sync intent retained if Subscribe exists: {rollback}"
             )));
@@ -104,6 +94,71 @@ pub(crate) fn create(
         })?;
     tracing::info!(subscribe_id = %subscribe.id, media = %media.title, "已创建新订阅");
     Ok((media, subscribe))
+}
+
+fn stage_store_creation(
+    store: &crate::Store,
+    incoming: Media,
+    subscribe: &mut Subscribe,
+    filter: Option<&Filter>,
+) -> Result<(Media, store::SubscribeCreation, Option<i64>), CreateError> {
+    let (media, previous) = store.ensure_media_with_previous(incoming)?;
+    let prev_dismissed =
+        match crate::up_next_dismissed::clear_dismissed_media(store, subscribe.user_id, media.id) {
+            Ok(prev) => prev,
+            Err(error) => {
+                if let Err(undo_error) = store.undo_ensured_media(&media, previous.as_ref()) {
+                    tracing::error!(
+                        media_id = %media.id,
+                        %error,
+                        %undo_error,
+                        "回滚订阅创建前的 Media 写入失败"
+                    );
+                }
+                return Err(error.into());
+            }
+        };
+    subscribe.media_id = media.id;
+    let creation =
+        match store.begin_compensatable_subscribe_creation(subscribe, &media, previous.as_ref()) {
+            Ok(creation) => creation,
+            Err(error) => {
+                restore_if_dismissed(store, subscribe.user_id, media.id, prev_dismissed);
+                store.undo_ensured_media(&media, previous.as_ref())?;
+                return Err(error.into());
+            }
+        };
+    let inserted = (|| -> Result<(), StoreError> {
+        if let Some(filter) = filter {
+            store.insert_filter(filter)?;
+        }
+        store.retain_subscribe_creation(&creation)?;
+        store.commit_subscribe_creation(&creation, subscribe, true)
+    })();
+    if let Err(error) = inserted {
+        restore_if_dismissed(store, subscribe.user_id, media.id, prev_dismissed);
+        if let Err(rollback) = rollback_store(store, &creation, subscribe, filter) {
+            return Err(CreateError::Compensation(format!(
+                "{error}; compensation incomplete: {rollback}"
+            )));
+        }
+        return Err(match error {
+            StoreError::SubscribeOverlap { subscribe_id } => CreateError::Overlap(subscribe_id),
+            error => error.into(),
+        });
+    }
+    Ok((media, creation, prev_dismissed))
+}
+
+fn restore_if_dismissed(
+    store: &crate::Store,
+    user_id: domain::UserId,
+    media_id: domain::MediaId,
+    prev_dismissed: Option<i64>,
+) {
+    if let Some(ts) = prev_dismissed {
+        crate::up_next_dismissed::restore_dismissed_media(store, user_id, media_id, ts);
+    }
 }
 
 fn seed_jobs(

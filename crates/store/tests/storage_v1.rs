@@ -235,7 +235,6 @@ fn open_at_resolves_data_and_app_paths_against_the_working_directory() {
     let tmp = tempfile::tempdir().unwrap();
     let output = std::process::Command::new(std::env::current_exe().unwrap())
         .args([
-            "--exact",
             "open_at_resolves_data_and_app_paths_against_the_working_directory",
             "--test-threads=4",
             "--nocapture",

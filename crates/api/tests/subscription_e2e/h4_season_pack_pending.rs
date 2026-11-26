@@ -33,7 +33,7 @@ async fn pack_in_flight_blocks_more_downloads(full_season_pack: bool) {
                 "POST",
                 "/api/v1/search/admit",
                 Some(TOKEN),
-                json!({ "subscribe_id": id.to_string(), "enclosure": enclosure(1) }),
+                json!({ "subscribe_id": id.to_string(), "enclosure": h.enclosure(1) }),
             ),
         )
         .await

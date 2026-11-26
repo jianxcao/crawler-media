@@ -59,6 +59,7 @@ impl Fixture {
                     url: "http://fixture.invalid/".into(),
                     username: Some("admin".into()),
                     password: Some("secret-password".into()),
+                    api_key: None,
                     category: None,
                     path_maps: vec![],
                     is_default: false,

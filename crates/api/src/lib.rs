@@ -89,6 +89,7 @@ pub mod store;
 pub mod theintrodb;
 pub mod theintrodb_lookup;
 pub mod ui;
+pub mod up_next_dismissed;
 pub mod user_removal;
 pub mod visible_scope;
 pub mod write_gate;

@@ -490,6 +490,29 @@ pub fn reader_pool_for_fixture(
     store.reader_pool(crate::Db::Library)
 }
 
+/// Disable per-commit `fsync` on a temporary `/tmp` fixture Store used strictly
+/// to seed multi-thousand-row read-query / `vm_steps` benchmarks, avoiding tens
+/// of thousands of SSD flushes on ephemeral test files. Never call in durability,
+/// crash-recovery, or connection-pragma tests.
+impl Store {
+    #[doc(hidden)]
+    pub fn relax_sync_for_scale_seed(&self) {
+        for db in [
+            crate::Db::App,
+            crate::Db::Subscribe,
+            crate::Db::Library,
+            crate::Db::Cache,
+        ] {
+            self.writers
+                .with_maintenance_writer(db, |conn| {
+                    conn.pragma_update(None, "synchronous", "OFF")?;
+                    Ok(())
+                })
+                .expect("set test synchronous=OFF");
+        }
+    }
+}
+
 /// Raw missing facts for lifecycle assertions; never compiled into production.
 impl Store {
     #[doc(hidden)]

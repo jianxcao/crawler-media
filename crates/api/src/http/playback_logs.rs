@@ -201,16 +201,9 @@ fn resolve_history_media_ids(
             let Ok(library_id) = library.id.parse() else {
                 return Ok(Some(Vec::new()));
             };
-            let ids =
-                store
-                    .media_ids_in_libraries(&[library_id])
-                    .map_err(|e: store::StoreError| {
-                        err(
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            "store.error",
-                            &e.to_string(),
-                        )
-                    })?;
+            let ids = store
+                .media_ids_in_libraries(&[library_id])
+                .map_err(|e| clear_history_store_error(e, user_id, scope, "读取媒体库条目失败"))?;
             Ok(Some(ids))
         }
         _ => Err(err(
@@ -222,56 +215,158 @@ fn resolve_history_media_ids(
 }
 
 /// DELETE /playback/history?scope=item|library|all&media_item_id&library_id&since
-/// — clear the caller's own units/logs/metrics.
+/// — clear the caller's own units/logs/metrics (and dismiss active TV subscriptions from up-next).
 pub(crate) async fn clear_history(
     State(state): State<ApiState>,
     axum::Extension(user_id): axum::Extension<domain::UserId>,
     Query(query): Query<HashMap<String, String>>,
 ) -> Response {
-    let since_ms = query.get("since").and_then(|v| v.parse::<i128>().ok());
-    let since = since_ms.map(|ms| (ms / 1000) as i64);
+    let since = match parse_clear_since(query.get("since").map(String::as_str)) {
+        Ok(since) => since,
+        Err(resp) => return resp,
+    };
     let scope = query
         .get("scope")
         .cloned()
         .unwrap_or_else(|| "all".to_string());
+    let now_secs = state.playback_clock.now_ms() / 1000;
     let query_for_read = query;
-    match store_write(&state, move |store| -> Response {
-        let media_ids = match resolve_history_media_ids(store, user_id, &scope, &query_for_read) {
-            Ok(ids) => ids,
-            Err(resp) => return resp,
-        };
-        let (deleted_states, deleted_metrics) = match store.playback_write(|store| {
-            let states = store.clear_units(user_id, media_ids.as_deref(), since)?
-                + store.delete_logs(user_id, media_ids.as_deref(), since)?;
-            let metrics = store.delete_metrics(user_id, media_ids.as_deref(), since)?;
-            Ok((states, metrics))
-        }) {
-            Ok(counts) => counts,
-            Err(store::StoreError::Protected(message)) => {
-                tracing::warn!(%message, %user_id, scope, "Playback history clear rejected by write barrier");
-                return err(StatusCode::CONFLICT, "playback.protected", &message);
-            }
-            Err(store::StoreError::WriteBusy) => return crate::http::store_wait::busy_response(),
-            Err(error) => {
-                tracing::error!(%error, %user_id, scope, "Playback history clear failed");
-                return err(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "store.error",
-                    "清除观看记录失败",
-                );
-            }
-        };
-        ok(json!({
-            "deleted_states": deleted_states,
-            "deleted_metrics": deleted_metrics,
-        }))
-        .into_response()
+    let pending_rollback = std::sync::Arc::new(parking_lot::Mutex::new(
+        None::<crate::up_next_dismissed::DismissedRollback>,
+    ));
+    let pending_for_write = pending_rollback.clone();
+    match store_write(&state, move |store| -> Result<Response, Response> {
+        clear_history_on_store(
+            store,
+            user_id,
+            &scope,
+            &query_for_read,
+            since,
+            now_secs,
+            &pending_for_write,
+        )
     })
     .await
     {
-        Ok(response) => response,
-        Err(response) => response,
+        Ok(Ok(response)) => response,
+        Ok(Err(response)) | Err(response) => {
+            let maybe_rollback = pending_rollback.lock().take();
+            if let Some(rollback) = maybe_rollback {
+                let _ = crate::http::store_wait::store_blocking(state.store(), move |store| {
+                    crate::up_next_dismissed::rollback_dismissed(store, user_id, &rollback);
+                })
+                .await;
+            }
+            response
+        }
     }
+}
+
+fn parse_clear_since(raw: Option<&str>) -> Result<Option<i64>, Response> {
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    match raw.parse::<i64>() {
+        Ok(secs) if secs >= 0 => Ok(Some(secs)),
+        _ => Err(err(
+            StatusCode::BAD_REQUEST,
+            "playback.invalid_since",
+            "since 必须是非负 Unix 秒数",
+        )),
+    }
+}
+
+fn clear_history_store_error(
+    error: store::StoreError,
+    user_id: domain::UserId,
+    scope: &str,
+    message: &str,
+) -> Response {
+    match error {
+        store::StoreError::Protected(reason) => {
+            tracing::warn!(%reason, %user_id, scope, "Playback history clear rejected by write barrier");
+            err(StatusCode::CONFLICT, "playback.protected", &reason)
+        }
+        store::StoreError::WriteBusy
+        | store::StoreError::ReadBusy
+        | store::StoreError::ReadClosed
+        | store::StoreError::ReadDeadline
+        | store::StoreError::ReadCancelled => crate::http::store_wait::busy_response(),
+        other => {
+            tracing::error!(error = %other, %user_id, scope, "{message}");
+            err(StatusCode::INTERNAL_SERVER_ERROR, "store.error", message)
+        }
+    }
+}
+
+fn clear_history_on_store(
+    store: &crate::Store,
+    user_id: domain::UserId,
+    scope: &str,
+    query: &HashMap<String, String>,
+    since: Option<i64>,
+    now_secs: i64,
+    pending_rollback: &parking_lot::Mutex<Option<crate::up_next_dismissed::DismissedRollback>>,
+) -> Result<Response, Response> {
+    let media_ids = resolve_history_media_ids(store, user_id, scope, query)?;
+    let active_tv_subs: std::collections::HashSet<domain::MediaId> = store
+        .list_subscribes_for_user(user_id)
+        .map_err(|error| clear_history_store_error(error, user_id, scope, "读取订阅失败"))?
+        .into_iter()
+        .filter(|row| matches!(row.coverage, domain::Coverage::Tv { .. }))
+        .map(|row| row.media_id)
+        .collect();
+    let candidate_subs: Vec<domain::MediaId> = match &media_ids {
+        Some(allowed) => {
+            let allowed_set: std::collections::HashSet<_> = allowed.iter().copied().collect();
+            active_tv_subs
+                .iter()
+                .copied()
+                .filter(|id| allowed_set.contains(id))
+                .collect()
+        }
+        None => active_tv_subs.iter().copied().collect(),
+    };
+    let sub_targets = match since {
+        Some(cutoff) if !candidate_subs.is_empty() => store
+            .media_exhausted_by_history_window(user_id, &candidate_subs, cutoff)
+            .map_err(|error| {
+                clear_history_store_error(error, user_id, scope, "读取窗口内播放记录失败")
+            })?,
+        Some(_) => Vec::new(),
+        None => candidate_subs,
+    };
+    let mut newly_dismissed = 0usize;
+    if !sub_targets.is_empty() {
+        let (dismissed, rollback) = crate::up_next_dismissed::record_dismissed(
+            store,
+            user_id,
+            &sub_targets,
+            &active_tv_subs,
+            now_secs.saturating_sub(1),
+        )
+        .map_err(|error| {
+            clear_history_store_error(error, user_id, scope, "写入继续观看隐藏列表失败")
+        })?;
+        newly_dismissed = dismissed;
+        if !rollback.is_empty() {
+            *pending_rollback.lock() = Some(rollback);
+        }
+    }
+    let (deleted_states, deleted_metrics) = store
+        .playback_write(|db| {
+            let states = db.clear_units(user_id, media_ids.as_deref(), since)?
+                + db.delete_logs(user_id, media_ids.as_deref(), since)?;
+            let metrics = db.delete_metrics(user_id, media_ids.as_deref(), since)?;
+            Ok((states + newly_dismissed, metrics))
+        })
+        .map_err(|error| clear_history_store_error(error, user_id, scope, "清除观看记录失败"))?;
+    *pending_rollback.lock() = None;
+    Ok(ok(json!({
+        "deleted_states": deleted_states,
+        "deleted_metrics": deleted_metrics,
+    }))
+    .into_response())
 }
 
 fn history_page(

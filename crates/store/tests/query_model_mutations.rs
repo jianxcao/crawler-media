@@ -1,3 +1,4 @@
+#[path = "query_model_support/mod.rs"]
 mod query_model_support;
 use query_model_support::*;
 #[test]

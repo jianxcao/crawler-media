@@ -228,7 +228,7 @@ impl Indexer {
             }
             ApiDialect::HdareaV1 => {
                 let request = download_token_request(site, profile, id).ok_or_else(|| {
-                    IndexerError::Parse("HDArea profile 未配置下载令牌端点".into())
+                    IndexerError::Fetch("HDArea profile 未配置下载令牌端点".into())
                 })?;
                 let body = self.fetch(site, &request)?;
                 let base = effective_base_url(site, profile);

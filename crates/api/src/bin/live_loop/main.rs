@@ -60,6 +60,9 @@ fn run_live() -> Result<(), Box<dyn std::error::Error>> {
         url: env("QB_URL"),
         username: env("QB_USER"),
         password: env("QB_PASS"),
+        api_key: std::env::var("QB_API_KEY")
+            .ok()
+            .filter(|s| !s.trim().is_empty()),
         category: Some("crawler-live".into()),
         path_maps: downloader::parse_path_maps(&env("QB_PATH_MAP")),
     })?;

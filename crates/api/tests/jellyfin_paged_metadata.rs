@@ -234,6 +234,7 @@ fn tv_fixture_seeded(shows: usize, episodes: usize, seed: impl Fn(&Path)) -> Fix
     {
         let store = state.store();
         let store = store.as_ref();
+        store.relax_sync_for_scale_seed();
         for show in 0..shows {
             let media_id = new_media(store, &format!("Show{show:03}"));
             let show_dir = root.join(format!("Show{show:03}"));

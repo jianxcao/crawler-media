@@ -17,8 +17,8 @@
 
 | 环节 | 必须验证的可观察行为 | 回归位置 |
 |---|---|---|
-| 发现与登录 | 两个前缀的实例身份一致；登录签发可用且不同于密码的 AccessToken；错误凭据拒绝 | `jellyfin/library_routes.rs`、`jellyfin/authentication_routes.rs` |
-| 协议认证 | MediaBrowser / Emby Authorization、X-Emby-Authorization、token header 与支持的播放 URL 凭据生效；无效凭据及跨用户访问拒绝 | `jellyfin/authentication_routes.rs`、`jellyfin/visibility.rs`、`playback_read_regression/stream_credentials.rs` |
+| 发现与登录 | 两个前缀的实例身份一致；登录签发可用且不同于密码的 AccessToken，初始设备凭据绑定为 best-effort（瞬时争用不失败、不残留孤儿 token）；错误凭据拒绝 | `jellyfin/library_routes.rs`、`jellyfin/authentication_routes.rs` |
+| 协议认证 | MediaBrowser / Emby Authorization、X-Emby-Authorization、token header 与支持的播放 URL 凭据生效；`Users/Logout` 与 `Sessions/Logout` 吊销当前会话 token（后续请求返回 401）；无效凭据及跨用户访问拒绝 | `jellyfin/authentication_routes.rs`、`jellyfin/visibility.rs`、`playback_read_regression/stream_credentials.rs` |
 | User 与 Library | 登录用户、资料、Views 的身份和权限一致；隐藏 Library 的直接条目、字幕和视频地址不能绕过授权 | `jellyfin/protocol.rs`、`jellyfin/visibility.rs` |
 | 列表与详情 | Movie / Series / Episode 身份、类型、父子关系、数量和元数据一致；搜索、分类命中可打开同一详情；分页不丢失、不重复 | `jellyfin/library_routes.rs`、`jellyfin/catalog/`、`jellyfin/metadata_parity.rs`、`jellyfin/filters.rs` |
 | 播放信息与取流 | 可播放详情有 MediaSources；稳定来源下与 PlaybackInfo 一致；消费源和 SID 后的实际字节正确；首选变化和缺 DeviceId 不破坏有效绑定 | `jellyfin/playback.rs`、`jellyfin/playback_contract.rs`、`jellyfin/event_sources/playback_info_race.rs`、`jellyfin_stream_binding.rs` |
@@ -30,6 +30,38 @@
 | 请求观察 | 两个入口均区分请求到达和响应头完成；拒绝与未知路由可观察；日志不含敏感 query、认证头和正文 | `jellyfin/request_observation.rs` |
 
 表中相对路径位于 `crates/api/tests/`。测试采用本地 fixture 和注入的 fake，不访问真实 TMDB、Downloader 或 Chromium。解析和序列化单测不能替代公开 HTTP 链。
+
+### 登录请求兼容用例
+
+以下用例通过公开 Router 执行，分别覆盖根路径和 `/emby`。成功登录的大小写用例还使用返回的 AccessToken 请求受保护的 UserViews。
+
+| 输入或场景 | 预期 |
+|---|---|
+| `Username` / `Pw` 及其大小写组合 | 正确凭据登录成功，返回的 token 可访问受保护路由 |
+| `Password` 且未提供 `Pw` | 按现有 VidHub 兼容入口验证密码 |
+| 同时提供 `Pw` 和 `Password` | 使用 `Pw`；即使 `Password` 正确，错误或 null 的 `Pw` 也不能登录 |
+| 未提供密码、用户名为 null、密码错误 | 拒绝登录 |
+| 用户名或密码为数字 | 拒绝格式不正确的 JSON 请求 |
+| 包含额外 JSON 字段 | 忽略额外字段并正常验证凭据 |
+
+自动化用例位于 `crates/api/tests/jellyfin/authentication_routes.rs`。
+
+### 双客户端实机回归记录
+
+2026-11-25 使用同一服务和用户，在 SenPlayer 的 `jel` 与 VidHub 的 Jellyfin 服务器中测试《书卷一梦》。以下步骤也可用于复测。收藏和已观看状态测试后恢复。
+
+| 用例与操作 | SenPlayer | VidHub |
+|---|---|---|
+| 登录并打开服务器 | 成功，显示 3 个 Library | 成功 |
+| 搜索剧名并打开结果 | 成功 | 成功 |
+| 浏览 Library、选择分类 | 国产剧按悬疑筛选成功 | 首页显示国产剧；打开完整列表时辅助功能自动化检查触发客户端崩溃，未完成筛选验证 |
+| 进入剧集列表，选择季和单集，查看详情 | 成功 | 成功，显示季及 1–40 集分页 |
+| 切换收藏，再恢复原状态 | 成功，剧集收藏 | 成功，单集收藏 |
+| 标记第 2 集已观看，再取消并回读服务端 | 成功，`Played` 由 false 变为 true 再恢复 false | 未完成，界面旗标操作未观察到 `Played` 变化 |
+| 播放第 1 集、暂停、快进和退出 | 多次尝试后未观察到播放器出画，原因待查 | 成功出画并退出 |
+| 退出后回读进度，另一客户端查看 | 读取到 VidHub 写入的续播位置 | 成功写入并显示续播位置 |
+
+VidHub 的崩溃报告显示辅助功能读取调用位于调用栈中，不能据此判断手动操作是否会崩溃。SenPlayer 的播放入口仍需进一步排查，不能据此判断具体原因。测试使第 1 集的进度变为约 03:41。
 
 ## 客户端初始化与身份
 
@@ -87,8 +119,9 @@ Playing / Progress / Stopped 中缺失或 null PositionTicks 不代表零。活�
 ```sh
 python3 scripts/with-build-lock.py --exclusive cargo test --release -j8 -p media-server -- --test-threads=8
 python3 scripts/with-build-lock.py --exclusive cargo test --release -j8 -p api \
-  --test jellyfin --test jellyfin_stream_binding \
-  --test playback_event_identity --test playback_read_regression -- --test-threads=8
+  --test jellyfin --test playback_event_identity --test playback_read_regression -- --test-threads=8
+python3 scripts/with-build-lock.py --exclusive cargo test --release -j8 -p api \
+  --test api_suite_4 jellyfin_stream_binding:: -- --test-threads=8
 ```
 
 分页、搜索、ACL 或图片变化还需运行表中相应目标。最终稳定代码按仓库规则运行一次 workspace 全套。记录实际命令、退出码、ignored 和失败，不以定向重跑覆盖原失败。

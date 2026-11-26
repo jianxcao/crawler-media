@@ -1,3 +1,4 @@
+#[path = "library_integrity_support/mod.rs"]
 mod library_integrity_support;
 
 use library_integrity_support::*;

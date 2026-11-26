@@ -13,6 +13,9 @@ async function unwrap<T>(promise: Promise<ApiEnvelope<T>>): Promise<T> {
 /** 已适配的下载器类型（与后端 domain DownloaderId/kind 对应）。 */
 export type DownloaderClientType = "qbittorrent" | "transmission";
 
+/** qBittorrent 支持传统 Cookie 会话或 v5.2+ 原生 Bearer API Key。 */
+export type DownloaderAuthType = "password" | "apikey";
+
 /** pending/unverified 表示尚未测试；verifying 仅用于本地手动测试。enabled 独立于验证结果。 */
 export type DownloaderStatus = "pending" | "verifying" | "active" | "failed" | "disabled" | "unverified";
 
@@ -30,6 +33,9 @@ export interface Downloader {
   url: string;
   username?: string | null;
   password?: string | null;
+  auth_type?: DownloaderAuthType;
+  has_api_key?: boolean;
+  has_password?: boolean;
   category?: string | null;
   path_maps: PathMap[];
   is_default: boolean;
@@ -112,8 +118,10 @@ export interface DownloaderPayload {
   name: string;
   client_type: DownloaderClientType;
   url: string;
+  auth_type?: DownloaderAuthType;
   username?: string | null;
   password?: string | null;
+  api_key?: string | null;
   save_path?: string | null;
   path_mappings?: PathMapping[] | null;
   enabled?: boolean;
@@ -121,15 +129,37 @@ export interface DownloaderPayload {
 
 /** 把表单 payload 转成新契约 DownloaderInput（save_path 无对应字段，丢弃）。 */
 function toDownloaderInput(payload: DownloaderPayload): Record<string, unknown> {
+  const apiKey = payload.api_key?.trim() ?? "";
   const input: Record<string, unknown> = {
     name: payload.name,
     kind: payload.client_type,
     url: payload.url,
-    ...(payload.username !== undefined ? { username: payload.username ?? "" } : {}),
-    ...(payload.password !== undefined ? { password: payload.password ?? "" } : {}),
     path_maps: (payload.path_mappings ?? []).map((m) => ({ from: m.remote, to: m.local })),
     ...(payload.enabled !== undefined ? { enabled: payload.enabled } : {}),
   };
+  if (payload.client_type !== "qbittorrent") {
+    if (payload.username !== undefined) input.username = payload.username ?? "";
+    if (payload.password !== undefined && payload.password !== null) {
+      input.password = payload.password;
+    }
+    input.api_key = "";
+  } else if (payload.auth_type === "apikey") {
+    input.auth_type = "apikey";
+    input.username = "";
+    input.password = "";
+    if (apiKey.length > 0) input.api_key = apiKey;
+  } else {
+    if (payload.auth_type === "password") input.auth_type = "password";
+    if (payload.username !== undefined) input.username = payload.username ?? "";
+    if (payload.password !== undefined && payload.password !== null) {
+      input.password = payload.password;
+    }
+    if (payload.auth_type === "password") {
+      input.api_key = "";
+    } else if (payload.api_key !== undefined) {
+      input.api_key = apiKey;
+    }
+  }
   return input;
 }
 

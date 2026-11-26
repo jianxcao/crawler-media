@@ -465,6 +465,34 @@ impl crate::writers::App<'_> {
             .map_err(Into::into)
     }
 
+    pub fn mutate_setting<R>(
+        &self,
+        key: &str,
+        f: impl FnOnce(Option<String>) -> Result<(Option<String>, R), StoreError>,
+    ) -> Result<R, StoreError> {
+        if matches!(
+            key,
+            "metadata.language" | "transfer.settings" | "metadata.scrape"
+        ) {
+            return Err(StoreError::Invalid(
+                "use dedicated Library configuration".into(),
+            ));
+        }
+        let tx = crate::write_tx(self.app)?;
+        let current = self.get_setting(key)?;
+        let (next, out) = f(current.clone())?;
+        if next != current {
+            match next {
+                Some(value) => self.put_setting(key, &value)?,
+                None => {
+                    self.delete_setting(key)?;
+                }
+            }
+            tx.commit()?;
+        }
+        Ok(out)
+    }
+
     /// 保存一次搜索的结果快照（按 vertical 独立，保留最近 50 条）。
     pub fn insert_search_snapshot(
         &self,

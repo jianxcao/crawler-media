@@ -83,6 +83,7 @@ fn verify_connection(row: store::DownloaderRow) -> Result<(), String> {
             url: row.url,
             username: row.username.unwrap_or_default(),
             password: row.password.unwrap_or_default(),
+            api_key: row.api_key,
             category: row.category,
             path_maps: row.path_maps,
         })

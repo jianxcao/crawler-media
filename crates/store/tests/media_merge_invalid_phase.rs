@@ -1,4 +1,5 @@
 use rusqlite::{Connection, params};
+#[path = "merge_support/mod.rs"]
 mod merge_support;
 
 #[test]

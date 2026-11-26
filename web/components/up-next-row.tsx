@@ -1,5 +1,6 @@
 "use client";
 
+import { useRef, useState } from "react";
 import { Link } from "react-router-dom";
 
 import { HScroller } from "@/components/h-scroller";
@@ -126,6 +127,8 @@ export function UpNextRow({
 
 function UpNextCard({ item, onCleared }: { item: UpNextItem; onCleared?: () => void }) {
   const toast = useToast();
+  const [removing, setRemoving] = useState(false);
+  const removingRef = useRef(false);
   const tapGuard = useTapGuard();
   // 播放键自己也要过一遍误触保护：横滑最近观看这一行时，手指常常正好停在
   // 卡片中央，没有它一划就起播了（比误进详情页糟得多——会真的起转码会话）。
@@ -195,53 +198,6 @@ function UpNextCard({ item, onCleared }: { item: UpNextItem; onCleared?: () => v
             />
           )}
           <div className="pointer-events-none absolute inset-x-0 bottom-0 h-16 bg-gradient-to-t from-black/75 to-transparent" />
-          {/* 右上角：左边是还有几集，右侧是针对单片的快捷菜单 */}
-          <div className="absolute right-2 top-2 z-10 flex items-center gap-1.5">
-            {unwatchedLabel && (
-              <span className="tnum rounded-full border border-emerald-200/25 bg-[rgba(5,46,34,0.76)] px-2 py-0.5 text-micro font-semibold text-emerald-100 shadow-[0_5px_16px_rgba(0,0,0,0.32)] backdrop-blur-md">
-                {unwatchedLabel}
-              </span>
-            )}
-            <DropdownMenu.Root>
-              <DropdownMenu.Trigger asChild>
-                <button
-                  type="button"
-                  aria-label={`操作《${item.title}》`}
-                  onClick={(e) => {
-                    e.preventDefault();
-                    e.stopPropagation();
-                  }}
-                  className="grid size-6 place-items-center rounded-full bg-black/60 text-white/70 opacity-0 backdrop-blur-md transition hover:bg-black/85 hover:text-white group-hover/recent:opacity-100 focus-visible:opacity-100"
-                >
-                  <MoreIcon className="size-3.5" />
-                </button>
-              </DropdownMenu.Trigger>
-              <DropdownMenu.Portal>
-                <DropdownMenu.Content
-                  align="end"
-                  sideOffset={4}
-                  className="menu-surface z-50 min-w-[9rem] p-1 shadow-2xl"
-                  onClick={(e) => e.stopPropagation()}
-                >
-                  <DropdownMenu.Item
-                    onSelect={() => {
-                      clearPlaybackHistory("item", {
-                        mediaItemId: item.media_item_id,
-                      })
-                        .then(() => {
-                          toast.success(`已移出《${item.title}》`);
-                          onCleared?.();
-                        })
-                        .catch((e) => toast.error((e as Error).message));
-                    }}
-                    className="glass-row nav-item cursor-pointer px-3 py-2 text-caption font-medium !text-[var(--danger)] outline-none hover:!bg-[var(--danger)]/10 hover:!text-[var(--danger)] data-[highlighted]:!bg-[var(--danger)]/10 data-[highlighted]:!text-[var(--danger)]"
-                  >
-                    从继续观看中移出
-                  </DropdownMenu.Item>
-                </DropdownMenu.Content>
-              </DropdownMenu.Portal>
-            </DropdownMenu.Root>
-          </div>
           {/* 底部只留进度：看了一半时在进度条上方补一行「已播 / 总时长」。 */}
           <div className="pointer-events-none absolute inset-x-2 bottom-2 space-y-1">
             {timeLabel && (
@@ -271,6 +227,68 @@ function UpNextCard({ item, onCleared }: { item: UpNextItem; onCleared?: () => v
           {stateLabel(item, timeLabel != null)}
         </p>
       </Link>
+
+      {/* 右上角角标 + 针对单片的快捷菜单：保持在 <Link> 之外避免按钮嵌套进 <a>，并跟着封面一起抬升。 */}
+      <div className="pointer-events-none absolute inset-x-0 top-0 z-10 aspect-video transition duration-300 group-hover/recent:-translate-y-1">
+        <div className="absolute right-2 top-2 flex items-center gap-1.5">
+          {unwatchedLabel && (
+            <span className="tnum rounded-full border border-emerald-200/25 bg-[rgba(5,46,34,0.76)] px-2 py-0.5 text-micro font-semibold text-emerald-100 shadow-[0_5px_16px_rgba(0,0,0,0.32)] backdrop-blur-md">
+              {unwatchedLabel}
+            </span>
+          )}
+          <DropdownMenu.Root>
+            <DropdownMenu.Trigger asChild disabled={removing}>
+              <button
+                type="button"
+                disabled={removing}
+                aria-label={`操作《${item.title}》`}
+                onClick={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                }}
+                className="pointer-events-auto grid size-6 place-items-center rounded-full bg-black/60 text-white/75 opacity-0 backdrop-blur-md transition hover:bg-black/85 hover:text-white disabled:pointer-events-none disabled:opacity-40 group-hover/recent:opacity-100 focus-visible:opacity-100 data-[state=open]:opacity-100 [@media(hover:none)]:opacity-100"
+              >
+                <MoreIcon className="size-3.5" />
+              </button>
+            </DropdownMenu.Trigger>
+            <DropdownMenu.Portal>
+              <DropdownMenu.Content
+                align="end"
+                sideOffset={4}
+                className="menu-surface z-50 min-w-[9rem] p-1 shadow-2xl"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <DropdownMenu.Item
+                  disabled={removing}
+                  onSelect={(e) => {
+                    if (removingRef.current) {
+                      e.preventDefault();
+                      return;
+                    }
+                    removingRef.current = true;
+                    setRemoving(true);
+                    clearPlaybackHistory("item", {
+                      mediaItemId: item.media_item_id,
+                    })
+                      .then(() => {
+                        toast.success(`已移出《${item.title}》`);
+                        onCleared?.();
+                      })
+                      .catch((err) => toast.error((err as Error).message))
+                      .finally(() => {
+                        removingRef.current = false;
+                        setRemoving(false);
+                      });
+                  }}
+                  className="glass-row nav-item cursor-pointer px-3 py-2 text-caption font-medium !text-[var(--danger)] outline-none hover:!bg-[var(--danger)]/10 hover:!text-[var(--danger)] data-[disabled]:pointer-events-none data-[disabled]:opacity-50 data-[highlighted]:!bg-[var(--danger)]/10 data-[highlighted]:!text-[var(--danger)]"
+                >
+                  从继续观看中移出
+                </DropdownMenu.Item>
+              </DropdownMenu.Content>
+            </DropdownMenu.Portal>
+          </DropdownMenu.Root>
+        </div>
+      </div>
 
       {/* 中央播放键常驻，不做「悬停才出现」——它要说明的是「这张卡能直接看」，
           而触摸屏根本没有悬停态，藏起来等于对一半用户不存在。

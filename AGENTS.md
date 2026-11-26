@@ -55,7 +55,7 @@ Vite + React + TS，pnpm。`web/src/main.tsx` 入口，`web/app/` 路由页面�
 ## 资源规则（Mac mini，磁盘/CPU 紧张）
 
 - 普通 cargo / test / build 最多同时运行**两组**，统一用 `python3 scripts/with-build-lock.py COMMAND [ARG ...]` 包装；它使用 `/tmp/cm-cargo.lock` 和 `/tmp/cm-cargo-2.lock`，并强制子命令 `TMPDIR=/tmp`。已占用第一个锁的旧任务也计入上限；旧任务退出前不要按全局 `-j8` 预算估算剩余容量。
-- 每组普通 cargo 用 `-j4`，测试用 `-- --test-threads=4`。最终 workspace 套件和正式性能测量用包装器 `--exclusive` 独占两槽，cargo `-j8`、测试 `-- --test-threads=8`。
+- 每组普通 cargo 用 `-j4`，测试用 `-- --test-threads=4`（`cargo nextest run` 用 `--build-jobs 4 --test-threads 4`）。最终 workspace 套件和正式性能测量用包装器 `--exclusive` 独占两槽，cargo `-j8`、测试 `-- --test-threads=8`（`nextest` 用 `--build-jobs 8 --test-threads 8`）。
 - subagent 可以并行改代码；build/test 必须经包装器受两槽上限约束。真实 115 验收沿用默认远程并发 1、间隔 500ms；未经用户明确授权不得为加速验收提高并发或降低间隔。
 - 优先跑定向测试（`-p <crate>`、`--test <name>`、测试名过滤）；全量套件只在最后跑一次，带 `--no-fail-fast`。
 - 临时文件放 `/tmp`，用完删除。
@@ -66,9 +66,12 @@ Vite + React + TS，pnpm。`web/src/main.tsx` 入口，`web/app/` 路由页面�
 # Rust
 python3 scripts/with-build-lock.py cargo fmt --all -- --check
 python3 scripts/with-build-lock.py cargo clippy -j4 --all-targets -- -D warnings
-python3 scripts/with-build-lock.py cargo test -j4 -p <crate> -- --test-threads=4                 # 每个改动的 crate
-python3 scripts/with-build-lock.py cargo test -j4 -p api --test <file> <name> -- --test-threads=4 # 定向
-python3 scripts/with-build-lock.py --exclusive cargo test -j8 --workspace --no-fail-fast -- --test-threads=8 # 收尾全量，仅一次
+# 若未安装 nextest：brew install cargo-nextest 或 cargo install cargo-nextest --locked
+python3 scripts/with-build-lock.py cargo nextest run --build-jobs 4 --test-threads 4 -p <crate>       # 每个改动的 crate（推荐）
+python3 scripts/with-build-lock.py cargo nextest run --build-jobs 4 --test-threads 4 -p api -E 'test(<name>)' # 定向
+python3 scripts/with-build-lock.py --exclusive cargo nextest run --build-jobs 8 --test-threads 8 --workspace --no-fail-fast # 收尾全量，仅一次（约 8.5m；Agent 伪终端加 --show-progress=none --status-level=slow --final-status-level=fail）
+python3 scripts/with-build-lock.py cargo test -j4 -p <crate> -- --test-threads=4                     # cargo test 兼容命令
+python3 scripts/with-build-lock.py cargo test -j4 -p api --test <file> <name> -- --test-threads=4     # 定向 cargo test（如 --test store_suite_4 perf_baseline::）
 
 # Web（仓库根目录）
 python3 scripts/with-build-lock.py pnpm --dir web lint
@@ -87,6 +90,9 @@ python3 scripts/with-build-lock.py pnpm --dir web build
 - 集成测试放 `crates/<name>/tests/`；单测放模块旁 `#[cfg(test)]`。
 - HTTP / TMDB / qB / CDP 通过注入 trait（`Fetcher`、catalog client、`Downloader`、`MediaProbe`）替换为 fake；`cargo test` 不访问外网。
 - 解析器用 golden fixtures（`crates/<name>/tests/fixtures/`）。测试中不启动 Chromium。
+- **合并集成测试套件（`autotests = false`）**：`crates/api` 与 `crates/store` 均关闭自动发现，普通顶层测试文件必须登记到 `crates/api/tests/api_suite_1..4.rs` 或 `crates/store/tests/store_suite_1..4.rs`（仅延迟/调度敏感或独立进程测试单独写入各自 `Cargo.toml` 的 `[[test]]`），由 `every_top_level_{api,store}_test_file_is_registered` 强制守卫；合并模块内引用共享辅助目录（如 `support`）须写 `#[path = "support/mod.rs"] mod support;`。
+- **Nextest 并发与时序敏感隔离（`.config/nextest.toml`）**：单线程 Tokio 调度响应（`<80~200ms`）与严格墙钟性能断言二进制在 `.config/nextest.toml` 中配置 `threads-required = "num-test-threads"` 独占槽位，新增同类时序敏感二进制需同步加入；Agent 伪终端运行 `nextest` 建议带 `--show-progress=none --status-level=slow --final-status-level=fail` 输出明文结果，切勿运行未加 `--no-pager` 的 `cargo nextest show-config`（会阻塞在分页器）。
+- **编译优化共享与万级造数禁刷盘**：根 `Cargo.toml` 对第三方依赖启用 `opt-level = 2`、对 `store` 启用 `opt-level = 1`，并在 `dev`/`test` 间对齐以复用同一套 `target/debug/deps` 产物（勿改成不一致导致双倍占盘）。生产 `Store::open` 保持 `PRAGMA synchronous = FULL`；新增纯测只读查询复杂度/`vm_steps` 的多千/万行 `/tmp` 临时夹具时，调用测试专用的 `store.relax_sync_for_scale_seed()` 跳过无效 SSD `fsync`，严禁在持久化、崩溃恢复或连接 pragma 测试中使用。
 - **本地回环端口测试**：全量 Rust `--workspace` 套件、`pnpm --dir web test`（含 `dev-proxy.test.mjs`）以及绑定 `127.0.0.1` 桩服务的测试（如 `marker/tests/redirect_cache`、`media-server/tests/user_isolation`、`api/tests/review_remediation_site_actions`、`api/tests/fixture_lifecycle`、`api/tests/n2_signal_shutdown`、`api/tests/relative_data_startup` 等）必须在允许本地回环监听的环境中直接执行；不要在禁用回环端口的受限沙盒里跑这些测试或全量套件，否则会报 `EPERM` / `Operation not permitted`，或卡死在本地 HTTP 桩测试。
 
 ## Rust 规范

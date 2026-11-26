@@ -1,5 +1,5 @@
-//! Instance-owned cloud lookup configuration and bounded negative results.
-use crate::theintrodb::TheIntroDbClient;
+//! Instance-owned cloud lookup configuration and bounded negative / rate-limit state.
+use crate::theintrodb::{LookupError, RateLimitScope, TheIntroDbClient};
 
 pub trait ClientFactory: Send + Sync {
     fn create(&self, api_key: Option<String>) -> TheIntroDbClient;
@@ -13,9 +13,14 @@ impl ClientFactory for HttpClientFactory {
 }
 
 use crate::{ScrapeStoreExt, Store};
-use domain::{FileVersion, LedgerId, UnitKey};
+use domain::{FileVersion, LedgerId, MediaKind, UnitKey};
 use parking_lot::Mutex;
 use std::collections::HashMap;
+use store::StoredFileMarker;
+
+const DEFAULT_NEGATIVE_TTL_MS: i64 = 300_000;
+const UNAUTHORIZED_COOLDOWN_MS: i64 = 3_600_000;
+const TRANSIENT_COOLDOWN_MS: i64 = 60_000;
 
 #[derive(Clone, PartialEq, Eq, Hash)]
 struct FlightTarget {
@@ -56,6 +61,57 @@ impl InFlight {
     }
 }
 
+pub(crate) struct CloudLookupEligibility<'a> {
+    pub(crate) client: &'a TheIntroDbClient,
+    pub(crate) negative: &'a NegativeCache,
+    pub(crate) file_id: LedgerId,
+    pub(crate) version: &'a FileVersion,
+    pub(crate) unit: UnitKey,
+    pub(crate) unit_count: usize,
+    pub(crate) duration_ms: Option<i64>,
+    pub(crate) media_kind: MediaKind,
+    pub(crate) tmdb_id: Option<&'a str>,
+    pub(crate) detect_intros: bool,
+    pub(crate) has_marker: bool,
+    pub(crate) now_ms: i64,
+    pub(crate) force_refresh: bool,
+}
+
+pub(crate) fn cloud_lookup_eligible(check: CloudLookupEligibility<'_>) -> bool {
+    let Some(duration_ms) = check.duration_ms.filter(|&d| d > 0) else {
+        return false;
+    };
+    if !check.detect_intros
+        || check.has_marker
+        || check.media_kind != MediaKind::Tv
+        || check.unit_count != 1
+        || check.unit.episode_coordinates().is_none()
+    {
+        return false;
+    }
+    let Some(tmdb_id) = check.tmdb_id else {
+        return false;
+    };
+    if check
+        .negative
+        .is_cooling_down(check.client.cooldown_scope(), check.now_ms)
+    {
+        return false;
+    }
+    if check.force_refresh {
+        return true;
+    }
+    let key = LookupKey {
+        file_id: check.file_id,
+        version: check.version.clone(),
+        unit: check.unit,
+        duration_ms: Some(duration_ms),
+        tmdb_id: tmdb_id.to_string(),
+        configuration: check.client.cache_scope(),
+    };
+    !check.negative.contains(&key, check.now_ms)
+}
+
 pub(crate) fn session_needs_cloud_lookup(
     store: &Store,
     factory: &dyn ClientFactory,
@@ -66,16 +122,15 @@ pub(crate) fn session_needs_cloud_lookup(
     media: &domain::Media,
     has_marker: bool,
 ) -> bool {
-    if has_marker
-        || media.kind != domain::MediaKind::Tv
+    if coverage.file.duration_ms.filter(|&d| d > 0).is_none()
+        || has_marker
+        || media.kind != MediaKind::Tv
         || coverage.units.len() != 1
         || unit.episode_coordinates().is_none()
+        || media.tmdb_id.is_none()
     {
         return false;
     }
-    let Some(tmdb_id) = media.tmdb_id.as_deref() else {
-        return false;
-    };
     let library_id = coverage.file.library_id.to_string();
     let detect_intros = store
         .get_library(&library_id)
@@ -88,20 +143,186 @@ pub(crate) fn session_needs_cloud_lookup(
     let Some(client) = configured_client(store, factory) else {
         return false;
     };
-    if let Some(duration_ms) = coverage.file.duration_ms.filter(|d| *d > 0) {
-        let key = LookupKey {
-            file_id: coverage.file.file_id,
-            version: coverage.file.version.clone(),
-            unit,
-            duration_ms,
-            tmdb_id: tmdb_id.to_string(),
-            configuration: client.cache_scope(),
+    cloud_lookup_eligible(CloudLookupEligibility {
+        client: &client,
+        negative,
+        file_id: coverage.file.file_id,
+        version: &coverage.file.version,
+        unit,
+        unit_count: coverage.units.len(),
+        duration_ms: coverage.file.duration_ms,
+        media_kind: media.kind,
+        tmdb_id: media.tmdb_id.as_deref(),
+        detect_intros,
+        has_marker,
+        now_ms,
+        force_refresh: false,
+    })
+}
+
+pub(crate) struct CloudLookupRequest<'a> {
+    pub(crate) client: &'a TheIntroDbClient,
+    pub(crate) negative: &'a NegativeCache,
+    pub(crate) file_id: LedgerId,
+    pub(crate) version: &'a FileVersion,
+    pub(crate) unit: UnitKey,
+    pub(crate) duration_ms: Option<i64>,
+    pub(crate) media_title: &'a str,
+    pub(crate) tmdb_id: &'a str,
+    pub(crate) now_ms: i64,
+    pub(crate) force_refresh: bool,
+}
+
+pub(crate) fn lookup_cloud_marker(req: CloudLookupRequest<'_>) -> Option<StoredFileMarker> {
+    let (season, episode) = req.unit.episode_coordinates()?;
+    let duration = req.duration_ms.filter(|&d| d > 0)?;
+    let cooldown_scope = req.client.cooldown_scope();
+    let key = LookupKey {
+        file_id: req.file_id,
+        version: req.version.clone(),
+        unit: req.unit,
+        duration_ms: Some(duration),
+        tmdb_id: req.tmdb_id.to_string(),
+        configuration: req.client.cache_scope(),
+    };
+    if req.negative.is_cooling_down(cooldown_scope, req.now_ms)
+        || (!req.force_refresh && req.negative.contains(&key, req.now_ms))
+    {
+        return None;
+    }
+    let candidate =
+        match req
+            .client
+            .get_episode_markers(req.tmdb_id, season, episode, Some(duration))
+        {
+            Ok(Some(candidate)) => candidate,
+            Ok(None) => {
+                req.negative.insert(key, req.now_ms);
+                return None;
+            }
+            Err(error) => {
+                record_lookup_error(
+                    req.negative,
+                    cooldown_scope,
+                    key,
+                    req.media_title,
+                    season,
+                    episode,
+                    req.now_ms,
+                    error,
+                );
+                return None;
+            }
         };
-        if negative.contains(&key, now_ms) {
-            return false;
+    let Some(group_duration) = candidate.group_duration_ms.filter(|d| *d > 0) else {
+        req.negative.insert(key, req.now_ms);
+        return None;
+    };
+    // v4 selects within five minutes, but silently falls back to the most
+    // popular release when no cluster matches. Reject that fallback ourselves.
+    if group_duration.abs_diff(duration) > 300_000 {
+        tracing::warn!(
+            file_id = %req.file_id,
+            duration,
+            group_duration,
+            "TheIntroDB release duration does not match this file; candidate was not adopted"
+        );
+        req.negative.insert(key, req.now_ms);
+        return None;
+    }
+    let intro = candidate.intro_start_ms.zip(candidate.intro_end_ms);
+    let outro = candidate
+        .outro_start_ms
+        .map(|start| (start, candidate.outro_end_ms.unwrap_or(duration)));
+    if intro
+        .into_iter()
+        .chain(outro)
+        .any(|(start, end)| start < 0 || end <= start || end > duration)
+        || intro
+            .zip(outro)
+            .is_some_and(|((_, end), (start, _))| end > start)
+    {
+        tracing::warn!(
+            file_id = %req.file_id,
+            "TheIntroDB candidate exceeds this file or has conflicting ranges"
+        );
+        req.negative.insert(key, req.now_ms);
+        return None;
+    }
+    Some(StoredFileMarker {
+        file_id: req.file_id,
+        version: req.version.clone(),
+        unit: req.unit,
+        intro_start_ms: intro.map(|(s, _)| s),
+        intro_end_ms: intro.map(|(_, e)| e),
+        outro_start_ms: outro.map(|(s, _)| s),
+        outro_end_ms: outro.map(|(_, e)| e),
+        source: "theintrodb".into(),
+        locked: false,
+        updated_at: 0,
+    })
+}
+
+fn record_lookup_error(
+    negative: &NegativeCache,
+    cooldown_scope: u64,
+    key: LookupKey,
+    title: &str,
+    season: u32,
+    episode: u32,
+    now_ms: i64,
+    error: LookupError,
+) {
+    match &error {
+        LookupError::RateLimited {
+            scope: RateLimitScope::SpecificMedia,
+            retry_after_ms,
+        } => {
+            tracing::warn!(%error, title, season, episode, "TheIntroDB 单剧集查询频次超限，暂缓重试");
+            negative.insert_with_ttl(key, now_ms, *retry_after_ms);
+        }
+        LookupError::RateLimited {
+            scope: rl_scope,
+            retry_after_ms,
+        } => {
+            tracing::warn!(%error, ?rl_scope, retry_after_ms, title, season, episode, "TheIntroDB 触发限流/配额熔断，进入全局冷却");
+            negative.trip_cooldown(cooldown_scope, now_ms, *retry_after_ms);
+        }
+        LookupError::Unauthorized(status) => {
+            tracing::warn!(
+                status,
+                title,
+                season,
+                episode,
+                "TheIntroDB API Key 认证失败，冷却 1 小时"
+            );
+            negative.trip_cooldown(cooldown_scope, now_ms, UNAUTHORIZED_COOLDOWN_MS);
+        }
+        LookupError::Http(status) if *status >= 500 => {
+            tracing::warn!(
+                status,
+                title,
+                season,
+                episode,
+                "TheIntroDB 上游异常，短冷却 60 秒"
+            );
+            negative.trip_cooldown(cooldown_scope, now_ms, TRANSIENT_COOLDOWN_MS);
+        }
+        LookupError::Transport(_) => {
+            tracing::warn!(%error, title, season, episode, "TheIntroDB 网络失败，短冷却 60 秒");
+            negative.trip_cooldown(cooldown_scope, now_ms, TRANSIENT_COOLDOWN_MS);
+        }
+        LookupError::EpisodeNotFound
+        | LookupError::MediaNotFound
+        | LookupError::Coordinates
+        | LookupError::Boundaries => {
+            tracing::warn!(%error, title, season, episode, "查询 TheIntroDB 无匹配结果，写入负缓存");
+            negative.insert(key, now_ms);
+        }
+        LookupError::Http(_) | LookupError::Response(_) => {
+            tracing::warn!(%error, title, season, episode, "查询 TheIntroDB 失败");
         }
     }
-    true
 }
 
 struct FlightGuard {
@@ -201,41 +422,91 @@ pub(crate) struct LookupKey {
     pub file_id: LedgerId,
     pub version: FileVersion,
     pub unit: UnitKey,
-    pub duration_ms: i64,
+    pub duration_ms: Option<i64>,
     pub tmdb_id: String,
     pub configuration: u64,
 }
 
-pub(crate) struct NegativeCache(Mutex<HashMap<LookupKey, i64>>);
-impl Default for NegativeCache {
-    fn default() -> Self {
-        Self(Mutex::new(HashMap::new()))
-    }
+#[derive(Default)]
+struct NegativeState {
+    entries: HashMap<LookupKey, i64>,
+    cooldowns: HashMap<u64, i64>,
 }
+
+#[derive(Default)]
+pub(crate) struct NegativeCache(Mutex<NegativeState>);
+
 impl NegativeCache {
     pub(crate) fn contains(&self, key: &LookupKey, now_ms: i64) -> bool {
         let mut cache = self.0.lock();
-        if cache.get(key).is_some_and(|expires| *expires > now_ms) {
+        if cache
+            .entries
+            .get(key)
+            .is_some_and(|expires| *expires > now_ms)
+        {
             return true;
         }
-        cache.remove(key);
+        cache.entries.remove(key);
         false
     }
+
     pub(crate) fn insert(&self, key: LookupKey, now_ms: i64) {
+        self.insert_with_ttl(key, now_ms, DEFAULT_NEGATIVE_TTL_MS);
+    }
+
+    pub(crate) fn insert_with_ttl(&self, key: LookupKey, now_ms: i64, ttl_ms: i64) {
         let mut cache = self.0.lock();
-        cache.retain(|_, expires| *expires > now_ms);
-        if cache.len() >= 4096
+        cache.entries.retain(|_, expires| *expires > now_ms);
+        if cache.entries.len() >= 4096
             && let Some(oldest) = cache
+                .entries
                 .iter()
                 .min_by_key(|(_, expires)| *expires)
                 .map(|(key, _)| key.clone())
         {
-            cache.remove(&oldest);
+            cache.entries.remove(&oldest);
         }
-        cache.insert(key, now_ms.saturating_add(300_000));
+        cache
+            .entries
+            .insert(key, now_ms.saturating_add(ttl_ms.max(1)));
     }
+
+    pub(crate) fn is_cooling_down(&self, scope: u64, now_ms: i64) -> bool {
+        let mut cache = self.0.lock();
+        if cache
+            .cooldowns
+            .get(&scope)
+            .is_some_and(|expires| *expires > now_ms)
+        {
+            return true;
+        }
+        cache.cooldowns.remove(&scope);
+        false
+    }
+
+    pub(crate) fn trip_cooldown(&self, scope: u64, now_ms: i64, ttl_ms: i64) {
+        let mut cache = self.0.lock();
+        cache.cooldowns.retain(|_, expires| *expires > now_ms);
+        if cache.cooldowns.len() >= 64
+            && !cache.cooldowns.contains_key(&scope)
+            && let Some(oldest) = cache
+                .cooldowns
+                .iter()
+                .min_by_key(|(_, expires)| *expires)
+                .map(|(k, _)| *k)
+        {
+            cache.cooldowns.remove(&oldest);
+        }
+        let target = now_ms.saturating_add(ttl_ms.max(1));
+        cache
+            .cooldowns
+            .entry(scope)
+            .and_modify(|expires| *expires = (*expires).max(target))
+            .or_insert(target);
+    }
+
     pub(crate) fn invalidate(&self, file: LedgerId) {
         let mut cache = self.0.lock();
-        cache.retain(|key, _| key.file_id != file);
+        cache.entries.retain(|key, _| key.file_id != file);
     }
 }

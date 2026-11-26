@@ -330,6 +330,7 @@ async fn limits_keep_unavailable_and_available_downloader_statuses_independent()
             url: "http://unused.invalid".into(),
             username: None,
             password: None,
+            api_key: None,
             category: None,
             path_maps: Vec::new(),
             is_default: false,

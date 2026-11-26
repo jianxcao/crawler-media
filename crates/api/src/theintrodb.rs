@@ -30,12 +30,26 @@ pub struct MarkerResult {
     pub group_duration_ms: Option<i64>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RateLimitScope {
+    Burst,
+    DailyQuota,
+    SpecificMedia,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum LookupError {
     #[error("TheIntroDB transport failed: {0}")]
     Transport(#[from] ureq::Error),
     #[error("TheIntroDB returned HTTP {0}")]
     Http(u16),
+    #[error("TheIntroDB rate limited ({scope:?}), retry after {retry_after_ms}ms")]
+    RateLimited {
+        scope: RateLimitScope,
+        retry_after_ms: i64,
+    },
+    #[error("TheIntroDB rejected credentials with HTTP {0}")]
+    Unauthorized(u16),
     #[error("TheIntroDB could not resolve the requested episode")]
     EpisodeNotFound,
     #[error("TheIntroDB could not resolve the requested Media")]
@@ -98,6 +112,18 @@ impl TheIntroDbClient {
         hasher.finish()
     }
 
+    pub(crate) fn cooldown_scope(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        self.base_url.hash(&mut hasher);
+        self.api_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|key| !key.is_empty())
+            .hash(&mut hasher);
+        hasher.finish()
+    }
+
     /// Select a release by this file's duration. The API may fall back to an
     /// unrelated popular release, so callers must check `group_duration_ms`.
     pub fn get_episode_markers(
@@ -142,6 +168,17 @@ impl TheIntroDbClient {
         })?;
         let status = resp.status().as_u16();
         if status != 200 {
+            if status == 429 {
+                let headers = resp.headers().clone();
+                let body_bytes = resp.into_body().read_to_vec().unwrap_or_default();
+                let code = serde_json::from_slice::<serde_json::Value>(&body_bytes)
+                    .ok()
+                    .and_then(|v| v.get("code").and_then(|c| c.as_str()).map(str::to_string));
+                return Err(classify_429(&headers, code.as_deref()));
+            }
+            if status == 401 || status == 403 {
+                return Err(LookupError::Unauthorized(status));
+            }
             if status == 404 {
                 let body: serde_json::Value = resp.into_body().read_json()?;
                 match body.get("code").and_then(serde_json::Value::as_str) {
@@ -212,9 +249,88 @@ fn single_range(
     Ok(Some((start, segment.end_ms)))
 }
 
+fn header_u64(headers: &ureq::http::HeaderMap, name: &str) -> Option<u64> {
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .and_then(|raw| raw.parse::<u64>().ok())
+}
+
+fn retry_after_secs(headers: &ureq::http::HeaderMap, now: std::time::SystemTime) -> Option<u64> {
+    let raw = headers
+        .get("retry-after")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)?;
+    if let Ok(secs) = raw.parse::<u64>() {
+        return Some(secs);
+    }
+    let at = httpdate::parse_http_date(raw).ok()?;
+    Some(match at.duration_since(now) {
+        Ok(delta) if !delta.is_zero() => delta.as_secs().max(1),
+        _ => 0,
+    })
+}
+
+fn normalize_reset_secs(raw: u64, now_unix_secs: u64) -> u64 {
+    if raw >= 1_000_000_000 {
+        raw.saturating_sub(now_unix_secs)
+    } else {
+        raw
+    }
+}
+
+fn classify_429(headers: &ureq::http::HeaderMap, code: Option<&str>) -> LookupError {
+    let now = std::time::SystemTime::now();
+    let now_unix_secs = now
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let retry_after = retry_after_secs(headers, now);
+    let specific_reset = header_u64(headers, "x-usagelimit-specificmedia-reset")
+        .map(|s| normalize_reset_secs(s, now_unix_secs));
+    let specific_rem = header_u64(headers, "x-usagelimit-specificmedia-remaining");
+    let usage_reset =
+        header_u64(headers, "x-usagelimit-reset").map(|s| normalize_reset_secs(s, now_unix_secs));
+    let usage_rem = header_u64(headers, "x-usagelimit-remaining");
+    let rate_reset =
+        header_u64(headers, "x-ratelimit-reset").map(|s| normalize_reset_secs(s, now_unix_secs));
+
+    let (scope, secs, min_ms, max_ms) =
+        if code == Some("usage_limit_exceeded") || usage_rem == Some(0) {
+            (
+                RateLimitScope::DailyQuota,
+                usage_reset.or(retry_after).unwrap_or(3_600),
+                60_000,
+                86_400_000,
+            )
+        } else if code == Some("specific_media_usage_limit_exceeded") || specific_rem == Some(0) {
+            (
+                RateLimitScope::SpecificMedia,
+                specific_reset.or(retry_after).unwrap_or(3_600),
+                60_000,
+                86_400_000,
+            )
+        } else {
+            (
+                RateLimitScope::Burst,
+                retry_after.or(rate_reset).unwrap_or(10),
+                1_000,
+                900_000,
+            )
+        };
+    let retry_after_ms = secs.saturating_mul(1_000).clamp(min_ms, max_ms) as i64;
+    LookupError::RateLimited {
+        scope,
+        retry_after_ms,
+    }
+}
+
 #[cfg(test)]
 mod debug_tests {
-    use super::TheIntroDbClient;
+    use super::{LookupError, RateLimitScope, TheIntroDbClient, classify_429};
+    use std::time::{Duration, SystemTime};
+    use ureq::http::{HeaderMap, HeaderValue};
 
     #[test]
     fn debug_never_prints_the_api_key() {
@@ -224,5 +340,112 @@ mod debug_tests {
         assert!(rendered.contains("<redacted>"));
         assert!(rendered.contains("api.theintrodb.org"));
         assert!(format!("{:?}", TheIntroDbClient::default()).contains("None"));
+    }
+
+    #[test]
+    fn classify_429_ignores_informational_usage_reset_headers_unless_quota_exhausted() {
+        let mut burst_headers = HeaderMap::new();
+        burst_headers.insert("x-usagelimit-remaining", HeaderValue::from_static("42"));
+        burst_headers.insert("x-usagelimit-reset", HeaderValue::from_static("86400"));
+        burst_headers.insert(
+            "x-usagelimit-specificmedia-remaining",
+            HeaderValue::from_static("5"),
+        );
+        burst_headers.insert(
+            "x-usagelimit-specificmedia-reset",
+            HeaderValue::from_static("3600"),
+        );
+        burst_headers.insert("x-ratelimit-reset", HeaderValue::from_static("5"));
+        assert!(matches!(
+            classify_429(&burst_headers, None),
+            LookupError::RateLimited {
+                scope: RateLimitScope::Burst,
+                retry_after_ms: 5_000,
+            }
+        ));
+
+        let mut daily_zero = HeaderMap::new();
+        daily_zero.insert("x-usagelimit-remaining", HeaderValue::from_static("0"));
+        daily_zero.insert("x-usagelimit-reset", HeaderValue::from_static("7200"));
+        assert!(matches!(
+            classify_429(&daily_zero, None),
+            LookupError::RateLimited {
+                scope: RateLimitScope::DailyQuota,
+                retry_after_ms: 7_200_000,
+            }
+        ));
+
+        let mut specific_zero = HeaderMap::new();
+        specific_zero.insert(
+            "x-usagelimit-specificmedia-remaining",
+            HeaderValue::from_static("0"),
+        );
+        specific_zero.insert(
+            "x-usagelimit-specificmedia-reset",
+            HeaderValue::from_static("1800"),
+        );
+        assert!(matches!(
+            classify_429(&specific_zero, None),
+            LookupError::RateLimited {
+                scope: RateLimitScope::SpecificMedia,
+                retry_after_ms: 1_800_000,
+            }
+        ));
+    }
+
+    #[test]
+    fn classify_429_prioritizes_daily_quota_when_both_remaining_headers_are_zero() {
+        let mut both_zero = HeaderMap::new();
+        both_zero.insert("x-usagelimit-remaining", HeaderValue::from_static("0"));
+        both_zero.insert("x-usagelimit-reset", HeaderValue::from_static("7200"));
+        both_zero.insert(
+            "x-usagelimit-specificmedia-remaining",
+            HeaderValue::from_static("0"),
+        );
+        both_zero.insert(
+            "x-usagelimit-specificmedia-reset",
+            HeaderValue::from_static("1800"),
+        );
+        for code in [Some("usage_limit_exceeded"), None] {
+            assert!(matches!(
+                classify_429(&both_zero, code),
+                LookupError::RateLimited {
+                    scope: RateLimitScope::DailyQuota,
+                    retry_after_ms: 7_200_000,
+                }
+            ));
+        }
+    }
+
+    #[test]
+    fn classify_429_parses_rfc9110_http_date_retry_after() {
+        let mut headers = HeaderMap::new();
+        let retry_date = httpdate::fmt_http_date(SystemTime::now() + Duration::from_secs(120));
+        headers.insert(
+            "retry-after",
+            HeaderValue::from_str(&retry_date).expect("valid http-date header"),
+        );
+        match classify_429(&headers, None) {
+            LookupError::RateLimited {
+                scope: RateLimitScope::Burst,
+                retry_after_ms,
+            } => {
+                assert!(
+                    (115_000..=125_000).contains(&retry_after_ms),
+                    "expected ~120s retry window from HTTP-date, got {retry_after_ms}ms"
+                );
+            }
+            other => panic!("unexpected classification: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cooldown_scope_ignores_configuration_revision_until_credentials_change() {
+        let rev_one = TheIntroDbClient::new(Some("key-a".into())).with_configuration_revision(1);
+        let rev_two = TheIntroDbClient::new(Some("key-a".into())).with_configuration_revision(2);
+        let next_key = TheIntroDbClient::new(Some("key-b".into())).with_configuration_revision(2);
+        assert_eq!(rev_one.cooldown_scope(), rev_two.cooldown_scope());
+        assert_ne!(rev_one.cache_scope(), rev_two.cache_scope());
+        assert_ne!(rev_two.cooldown_scope(), next_key.cooldown_scope());
     }
 }

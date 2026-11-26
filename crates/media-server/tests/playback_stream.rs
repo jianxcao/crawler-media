@@ -84,6 +84,9 @@ impl MediaServerProvider for DirectStreamProvider {
     ) -> Result<Option<UserId>, media_server::provider::QueryError> {
         Ok((token == "play-token").then_some(self.user_id))
     }
+    async fn revoke_token(&self, _token: &str) -> Result<(), media_server::provider::QueryError> {
+        Ok(())
+    }
 
     async fn get_user_for_query(
         &self,
@@ -343,6 +346,9 @@ impl MediaServerProvider for MultiVersionStreamProvider {
         _deadline: Option<std::time::Instant>,
     ) -> Result<Option<UserId>, media_server::provider::QueryError> {
         Ok((token == "play-token").then_some(self.user_id))
+    }
+    async fn revoke_token(&self, _token: &str) -> Result<(), media_server::provider::QueryError> {
+        Ok(())
     }
     async fn get_user_for_query(
         &self,

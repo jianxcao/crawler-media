@@ -25,7 +25,9 @@ const TOKEN: &str = "play-token";
 struct RecordingProvider {
     user_id: UserId,
     revoked: Vec<&'static str>,
+    fail_bind: bool,
     seen_device_ids: Mutex<Vec<String>>,
+    revoked_tokens: Mutex<Vec<String>>,
 }
 
 impl RecordingProvider {
@@ -33,7 +35,9 @@ impl RecordingProvider {
         Self {
             user_id: UserId::new(),
             revoked,
+            fail_bind: false,
             seen_device_ids: Mutex::new(Vec::new()),
+            revoked_tokens: Mutex::new(Vec::new()),
         }
     }
 
@@ -95,10 +99,19 @@ impl MediaServerProvider for RecordingProvider {
 
     async fn authenticate_password(
         &self,
-        _username: &str,
-        _password: &str,
+        username: &str,
+        password: &str,
     ) -> Result<Option<(String, ServerUser)>, AuthenticateError> {
-        Ok(None)
+        Ok((username == "viewer" && password == "secret").then(|| {
+            (
+                TOKEN.to_string(),
+                ServerUser {
+                    id: self.user_id,
+                    login: "viewer".into(),
+                    is_admin: false,
+                },
+            )
+        }))
     }
 
     async fn user_id_by_token(
@@ -106,7 +119,26 @@ impl MediaServerProvider for RecordingProvider {
         token: &str,
         _deadline: Option<std::time::Instant>,
     ) -> Result<Option<UserId>, media_server::provider::QueryError> {
-        Ok((token == TOKEN).then_some(self.user_id))
+        let revoked = self.revoked_tokens.lock().unwrap();
+        Ok((token == TOKEN && !revoked.iter().any(|item| item == token)).then_some(self.user_id))
+    }
+
+    async fn revoke_token(&self, token: &str) -> Result<(), media_server::provider::QueryError> {
+        self.revoked_tokens.lock().unwrap().push(token.to_string());
+        Ok(())
+    }
+
+    async fn bind_playback_credential(
+        &self,
+        _user_id: UserId,
+        _device_id: &str,
+        _token: &str,
+        _deadline: Option<std::time::Instant>,
+    ) -> Result<(), media_server::provider::QueryError> {
+        if self.fail_bind {
+            return Err(media_server::provider::QueryError::Unavailable);
+        }
+        Ok(())
     }
 
     async fn get_user_for_query(
@@ -302,4 +334,30 @@ async fn session_playing_checks_token_revocation_even_with_fresh_device() {
         .unwrap();
     let resp = media_server::routes(provider).oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn login_succeeds_even_when_initial_device_credential_binding_fails() {
+    let mut provider = RecordingProvider::new(Vec::new());
+    provider.fail_bind = true;
+    let app = media_server::routes(Arc::new(provider));
+
+    for prefix in ["", "/emby"] {
+        let req = Request::post(format!("{prefix}/Users/AuthenticateByName"))
+            .header("content-type", "application/json")
+            .header(
+                "x-emby-authorization",
+                r#"MediaBrowser Client="VidHub", Device="Phone", DeviceId="dev-1", Version="1.0""#,
+            )
+            .body(Body::from(r#"{"Username":"viewer","Pw":"secret"}"#))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "{prefix}");
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["AccessToken"].as_str(), Some(TOKEN), "{prefix}");
+        assert_eq!(body["SessionInfo"]["DeviceId"], "dev-1", "{prefix}");
+    }
 }

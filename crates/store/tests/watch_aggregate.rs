@@ -1,5 +1,6 @@
 //! B6：SQL 聚合的播放统计——去重、窗口边界、时区桶与零填充。
 
+#[path = "support/mod.rs"]
 mod support;
 
 use domain::{LedgerId, LibraryId, MediaId, UserId};

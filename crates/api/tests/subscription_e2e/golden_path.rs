@@ -16,7 +16,7 @@ async fn movie_subscription_flows_from_search_to_library() {
     assert!(
         task.tags
             .iter()
-            .any(|t| t == &downloader::ownership_tag(MATRIX_ENCLOSURE))
+            .any(|t| t == &downloader::ownership_tag(&h.enclosure(1)))
     );
     assert_eq!(h.pending(id).len(), 1);
 

@@ -103,6 +103,7 @@ fn qbit_row(
         url,
         username: Some("u".into()),
         password: Some("p".into()),
+        api_key: None,
         category: None,
         path_maps: Vec::new(),
         is_default,

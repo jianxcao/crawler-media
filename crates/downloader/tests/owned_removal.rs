@@ -92,6 +92,7 @@ fn qbit_original_absent_identical_unrelated_release_is_never_deleted() {
         url,
         username: "u".into(),
         password: "p".into(),
+        api_key: None,
         category: None,
         path_maps: vec![],
     })
@@ -134,6 +135,7 @@ fn qbit_magnet_hash_does_not_delete_same_title_different_hash() {
         url,
         username: "u".into(),
         password: "p".into(),
+        api_key: None,
         category: None,
         path_maps: vec![],
     })
@@ -185,6 +187,7 @@ fn qbit_marked_http_task_survives_restart_and_deletes_exact_hash() {
         url,
         username: "u".into(),
         password: "p".into(),
+        api_key: None,
         category: None,
         path_maps: vec![],
     })

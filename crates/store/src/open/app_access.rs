@@ -13,6 +13,14 @@ impl Store {
         self.with_app_read(|app| app.get_setting(key))
     }
 
+    pub fn mutate_setting<R>(
+        &self,
+        key: &str,
+        f: impl FnOnce(Option<String>) -> Result<(Option<String>, R), StoreError>,
+    ) -> Result<R, StoreError> {
+        self.with_app(|app| app.mutate_setting(key, f))
+    }
+
     /// 保存一次搜索的结果快照（按 vertical 独立，保留最近 50 条）。
     pub fn insert_search_snapshot(
         &self,

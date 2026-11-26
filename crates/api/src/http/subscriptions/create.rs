@@ -433,9 +433,9 @@ fn map_create_error(
             | store::StoreError::ReadCancelled
             | store::StoreError::WriteBusy,
         ) => crate::http::store_wait::busy_response(),
-        crate::subscribe_create::CreateError::Store(store::StoreError::Conflict(message)) => {
-            err(StatusCode::CONFLICT, "subscription.conflict", &message)
-        }
+        crate::subscribe_create::CreateError::Store(
+            store::StoreError::Conflict(message) | store::StoreError::Protected(message),
+        ) => err(StatusCode::CONFLICT, "subscription.conflict", &message),
         crate::subscribe_create::CreateError::Admission(
             crate::jobs_writer::JobsMutationError::Acquire(error),
         ) => crate::http::jobs::jobs_acquire_response(error),

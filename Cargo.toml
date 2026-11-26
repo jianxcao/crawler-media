@@ -73,3 +73,18 @@ httpdate = "1"
 # SQLite's mutex initialization read-barrier fix; provenance: vendor/README.md.
 [patch.crates-io]
 libsqlite3-sys = { path = "vendor/libsqlite3-sys-0.35.0" }
+
+# 第三方依赖（含内置 SQLite C 引擎、argon2、serde_json、image、sha2 等）启用 O2 优化，
+# store 开启 O1 轻量优化以加速大库循环与 SQLite 投影，并在 dev / clippy / test 间共享产物；
+# 其余业务 crate（尤其体量最大的 api）保持 opt-level = 0 保证增量编译速度。
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.dev.package.store]
+opt-level = 1
+
+[profile.test.package."*"]
+opt-level = 2
+
+[profile.test.package.store]
+opt-level = 1

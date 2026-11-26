@@ -1,6 +1,7 @@
 //! C06: an event that omits its duration keeps the resume duration only while
 //! it stays on the same bound physical source.
 
+#[path = "playback_event_support/mod.rs"]
 mod playback_event_support;
 use playback_event_support::*;
 

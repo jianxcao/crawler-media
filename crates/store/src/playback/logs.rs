@@ -21,18 +21,18 @@ impl Store {
         &self,
         user_id: UserId,
         media_ids: Option<&[MediaId]>,
-        since_ms: Option<i64>,
+        since: Option<i64>,
     ) -> Result<usize, StoreError> {
-        self.with_library_write(|db| db.delete_logs(user_id, media_ids, since_ms))
+        self.with_library_write(|db| db.delete_logs(user_id, media_ids, since))
     }
 
     pub fn delete_metrics(
         &self,
         user_id: UserId,
         media_ids: Option<&[MediaId]>,
-        since_ms: Option<i64>,
+        since: Option<i64>,
     ) -> Result<usize, StoreError> {
-        self.with_library_write(|db| db.delete_metrics(user_id, media_ids, since_ms))
+        self.with_library_write(|db| db.delete_metrics(user_id, media_ids, since))
     }
 
     #[allow(clippy::too_many_arguments)]

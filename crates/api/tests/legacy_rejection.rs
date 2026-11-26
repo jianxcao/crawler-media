@@ -140,6 +140,7 @@ fn qbit_ignores_legacy_per_torrent_tag() {
         url: server.url(),
         username: "admin".into(),
         password: "pass".into(),
+        api_key: None,
         category: None,
         path_maps: vec![],
     })

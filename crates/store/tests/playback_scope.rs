@@ -1,6 +1,7 @@
 //! Store-side playback history scope: SQL keyset paging with a visible-Media
 //! set and a hidden-row count for the same scope.
 
+#[path = "support/mod.rs"]
 mod support;
 
 use domain::{LedgerId, LibraryId, MediaId, UserId};

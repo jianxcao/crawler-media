@@ -20,7 +20,6 @@ use store::test_support::{FixtureFile, publish_fixture_file};
 
 pub const TOKEN: &str = "management-secret";
 pub const MATRIX_TITLE: &str = "The.Matrix.1999.2160p.BluRay.x265-GROUP";
-pub const MATRIX_ENCLOSURE: &str = "https://pt.example/download.php?id=1&passkey=abc";
 
 /// Indexer fixture whose search page can change between rounds.
 pub struct SearchFixture {
@@ -52,7 +51,7 @@ impl indexer::Fetcher for SearchFixture {
 }
 
 /// NexusPHP search page with one row per `(title, id)`; enclosure is
-/// `https://pt.example/download.php?id=<id>&passkey=abc`.
+/// `<site_url>/download.php?id=<id>&passkey=abc`.
 pub fn nexus_rows(rows: &[(&str, u32)]) -> String {
     let mut html = String::from("<!DOCTYPE html><html><body><table class=\"torrents\">");
     for (title, id) in rows {
@@ -62,10 +61,6 @@ pub fn nexus_rows(rows: &[(&str, u32)]) -> String {
     }
     html.push_str("</table></body></html>");
     html
-}
-
-pub fn enclosure(id: u32) -> String {
-    format!("https://pt.example/download.php?id={id}&passkey=abc")
 }
 
 pub struct Harness {
@@ -245,6 +240,10 @@ impl Harness {
             .and_then(|f| f.path.clone())
     }
 
+    pub fn enclosure(&self, id: u32) -> String {
+        format!("{}/download.php?id={id}&passkey=abc", self.qb.url)
+    }
+
     /// Site whose download links point at the mock (serves `torrent_file`).
     pub async fn create_site_at_mock(&self) {
         let mut payload = site_payload();
@@ -259,7 +258,7 @@ impl Harness {
     }
 
     pub async fn create_site(&self) {
-        create_site(&self.app).await;
+        self.create_site_at_mock().await;
     }
 
     /// Movie subscription for The Matrix (2160p filter); `patch` is merged in.

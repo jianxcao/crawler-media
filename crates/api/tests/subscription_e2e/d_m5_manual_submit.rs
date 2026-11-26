@@ -63,7 +63,7 @@ async fn manual_submit_conflicts_on_owned_slot_and_scores_with_filter() {
     h.qb.complete(0, E01, &[(&format!("{E01}.mkv"), &video)]);
     h.transfer(id).await.unwrap();
 
-    let body = json!({ "title": E01_ALT, "download_url": "https://pt.example/alt.torrent",
+    let body = json!({ "title": E01_ALT, "download_url": format!("{}/alt.torrent", h.qb.url),
         "subscribe_id": id.to_string() });
     let (status, _) = submit(&h, body.clone()).await;
     assert_eq!(

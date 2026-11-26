@@ -1,0 +1,9 @@
+[profile.default]
+fail-fast = false
+slow-timeout = { period = "60s", terminate-after = 20 }
+
+# 对单线程 Tokio 调度器响应延迟（<80~200ms）与毫秒级端到端性能断言测试独占并发槽位，
+# 消除多进程抢占导致的假阳性超时。
+[[profile.default.overrides]]
+filter = "binary(/^executor_/) | binary(driver_executor_bounds) | binary(duplicates_work_bounds) | binary(library_read_principal) | binary(library_reads_off_writer) | binary(marker_late_intro_capture) | binary(probe_queue_control_and_restart_pause) | binary(endpoint_perf) | binary(playback_writer_latency) | binary(reads_during_scan) | binary(reader_request_budget) | binary(read_only_store) | binary(hot_read_assessment) | binary(query_model_perf) | binary(query_work_perf) | binary(query_model_axes_perf) | binary(catalog_read_latency) | binary(jobs_writer_contention) | binary(log_export) | binary(media_poster_delivery) | binary(catalog_douban_reads) | binary(discover_swr_and_refresh_job) | binary(theintrodb_rate_limit)"
+threads-required = "num-test-threads"

@@ -13,6 +13,16 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use parking_lot::Mutex;
 use serde_json::json;
 
+fn default_torrent_for_request(req: &str) -> String {
+    let target = req.split_whitespace().nth(1).unwrap_or("/download.php");
+    let announce = format!("http://127.0.0.1{target}");
+    format!(
+        "d8:announce{}:{announce}4:infod6:lengthi1e4:name{}:{target}12:piece lengthi16384e6:pieces20:aaaaaaaaaaaaaaaaaaaaee",
+        announce.len(),
+        target.len()
+    )
+}
+
 #[derive(Clone, Debug)]
 pub struct Task {
     pub hash: String,
@@ -119,6 +129,7 @@ impl MockQbit {
             url: self.url.clone(),
             username: "admin".into(),
             password: "pass".into(),
+            api_key: None,
             category: Some("crawler-media".into()),
             path_maps: vec![],
         }
@@ -204,11 +215,13 @@ impl MockQbitState {
                 "Set-Cookie: SID=e2e-sid; HttpOnly\r\n",
             );
         }
-        if req.starts_with("GET /download.php") {
-            return match self.torrent_file.lock().clone() {
-                Some(bytes) => ("200 OK", bytes, ""),
-                None => ("404 Not Found", "no".into(), ""),
-            };
+        if req.starts_with("GET /download.php") || req.starts_with("GET /alt.torrent") {
+            let body = self
+                .torrent_file
+                .lock()
+                .clone()
+                .unwrap_or_else(|| default_torrent_for_request(req));
+            return ("200 OK", body, "");
         }
         if self
             .forbid_next

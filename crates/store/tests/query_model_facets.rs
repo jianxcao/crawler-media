@@ -1,3 +1,4 @@
+#[path = "query_model_support/mod.rs"]
 mod query_model_support;
 use store::Store;
 #[path = "query_work/support.rs"]
@@ -156,6 +157,7 @@ fn unfiltered_facets_read_counts_not_all_cards() {
     let (small, small_work) = store.library_facets_with_stats(&request).unwrap();
     assert_eq!(small.total, 400);
     assert_eq!(count(&small, "genres", "Drama"), 200);
+    store.relax_sync_for_scale_seed();
     work_support::seed_into(
         &store,
         domain::MediaKind::Movie,

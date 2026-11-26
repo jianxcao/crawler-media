@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use domain::{Media, MediaKind, Release};
 
@@ -75,8 +75,16 @@ pub fn render_path(
         .and_then(|e| e.to_str())
         .map(|e| format!(".{e}"))
         .unwrap_or_default();
-    let relative = substitute(pattern, media, release, &ext);
-    let relative = collapse_separators(&relative);
+    let relative = render_relative(pattern, media, release, &ext)?;
+    if relative.is_empty()
+        || !Path::new(&relative)
+            .components()
+            .all(|c| matches!(c, Component::Normal(_)))
+    {
+        return Err(LibraryError::Naming(format!(
+            "invalid rendered relative path: {relative:?}"
+        )));
+    }
     Ok(root.join(relative))
 }
 
@@ -102,18 +110,114 @@ fn placeholders(pattern: &str) -> Vec<String> {
     names
 }
 
+fn ungrouped_placeholders(pattern: &str) -> Vec<String> {
+    let mut ungrouped = String::new();
+    let mut rest = pattern;
+    while !rest.is_empty() {
+        let Some(open) = rest.find(['[', '(']) else {
+            ungrouped.push_str(rest);
+            break;
+        };
+        ungrouped.push_str(&rest[..open]);
+        let opener = rest.as_bytes()[open] as char;
+        let closer = if opener == '[' { ']' } else { ')' };
+        rest = &rest[open + 1..];
+        let Some(close) = rest.find(closer) else {
+            ungrouped.push(opener);
+            ungrouped.push_str(rest);
+            break;
+        };
+        rest = &rest[close + 1..];
+    }
+    placeholders(&ungrouped)
+}
+
+fn render_relative(
+    pattern: &str,
+    media: &Media,
+    release: &Release,
+    ext: &str,
+) -> Result<String, LibraryError> {
+    if ungrouped_placeholders(pattern)
+        .iter()
+        .any(|name| core_name(name) == "title")
+        && sanitized_value_for("title", media, release, ext).is_empty()
+    {
+        return Err(LibraryError::Naming(
+            "title token is empty after sanitization".into(),
+        ));
+    }
+    let template_segments: Vec<&str> = pattern
+        .split('/')
+        .filter(|seg| !seg.trim().is_empty())
+        .collect();
+    if template_segments.is_empty() {
+        return Err(LibraryError::Naming("naming pattern is empty".into()));
+    }
+    let sanitized_ext = sanitized_value_for("ext", media, release, ext);
+    let mut out = String::new();
+    for template_segment in template_segments {
+        let cleaned = if let Some(stem_template) = template_segment.strip_suffix("{ext}") {
+            let stem = collapse_segment(&substitute(stem_template, media, release, ext));
+            if stem.is_empty() {
+                String::new()
+            } else {
+                format!("{stem}{sanitized_ext}")
+            }
+        } else {
+            collapse_segment(&substitute(template_segment, media, release, ext))
+        };
+        if cleaned.is_empty() {
+            return Err(LibraryError::Naming(format!(
+                "naming segment {template_segment:?} collapsed to empty"
+            )));
+        }
+        if !out.is_empty() {
+            out.push('/');
+        }
+        out.push_str(&cleaned);
+    }
+    Ok(out)
+}
+
 fn substitute(pattern: &str, media: &Media, release: &Release, ext: &str) -> String {
     let empty: Vec<String> = placeholders(pattern)
         .iter()
-        .filter(|name| value_for(name, media, release, ext).is_empty())
+        .filter(|name| sanitized_value_for(name, media, release, ext).is_empty())
         .cloned()
         .collect();
     let mut out = drop_empty_groups(pattern, &empty);
     for name in placeholders(&out) {
-        let value = value_for(&name, media, release, ext);
+        let value = sanitized_value_for(&name, media, release, ext);
         out = out.replace(&format!("{{{name}}}"), &value);
     }
     out
+}
+
+fn sanitized_value_for(name: &str, media: &Media, release: &Release, ext: &str) -> String {
+    let raw = value_for(name, media, release, ext);
+    if core_name(name) == "ext" {
+        let stem = raw.strip_prefix('.').unwrap_or(&raw);
+        let cleaned = collapse_segment(&sanitize_token_value(stem));
+        return if cleaned.is_empty() {
+            String::new()
+        } else {
+            format!(".{cleaned}")
+        };
+    }
+    collapse_segment(&sanitize_token_value(&raw))
+}
+
+/// Strip directory separators, cross-platform forbidden filename characters,
+/// and ASCII control bytes from substituted metadata tokens so titles never
+/// split into unintended subdirs or produce invalid SMB/Windows filenames.
+fn sanitize_token_value(raw: &str) -> String {
+    raw.chars()
+        .map(|ch| match ch {
+            '/' | '\\' | '\0' | ':' | '*' | '?' | '"' | '<' | '>' | '|' | '\x01'..='\x1f' => ' ',
+            other => other,
+        })
+        .collect()
 }
 
 /// Remove `[...]` / `(...)` groups that reference an empty placeholder; also
@@ -214,21 +318,6 @@ fn season_episode(release: &Release) -> String {
     }
 }
 
-fn collapse_separators(raw: &str) -> String {
-    let mut out = String::new();
-    for segment in raw.split('/') {
-        let cleaned = collapse_segment(segment);
-        if cleaned.is_empty() {
-            continue;
-        }
-        if !out.is_empty() {
-            out.push('/');
-        }
-        out.push_str(&cleaned);
-    }
-    out
-}
-
 fn collapse_segment(segment: &str) -> String {
     let mut s = segment.to_string();
     loop {
@@ -236,12 +325,15 @@ fn collapse_segment(segment: &str) -> String {
             .replace("()", "")
             .replace("[]", "")
             .replace("  ", " ")
-            .trim_matches([' ', '_', '.'])
+            .trim_matches([' ', '_', '.', '-'])
             .to_string();
         if next == s {
             break;
         }
         s = next;
     }
-    s.trim_matches([' ', '-']).to_string()
+    if s == "." || s == ".." {
+        return String::new();
+    }
+    s
 }

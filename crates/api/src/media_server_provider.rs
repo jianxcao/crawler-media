@@ -191,6 +191,27 @@ impl MediaServerProvider for ApiServerProvider {
         .map_err(query_stage_error)
     }
 
+    async fn revoke_token(&self, token: &str) -> Result<(), media_server::provider::QueryError> {
+        if !self.state.instance_writable() {
+            return Err(media_server::provider::QueryError::Unavailable);
+        }
+        let deadline = std::time::Instant::now() + crate::http::store_wait::STORE_WRITE_WAIT;
+        let owned_token = token.to_owned();
+        crate::library_read_work::run_store_write_stage_named(
+            &self.state,
+            deadline,
+            "revoke_token",
+            move |store| {
+                store
+                    .delete_session_tokens(&[owned_token])
+                    .map(|_| ())
+                    .map_err(Into::into)
+            },
+        )
+        .await
+        .map_err(query_stage_error)
+    }
+
     /// 先 resolve 可见行，再交给共享 single-flight 字幕服务。
     async fn deliver_subtitle(
         &self,

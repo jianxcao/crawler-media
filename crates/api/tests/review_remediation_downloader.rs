@@ -35,6 +35,7 @@ fn assert_submission_rejected(kind: Option<&str>, enabled: bool) {
                 url: "http://127.0.0.1:1".into(),
                 username: Some("admin".into()),
                 password: None,
+                api_key: None,
                 category: None,
                 path_maps: vec![],
                 is_default: true,

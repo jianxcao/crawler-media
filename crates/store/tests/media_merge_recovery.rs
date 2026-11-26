@@ -5,6 +5,7 @@ use rusqlite::{Connection, params};
 use store::Store;
 use store::playback::MediaMergeRequest;
 
+#[path = "merge_support/mod.rs"]
 mod merge_support;
 use merge_support::{
     MergeFixture, adopted_episodes, create_media, insert_nfo_input, read_summary, setup_merge,

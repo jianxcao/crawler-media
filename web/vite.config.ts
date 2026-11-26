@@ -1,4 +1,4 @@
-import { defineConfig } from "vite";
+import { defineConfig, type UserConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import path from "node:path";
 
@@ -7,35 +7,44 @@ import path from "node:path";
  * 生产:`vite build` 产出 dist/ 静态文件,由 Rust 二进制托管
  * (CRAWLER_MEDIA_UI 指向 dist,单端口同源,天然无跨域问题)。
  */
-export default defineConfig({
-  plugins: [react()],
-  resolve: {
-    alias: {
-      "@": path.resolve(__dirname, "."),
-    },
-  },
-  server: {
-    host: "127.0.0.1",
-    port: 3334,
-    strictPort: true,
-    proxy: {
-      "/api": {
-        target: process.env.VITE_BACKEND_TARGET || "http://127.0.0.1:18765",
-        changeOrigin: true,
-      },
-      "/posters": {
-        target: process.env.VITE_BACKEND_TARGET || "http://127.0.0.1:18765",
-        changeOrigin: true,
+export default defineConfig((): UserConfig => {
+  const extraAllowedHosts = (process.env.CM_DEV_ALLOWED_HOSTS ?? "")
+    .split(",")
+    .map((host) => host.trim().toLowerCase())
+    .filter(Boolean);
+  const backendTarget = process.env.VITE_BACKEND_TARGET || "http://127.0.0.1:18765";
+
+  return {
+    plugins: [react()],
+    resolve: {
+      alias: {
+        "@": path.resolve(__dirname, "."),
       },
     },
-  },
-  build: {
-    outDir: "dist",
-  },
-  // jassub 的 dist 里有 `new Worker(new URL(...))` 兜底,Vite 会把它当 worker
-  // 入口打包;默认 iife 格式不支持分包,必须用 es 格式(运行时实际走我们传入的
-  // /jassub/ 独立 URL,这条兜底只在显式 workerUrl 缺失时才会被真正构造)。
-  worker: {
-    format: "es",
-  },
+    server: {
+      host: "127.0.0.1",
+      port: 3334,
+      strictPort: true,
+      ...(extraAllowedHosts.length > 0 ? { allowedHosts: extraAllowedHosts } : {}),
+      proxy: {
+        "/api": {
+          target: backendTarget,
+          changeOrigin: true,
+        },
+        "/posters": {
+          target: backendTarget,
+          changeOrigin: true,
+        },
+      },
+    },
+    build: {
+      outDir: "dist",
+    },
+    // jassub 的 dist 里有 `new Worker(new URL(...))` 兜底,Vite 会把它当 worker
+    // 入口打包;默认 iife 格式不支持分包,必须用 es 格式(运行时实际走我们传入的
+    // /jassub/ 独立 URL,这条兜底只在显式 workerUrl 缺失时才会被真正构造)。
+    worker: {
+      format: "es",
+    },
+  };
 });

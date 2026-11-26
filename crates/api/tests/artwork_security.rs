@@ -438,3 +438,268 @@ async fn artwork_candidates_redacts_host_paths_for_member_and_uses_read_pool() {
     assert_eq!(busy_status, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(busy_body["error"]["code"], "runtime.busy");
 }
+
+struct FailingStatFiles {
+    raw_os: Option<i32>,
+}
+
+impl api::file_stat_read::FileStatRead for FailingStatFiles {
+    fn read_nfo(&self, _: &std::path::Path) -> Option<library::NfoMeta> {
+        None
+    }
+
+    fn metadata(&self, _: &std::path::Path) -> std::io::Result<std::fs::Metadata> {
+        match self.raw_os {
+            Some(code) => Err(std::io::Error::from_raw_os_error(code)),
+            None => Err(std::io::Error::other("disk io failure")),
+        }
+    }
+
+    fn is_file(&self, _: &std::path::Path) -> bool {
+        false
+    }
+}
+
+async fn get_full(app: &axum::Router, uri: &str) -> (StatusCode, axum::http::HeaderMap, Value) {
+    let resp = app
+        .clone()
+        .oneshot(Request::get(uri).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let status = resp.status();
+    let headers = resp.headers().clone();
+    let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let json = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    (status, headers, json)
+}
+
+#[tokio::test]
+async fn unreadable_sidecar_returns_500_permission_hint_instead_of_404_and_recovers() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fx = Fixture::new();
+    let app = router(fx.state.clone());
+    let paths = [
+        (
+            fx.item_dir.join("poster.jpg"),
+            format!("/api/v1/posters/{}", fx.file_id),
+        ),
+        (
+            fx.item_dir.join("fanart.jpg"),
+            format!("/api/v1/fanart/{}", fx.file_id),
+        ),
+        (
+            fx.item_dir.join("Film-thumb.jpg"),
+            format!("/api/v1/stills/{}", fx.file_id),
+        ),
+    ];
+
+    for (_, uri) in &paths {
+        let (status, body) = get_status(&app, uri, None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "absent {uri} should 404");
+        assert_eq!(body["error"]["code"], "poster.missing");
+    }
+
+    for (path, _) in &paths {
+        std::fs::write(path, valid_jpeg()).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o000)).unwrap();
+    }
+    if std::fs::read(&paths[0].0).is_ok() {
+        for (path, _) in &paths {
+            let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644));
+        }
+        return;
+    }
+
+    let mut responses = Vec::new();
+    for (_, uri) in &paths {
+        responses.push((uri.clone(), get_full(&app, uri).await));
+    }
+    for (path, _) in &paths {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    }
+
+    for (uri, (status, headers, body)) in responses {
+        assert_eq!(
+            status,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "unreadable {uri} must return 500 instead of 404: {body}"
+        );
+        assert_eq!(
+            headers
+                .get(axum::http::header::CACHE_CONTROL)
+                .and_then(|v| v.to_str().ok()),
+            Some("no-store")
+        );
+        assert_eq!(body["ok"], false);
+        assert_eq!(body["error"]["code"], "poster.permission_denied");
+        let msg = body["error"]["message"].as_str().unwrap_or_default();
+        assert!(msg.contains("权限"), "expected permission hint: {msg}");
+    }
+
+    for (_, uri) in &paths {
+        let (status, _, _) = get_full(&app, uri).await;
+        assert_eq!(status, StatusCode::OK, "restored {uri} must return 200");
+    }
+}
+
+#[tokio::test]
+async fn stat_permission_and_generic_io_errors_return_500_with_permission_prompt() {
+    let fx = Fixture::new();
+    let uri = format!("/api/v1/posters/{}", fx.file_id);
+
+    let eperm_app = router(
+        fx.state
+            .clone()
+            .with_file_stat_read(Arc::new(FailingStatFiles { raw_os: Some(1) })),
+    );
+    let (status, headers, body) = get_full(&eperm_app, &uri).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(
+        headers
+            .get(axum::http::header::CACHE_CONTROL)
+            .and_then(|v| v.to_str().ok()),
+        Some("no-store")
+    );
+    assert_eq!(body["error"]["code"], "poster.permission_denied");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("权限")
+    );
+
+    let io_app = router(
+        fx.state
+            .clone()
+            .with_file_stat_read(Arc::new(FailingStatFiles { raw_os: None })),
+    );
+    let (status, _, body) = get_full(&io_app, &uri).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(body["error"]["code"], "poster.io_error");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("权限")
+    );
+}
+
+#[tokio::test]
+async fn flat_library_file_does_not_read_or_500_on_parent_above_library_root() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let outer = tmp.path().join("outer");
+    let lib_root = outer.join("lib_root");
+    std::fs::create_dir_all(&lib_root).unwrap();
+    let video = lib_root.join("Movie.mkv");
+    std::fs::write(&video, b"video").unwrap();
+    let outer_poster = outer.join("poster.jpg");
+    let outer_fanart = outer.join("fanart.jpg");
+    std::fs::write(&outer_poster, valid_jpeg()).unwrap();
+    std::fs::write(&outer_fanart, valid_jpeg()).unwrap();
+
+    let state = ApiState::new(
+        Store::open(tmp.path().join("data")).unwrap(),
+        ADMIN_TOKEN.into(),
+        ProfileSet::load(None).unwrap(),
+        Arc::new(NoFetch),
+        Arc::new(MemoryDownloader::new(tmp.path().join("stage"))),
+    )
+    .unwrap();
+    let store = state.store();
+    store
+        .create_library(
+            MediaKind::Movie,
+            "FlatMovies",
+            &[lib_root.to_str().unwrap()],
+            "everyone",
+            true,
+            &[],
+        )
+        .unwrap();
+    let media = Media {
+        id: MediaId::new(),
+        kind: MediaKind::Movie,
+        title: "Movie".into(),
+        year: Some(2024),
+        original_title: None,
+        aliases: Vec::new(),
+        tmdb_id: None,
+        douban_id: None,
+        tvdb_id: None,
+        bangumi_id: None,
+        anilist_id: None,
+    };
+    store.insert_media(&media).unwrap();
+    let file_id = LedgerId::new();
+    publish_fixture_file(
+        &store,
+        &FixtureFile {
+            file_id: Some(file_id),
+            media_id: media.id,
+            path: video.display().to_string(),
+            quality_source: QualitySource::Probe,
+            confidence: Confidence::High,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    drop(store);
+
+    let app = router(state);
+    for uri in [
+        format!("/api/v1/posters/{file_id}"),
+        format!("/api/v1/fanart/{file_id}"),
+    ] {
+        let (status, body) = get_status(&app, &uri, None).await;
+        assert_eq!(
+            status,
+            StatusCode::NOT_FOUND,
+            "must not read above root: {uri}"
+        );
+        assert_eq!(body["error"]["code"], "poster.missing");
+    }
+
+    std::fs::set_permissions(&outer_poster, std::fs::Permissions::from_mode(0o000)).unwrap();
+    std::fs::set_permissions(&outer_fanart, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let poster_res = get_status(&app, &format!("/api/v1/posters/{file_id}"), None).await;
+    let fanart_res = get_status(&app, &format!("/api/v1/fanart/{file_id}"), None).await;
+    std::fs::set_permissions(&outer_poster, std::fs::Permissions::from_mode(0o644)).unwrap();
+    std::fs::set_permissions(&outer_fanart, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+    assert_eq!(poster_res.0, StatusCode::NOT_FOUND);
+    assert_eq!(poster_res.1["error"]["code"], "poster.missing");
+    assert_eq!(fanart_res.0, StatusCode::NOT_FOUND);
+    assert_eq!(fanart_res.1["error"]["code"], "poster.missing");
+}
+
+#[tokio::test]
+async fn sidecar_symlink_escaping_library_root_is_not_served() {
+    let fx = Fixture::new();
+    let app = router(fx.state.clone());
+
+    let secret_txt = fx._tmp.path().join("secret.txt");
+    std::fs::write(&secret_txt, b"secret-token-data").unwrap();
+    let outside_jpg = fx._tmp.path().join("outside-poster.jpg");
+    std::fs::write(&outside_jpg, valid_jpeg()).unwrap();
+
+    std::os::unix::fs::symlink(&secret_txt, fx.item_dir.join("poster.jpg")).unwrap();
+    std::os::unix::fs::symlink(&outside_jpg, fx.item_dir.join("fanart.jpg")).unwrap();
+    std::os::unix::fs::symlink(&outside_jpg, fx.item_dir.join("Film-thumb.jpg")).unwrap();
+
+    for uri in [
+        format!("/api/v1/posters/{}", fx.file_id),
+        format!("/api/v1/fanart/{}", fx.file_id),
+        format!("/api/v1/stills/{}", fx.file_id),
+    ] {
+        let (status, body) = get_status(&app, &uri, None).await;
+        assert_eq!(
+            status,
+            StatusCode::NOT_FOUND,
+            "symlink sidecar must 404: {uri}"
+        );
+        assert_eq!(body["error"]["code"], "poster.missing");
+    }
+}

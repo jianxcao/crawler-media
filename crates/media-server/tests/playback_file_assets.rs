@@ -88,6 +88,9 @@ impl MediaServerProvider for FileAssetProvider {
     ) -> Result<Option<UserId>, media_server::provider::QueryError> {
         Ok((token == "valid-token").then_some(self.user_id))
     }
+    async fn revoke_token(&self, _token: &str) -> Result<(), media_server::provider::QueryError> {
+        Ok(())
+    }
     async fn get_user_for_query(
         &self,
         principal: media_server::provider::QueryPrincipal,

@@ -12,6 +12,7 @@ impl Fixture {
     fn new() -> Self {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path().join("data")).unwrap();
+        store.relax_sync_for_scale_seed();
         Self { dir, store }
     }
     fn library(&self, name: &str) -> LibraryId {

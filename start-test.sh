@@ -16,17 +16,18 @@
 #   --no-clean                     启动/重启时不清除旧日志
 #
 # 测试文件默认位于 ~/Downloads/crawler-media：data/ 数据，log/ 日志，run/ PID，qb/ 下载
-# 可用 TEST_ROOT 覆盖根目录；DATA_DIR、LOG_DIR、QB_HOST_DOWNLOADS 可分别覆盖。
-# 启动后访问:  http://127.0.0.1:3334   账号 admin / 密码 test-admin-secret-password
+# 可用 TEST_ROOT 覆盖根目录；DATA_DIR、LOG_DIR、QB_HOST_DOWNLOADS、LISTEN_HOST 可分别覆盖。
+# 启动后本机或局域网访问: http://<本机或局域网IP>:3334   账号 admin / 密码 test-admin-secret-password
 # =============================================================================
 set -euo pipefail
 
 # ----------------------------- 配置区（按需修改） ----------------------------
+LISTEN_HOST="${LISTEN_HOST:-0.0.0.0}"
 BACKEND_PORT="${BACKEND_PORT:-18765}"
 FRONTEND_PORT="${FRONTEND_PORT:-3334}"
 QB_PORT="${QB_PORT:-8080}"
 MOCK_PORT="${MOCK_PORT:-18090}"
-TOKEN="${TOKEN:-changeme}"
+TOKEN="${TOKEN:-}"
 ADMIN_PASSWORD="${ADMIN_PASSWORD:-test-admin-secret-password}"
 QB_USER="${QB_USER:-admin}"
 QB_PASS="${QB_PASS:-adminadmin}"
@@ -101,6 +102,7 @@ local_curl() {
 }
 
 pid_file() { echo "$RUN_DIR/$1.pid"; }
+backend_token_file() { echo "$RUN_DIR/backend.token"; }
 
 prepare_runtime_dirs() {
   mkdir -p "$DATA_DIR" "$LOG_DIR" "$RUN_DIR" "$QB_HOST_DOWNLOADS"
@@ -116,6 +118,68 @@ prepare_runtime_dirs() {
   fi
 }
 
+resolve_dev_token() {
+  if [[ -n "${TOKEN:-}" ]]; then
+    return 0
+  fi
+  local token_file="$DATA_DIR/.dev-api-token"
+  if [[ -s "$token_file" ]]; then
+    local saved
+    saved="$(tr -d '[:space:]' < "$token_file" 2>/dev/null || true)"
+    if [[ -n "$saved" ]]; then
+      TOKEN="$saved"
+      return 0
+    fi
+  fi
+  mkdir -p "$DATA_DIR"
+  local generated=""
+  if command -v openssl >/dev/null 2>&1; then
+    generated="$(openssl rand -hex 16 2>/dev/null || true)"
+  fi
+  if [[ -z "$generated" ]]; then
+    generated="$(python3 -c 'import secrets; print(secrets.token_hex(16))')"
+  fi
+  (umask 077 && printf '%s\n' "$generated" >"$token_file")
+  TOKEN="$generated"
+}
+
+peek_active_token() {
+  local saved=""
+  if is_running "$(pid_file backend)" && [[ -s "$(backend_token_file)" ]]; then
+    saved="$(tr -d '[:space:]' < "$(backend_token_file)" 2>/dev/null || true)"
+    if [[ -n "$saved" ]]; then
+      printf '%s' "$saved"
+      return 0
+    fi
+  fi
+  if [[ -n "${TOKEN:-}" ]]; then
+    printf '%s' "$TOKEN"
+    return 0
+  fi
+  local token_file="$DATA_DIR/.dev-api-token"
+  if [[ -s "$token_file" ]]; then
+    saved="$(tr -d '[:space:]' < "$token_file" 2>/dev/null || true)"
+    if [[ -n "$saved" ]]; then
+      printf '%s' "$saved"
+      return 0
+    fi
+  fi
+  printf '%s' "(未初始化，首次 start 时自动生成于 $token_file)"
+}
+
+backend_accepts_token() {
+  local expected="$1"
+  local active_file recorded=""
+  active_file="$(backend_token_file)"
+  if [[ -s "$active_file" ]]; then
+    recorded="$(tr -d '[:space:]' < "$active_file" 2>/dev/null || true)"
+    if [[ -n "$recorded" && "$recorded" != "$expected" ]]; then
+      return 1
+    fi
+  fi
+  local_curl -sf -H "Authorization: Bearer $expected" "http://127.0.0.1:$BACKEND_PORT/api/v1/auth/me" >/dev/null 2>&1
+}
+
 read_pid() {
   local file="$1"
   [[ -f "$file" ]] || return 1
@@ -129,6 +193,150 @@ is_running() {
   local pid
   pid="$(read_pid "$1")" || return 1
   kill -0 "$pid" 2>/dev/null
+}
+
+detect_lan_ip() {
+  local ip="" iface
+  if command -v ipconfig >/dev/null 2>&1; then
+    for iface in en0 en1 en2 bridge0; do
+      ip="$(ipconfig getifaddr "$iface" 2>/dev/null || true)"
+      if [[ -n "$ip" ]]; then
+        printf '%s' "$ip"
+        return 0
+      fi
+    done
+  fi
+  if command -v hostname >/dev/null 2>&1; then
+    ip="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
+    if [[ -n "$ip" ]]; then
+      printf '%s' "$ip"
+      return 0
+    fi
+  fi
+  if command -v ifconfig >/dev/null 2>&1; then
+    ip="$(ifconfig 2>/dev/null | awk '/inet / && $2 != "127.0.0.1" {print $2; exit}' || true)"
+    if [[ -n "$ip" ]]; then
+      printf '%s' "$ip"
+      return 0
+    fi
+  fi
+  return 1
+}
+
+append_csv_unique() {
+  local list="$1" item="$2"
+  [[ -n "$item" ]] || { printf '%s' "$list"; return 0; }
+  case ",$list," in
+    *,"$item",*) printf '%s' "$list" ;;
+    *)
+      if [[ -z "$list" ]]; then
+        printf '%s' "$item"
+      else
+        printf '%s,%s' "$list" "$item"
+      fi
+      ;;
+  esac
+}
+
+build_dev_allowed_hosts() {
+  local allowed_hosts="127.0.0.1,localhost"
+  local lan_ip="" local_host="" listen_host=""
+  lan_ip="$(detect_lan_ip || true)"
+  if [[ -n "$lan_ip" ]]; then
+    lan_ip="$(printf '%s' "$lan_ip" | tr '[:upper:]' '[:lower:]')"
+    allowed_hosts="$(append_csv_unique "$allowed_hosts" "$lan_ip")"
+  fi
+  if command -v scutil >/dev/null 2>&1; then
+    local_host="$(scutil --get LocalHostName 2>/dev/null || true)"
+    local_host="$(printf '%s' "${local_host%.local}" | tr '[:upper:]' '[:lower:]')"
+    if [[ -n "$local_host" ]]; then
+      allowed_hosts="$(append_csv_unique "$allowed_hosts" "${local_host}.local")"
+    fi
+  fi
+  listen_host="$(printf '%s' "${LISTEN_HOST:-}" | tr '[:upper:]' '[:lower:]')"
+  case "$listen_host" in
+    ""|0.0.0.0|::|"[::]"|127.0.0.1|localhost) ;;
+    *)
+      allowed_hosts="$(append_csv_unique "$allowed_hosts" "$listen_host")"
+      ;;
+  esac
+  printf '%s' "$allowed_hosts"
+}
+
+build_cors_origins() {
+  local cors_origins="http://127.0.0.1:$FRONTEND_PORT,http://localhost:$FRONTEND_PORT"
+  local lan_ip="" local_host="" listen_host="" origin_host=""
+  lan_ip="$(detect_lan_ip || true)"
+  if [[ -n "$lan_ip" ]]; then
+    lan_ip="$(printf '%s' "$lan_ip" | tr '[:upper:]' '[:lower:]')"
+    cors_origins="$(append_csv_unique "$cors_origins" "http://$lan_ip:$FRONTEND_PORT")"
+  fi
+  if command -v scutil >/dev/null 2>&1; then
+    local_host="$(scutil --get LocalHostName 2>/dev/null || true)"
+    local_host="$(printf '%s' "${local_host%.local}" | tr '[:upper:]' '[:lower:]')"
+    if [[ -n "$local_host" ]]; then
+      cors_origins="$(append_csv_unique "$cors_origins" "http://${local_host}.local:$FRONTEND_PORT")"
+    fi
+  fi
+  listen_host="$(printf '%s' "${LISTEN_HOST:-}" | tr '[:upper:]' '[:lower:]')"
+  case "$listen_host" in
+    ""|0.0.0.0|::|"[::]"|127.0.0.1|localhost) ;;
+    *)
+      if [[ "$listen_host" == *:* && "$listen_host" != \[*\] ]]; then
+        origin_host="[$listen_host]"
+      else
+        origin_host="$listen_host"
+      fi
+      cors_origins="$(append_csv_unique "$cors_origins" "http://$origin_host:$FRONTEND_PORT")"
+      ;;
+  esac
+  printf '%s' "$cors_origins"
+}
+
+listener_matches_host() {
+  local port="$1"
+  local host
+  host="$(printf '%s' "$2" | tr '[:upper:]' '[:lower:]')"
+  if ! command -v lsof >/dev/null 2>&1; then
+    return 0
+  fi
+  local listeners
+  listeners="$(lsof -nP -iTCP:"$port" -sTCP:LISTEN 2>/dev/null || true)"
+  [[ -n "$listeners" ]] || return 1
+  case "$host" in
+    0.0.0.0)
+      printf '%s\n' "$listeners" | grep -Eq "(\\*|0\\.0\\.0\\.0):${port}([^0-9]|$)"
+      return $?
+      ;;
+    ::|"[::]")
+      printf '%s\n' "$listeners" | grep -Eq "(\\*|\\[::\\]):${port}([^0-9]|$)"
+      return $?
+      ;;
+    127.0.0.1|localhost)
+      if printf '%s\n' "$listeners" | grep -Eq "(\\*|0\\.0\\.0\\.0|\\[::\\]):${port}([^0-9]|$)"; then
+        return 1
+      fi
+      printf '%s\n' "$listeners" | grep -Eq "(127\\.0\\.0\\.1|\\[::1\\]):${port}([^0-9]|$)"
+      return $?
+      ;;
+    *)
+      if printf '%s\n' "$listeners" | grep -Eq "(\\*|0\\.0\\.0\\.0|\\[::\\]):${port}([^0-9]|$)"; then
+        return 1
+      fi
+      if [[ "$host" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        local escaped_host="${host//./\\.}"
+        printf '%s\n' "$listeners" | grep -Eq "(^|[^0-9.])${escaped_host}:${port}([^0-9]|$)"
+        return $?
+      fi
+      if [[ "$host" == *:* ]]; then
+        local bare_v6="${host#[}"
+        bare_v6="${bare_v6%]}"
+        printf '%s\n' "$listeners" | grep -Eq "\\[${bare_v6}\\]:${port}([^0-9]|$)"
+        return $?
+      fi
+      return 0
+      ;;
+  esac
 }
 
 # lsof 可能吐出多个 PID（换行分隔）。逐个 SIGTERM，仍占端口再 SIGKILL。
@@ -171,8 +379,14 @@ launch() {
 start_backend() {
   local force="${1:-false}"
   prepare_runtime_dirs
-  if [[ "$force" != "true" ]] && is_running "$(pid_file backend)" && local_curl -sf --connect-timeout 1 -m 2 "http://127.0.0.1:$BACKEND_PORT/api/v1/health" >/dev/null 2>&1; then
-    log "后端已在运行且健康 (端口 $BACKEND_PORT)，跳过重复启动"
+  resolve_dev_token
+  if [[ "$force" != "true" ]] \
+    && is_running "$(pid_file backend)" \
+    && listener_matches_host "$BACKEND_PORT" "$LISTEN_HOST" \
+    && local_curl -sf --connect-timeout 1 -m 2 "http://127.0.0.1:$BACKEND_PORT/api/v1/health" >/dev/null 2>&1 \
+    && backend_accepts_token "$TOKEN"; then
+    (umask 077 && printf '%s\n' "$TOKEN" >"$(backend_token_file)")
+    log "后端已在运行且健康 ($LISTEN_HOST:$BACKEND_PORT)，跳过重复启动"
     return 0
   fi
 
@@ -188,7 +402,10 @@ start_backend() {
   # 确保端口彻底释放，无任何 TIME_WAIT 或残留监听
   free_port "$BACKEND_PORT"
 
-  log "启动后端 (端口 $BACKEND_PORT)..."
+  local cors_origins
+  cors_origins="$(build_cors_origins)"
+
+  log "启动后端 (监听 $LISTEN_HOST:$BACKEND_PORT)..."
   printf '\n=== [START BACKEND %s] ===\n' "$(date)" >>"$BACKEND_LOG"
   launch backend env \
     RUST_LOG="${RUST_LOG:-info,api=debug,crawler_media=debug,domain=debug,indexer=debug,media=debug,downloader=debug,library=debug,subscribe=debug,filter=debug,release=debug,hooks=debug,jobs=debug,playback=debug,marker=debug,html5ever=off,selectors=warn}" \
@@ -200,9 +417,10 @@ start_backend() {
     CRAWLER_MEDIA_QB_USER="$QB_USER" \
     CRAWLER_MEDIA_QB_PASS="$QB_PASS" \
     CRAWLER_MEDIA_QB_PATH_MAP="/downloads=$QB_HOST_DOWNLOADS" \
-    CRAWLER_MEDIA_CORS_ORIGINS="http://127.0.0.1:$FRONTEND_PORT,http://localhost:$FRONTEND_PORT" \
-    CRAWLER_MEDIA_LISTEN="127.0.0.1:$BACKEND_PORT" \
+    CRAWLER_MEDIA_CORS_ORIGINS="${CRAWLER_MEDIA_CORS_ORIGINS:-$cors_origins}" \
+    CRAWLER_MEDIA_LISTEN="$LISTEN_HOST:$BACKEND_PORT" \
     "$BACKEND_BIN" serve
+  (umask 077 && printf '%s\n' "$TOKEN" >"$(backend_token_file)")
 
   # 等待后端 HTTP 存活探针就绪
   local i
@@ -213,12 +431,14 @@ start_backend() {
     fi
     # 如果进程已经意外退出，立刻报错并打印日志，绝不空等
     if ! is_running "$(pid_file backend)"; then
+      rm -f "$(backend_token_file)"
       fail "后端进程已提前退出，见 $BACKEND_LOG"
       tail -20 "$BACKEND_LOG"
       return 1
     fi
     sleep 0.5
   done
+  rm -f "$(backend_token_file)"
   fail "后端启动超时（已等待 15 秒），见 $BACKEND_LOG"
   tail -20 "$BACKEND_LOG"
   return 1
@@ -226,15 +446,21 @@ start_backend() {
 
 start_frontend() {
   if is_running "$(pid_file frontend)"; then
-    log "前端已在运行 (PID $(read_pid "$(pid_file frontend)"))"
-    return
+    if listener_matches_host "$FRONTEND_PORT" "$LISTEN_HOST"; then
+      log "前端已在运行 (PID $(read_pid "$(pid_file frontend)"), $LISTEN_HOST:$FRONTEND_PORT)"
+      return
+    fi
+    log "停止旧前端进程 (监听地址未覆盖 $LISTEN_HOST) 并重新绑定..."
+    stop_service frontend
   fi
   if [[ ! -x "$FRONTEND_DIR/node_modules/.bin/vite" ]]; then
     fail "找不到 vite，请先: cd web && pnpm install"
     return 1
   fi
   free_port "$FRONTEND_PORT"
-  log "启动前端 (端口 $FRONTEND_PORT)..."
+  local allowed_hosts
+  allowed_hosts="$(build_dev_allowed_hosts)"
+  log "启动前端 (监听 $LISTEN_HOST:$FRONTEND_PORT)..."
   # Vite 同源代理转发到后端端口。
   # 先跑 copy-jassub 复制字幕渲染资产,再 exec vite,避免 pid 文件记到 shell 包装器。
   (
@@ -242,9 +468,11 @@ start_frontend() {
     if [[ -f scripts/copy-jassub.mjs ]]; then
       node scripts/copy-jassub.mjs >>"$FRONTEND_LOG" 2>&1 || true
     fi
-    launch frontend env VITE_BACKEND_TARGET="http://127.0.0.1:$BACKEND_PORT" \
+    launch frontend env \
+      VITE_BACKEND_TARGET="http://127.0.0.1:$BACKEND_PORT" \
+      CM_DEV_ALLOWED_HOSTS="${CM_DEV_ALLOWED_HOSTS:-$allowed_hosts}" \
       node "$FRONTEND_DIR/node_modules/vite/bin/vite.js" \
-      --host 127.0.0.1 --port "$FRONTEND_PORT" --strictPort
+      --host "$LISTEN_HOST" --port "$FRONTEND_PORT" --strictPort
   )
   local _
   for _ in $(seq 1 90); do
@@ -327,6 +555,9 @@ stop_service() {
     log "已停止 $name (PID $pid)"
   fi
   rm -f "$file"
+  if [[ "$name" == "backend" ]]; then
+    rm -f "$(backend_token_file)"
+  fi
 }
 
 stop_all() {
@@ -356,8 +587,16 @@ status_all() {
   fi
   printf '  后端: %s\n  前端: %s\n  qB:   %s\n  mock: %s\n' "$backend" "$frontend" "$qb" "$mock"
   printf '\n  数据目录: %s\n  日志目录: %s\n  下载目录: %s\n' "$DATA_DIR" "$LOG_DIR" "$QB_HOST_DOWNLOADS"
-  printf '\n  登录页面: http://127.0.0.1:%s   (账号 admin / 密码 %s)\n' "$FRONTEND_PORT" "$ADMIN_PASSWORD"
-  printf '  API 接口: http://127.0.0.1:%s   (CLI Bearer Token: %s)\n' "$BACKEND_PORT" "$TOKEN"
+  local active_token
+  active_token="$(peek_active_token)"
+  printf '\n  本机页面:   http://127.0.0.1:%s   (账号 admin / 密码 %s)\n' "$FRONTEND_PORT" "$ADMIN_PASSWORD"
+  printf '  本机 API:   http://127.0.0.1:%s   (CLI Bearer Token: %s)\n' "$BACKEND_PORT" "$active_token"
+  local lan_ip=""
+  lan_ip="$(detect_lan_ip || true)"
+  if [[ "$LISTEN_HOST" == "0.0.0.0" && -n "$lan_ip" ]]; then
+    printf '  局域网页面: http://%s:%s\n' "$lan_ip" "$FRONTEND_PORT"
+    printf '  局域网 API: http://%s:%s   (Jellyfin / Infuse 填此地址)\n' "$lan_ip" "$BACKEND_PORT"
+  fi
 }
 
 # -------------------------------- 主入口 ------------------------------------

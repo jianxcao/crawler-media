@@ -12,12 +12,15 @@ pub struct QbitConfig {
     pub url: String,
     pub username: String,
     pub password: String,
+    /// Native qBittorrent v5.2+ WebUI API key (`Authorization: Bearer <key>`).
+    /// When non-empty, skips `/api/v2/auth/login` cookie authentication.
+    pub api_key: Option<String>,
     pub category: Option<String>,
     /// Save-path prefix mappings (container path -> host path).
     pub path_maps: Vec<PathMap>,
 }
 
-/// 手写 `Debug`：`password` 是下载器凭证，绝不能进日志。
+/// 手写 `Debug`：`password` 与 `api_key` 是下载器凭证，绝不能进日志。
 ///
 /// 之前这里是 `#[derive(Debug)]`，任何一句 `debug!(?config)` 都会把 qBittorrent
 /// 口令打进日志与前端"系统日志"。其余字段保留原样，便于诊断。
@@ -27,6 +30,7 @@ impl std::fmt::Debug for QbitConfig {
             .field("url", &self.url)
             .field("username", &self.username)
             .field("password", &"<redacted>")
+            .field("api_key", &self.api_key.as_ref().map(|_| "<redacted>"))
             .field("category", &self.category)
             .field("path_maps", &self.path_maps)
             .finish()
@@ -43,6 +47,7 @@ mod debug_tests {
             url: "http://127.0.0.1:8080".into(),
             username: "admin".into(),
             password: "qbit-password-secret".into(),
+            api_key: Some("qbt_api_key_secret".into()),
             category: Some("movies".into()),
             path_maps: Vec::new(),
         };
@@ -50,6 +55,10 @@ mod debug_tests {
         assert!(
             !rendered.contains("qbit-password-secret"),
             "Debug 不得输出 password: {rendered}"
+        );
+        assert!(
+            !rendered.contains("qbt_api_key_secret"),
+            "Debug 不得输出 api_key: {rendered}"
         );
         assert!(rendered.contains("<redacted>"), "{rendered}");
         assert!(rendered.contains("127.0.0.1:8080"), "{rendered}");

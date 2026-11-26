@@ -361,7 +361,7 @@ impl crate::LibraryConnection<'_> {
         &self,
         user_id: UserId,
         media_ids: Option<&[MediaId]>,
-        since_ms: Option<i64>,
+        since: Option<i64>,
     ) -> Result<usize, StoreError> {
         if media_ids.is_some_and(|ids| ids.is_empty()) {
             return Ok(0);
@@ -370,7 +370,7 @@ impl crate::LibraryConnection<'_> {
             // Resolve the affected media before the update resets the activity clock.
             let affected = match media_ids {
                 Some(ids) => ids.to_vec(),
-                None => store.user_playback_media_ids(user_id, since_ms)?,
+                None => store.user_playback_media_ids(user_id, since)?,
             };
             for media in &affected {
                 crate::library_write::publish::ensure_media_writable(store.library, *media)?;
@@ -388,7 +388,7 @@ impl crate::LibraryConnection<'_> {
             );
             let mut values: Vec<rusqlite::types::Value> =
                 vec![rusqlite::types::Value::Text(user_id.to_string())];
-            if let Some(since) = since_ms {
+            if let Some(since) = since {
                 sql.push_str(" AND watch_activity_at >= ?");
                 values.push(rusqlite::types::Value::Integer(since));
             }
@@ -410,12 +410,12 @@ impl crate::LibraryConnection<'_> {
         })
     }
 
-    pub(super) fn user_playback_media_ids(
+    pub fn user_playback_media_ids(
         &self,
         user_id: UserId,
-        since_ms: Option<i64>,
+        since: Option<i64>,
     ) -> Result<Vec<MediaId>, StoreError> {
-        let sql = if since_ms.is_some() {
+        let sql = if since.is_some() {
             "SELECT DISTINCT media_id FROM playback_units
              WHERE user_id = ?1 AND watch_activity_at >= ?2"
         } else {
@@ -423,7 +423,7 @@ impl crate::LibraryConnection<'_> {
         };
         let mut values: Vec<rusqlite::types::Value> =
             vec![rusqlite::types::Value::Text(user_id.to_string())];
-        if let Some(since) = since_ms {
+        if let Some(since) = since {
             values.push(rusqlite::types::Value::Integer(since));
         }
         let mut statement = self.library.prepare(sql)?;
@@ -437,5 +437,86 @@ impl crate::LibraryConnection<'_> {
             }
         }
         Ok(media)
+    }
+
+    pub(super) fn max_user_watch_activity_for_media(
+        &self,
+        user_id: UserId,
+        media_ids: &[MediaId],
+    ) -> Result<std::collections::HashMap<MediaId, i64>, StoreError> {
+        let marks = media_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let sql = format!(
+            "SELECT media_id, MAX(watch_activity_at) FROM playback_units
+             WHERE user_id = ? AND media_id IN ({marks})
+             GROUP BY media_id"
+        );
+        let mut values: Vec<rusqlite::types::Value> =
+            vec![rusqlite::types::Value::Text(user_id.to_string())];
+        values.extend(
+            media_ids
+                .iter()
+                .map(|id| rusqlite::types::Value::Text(id.to_string())),
+        );
+        let mut statement = self.library.prepare(&sql)?;
+        let rows = statement.query_map(rusqlite::params_from_iter(values), |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })?;
+        let mut out = std::collections::HashMap::with_capacity(media_ids.len());
+        for row in rows {
+            let (raw_id, ts) = row?;
+            if let Ok(id) = raw_id.parse() {
+                out.insert(id, ts);
+            }
+        }
+        Ok(out)
+    }
+
+    pub(super) fn media_exhausted_by_history_window(
+        &self,
+        user_id: UserId,
+        candidates: &[MediaId],
+        cutoff: i64,
+    ) -> Result<Vec<MediaId>, StoreError> {
+        if candidates.is_empty() {
+            return Ok(Vec::new());
+        }
+        let candidate_json = serde_json::to_string(candidates)?;
+        let mut statement = self.library.prepare(
+            "SELECT DISTINCT c.value
+             FROM json_each(?3) c
+             WHERE (
+                 EXISTS (
+                     SELECT 1 FROM playback_units u1
+                     WHERE u1.user_id = ?1
+                       AND u1.media_id = c.value
+                       AND u1.watch_activity_at >= ?2
+                       AND (u1.played <> 0 OR u1.position_ms > 0 OR u1.play_count > 0)
+                 )
+                 OR EXISTS (
+                     SELECT 1 FROM playback_logs l
+                     WHERE l.user_id = ?1
+                       AND l.media_id = c.value
+                       AND l.started_at >= ?2
+                 )
+             )
+             AND NOT EXISTS (
+                 SELECT 1 FROM playback_units u2
+                 WHERE u2.user_id = ?1
+                   AND u2.media_id = c.value
+                   AND u2.watch_activity_at < ?2
+                   AND (u2.played <> 0 OR u2.position_ms > 0 OR u2.play_count > 0)
+             )",
+        )?;
+        let rows = statement.query_map(
+            params![user_id.to_string(), cutoff, candidate_json],
+            |row| row.get::<_, String>(0),
+        )?;
+        let mut out = Vec::new();
+        for row in rows {
+            if let Ok(id) = row?.parse() {
+                out.push(id);
+            }
+        }
+        Ok(out)
     }
 }

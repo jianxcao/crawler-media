@@ -261,7 +261,11 @@ export function DownloaderRow({
                     title="在新窗口打开下载器 WebUI"
                     wide
                   />
-                  <DetailStat label="用户名" value={downloader.username ?? "未设置"} />
+                  {downloader.kind === "qbittorrent" && downloader.auth_type === "apikey" ? (
+                    <DetailStat label="认证方式" value="API Key（v5.2+）" />
+                  ) : (
+                    <DetailStat label="用户名" value={downloader.username ?? "未设置"} />
+                  )}
                   <DetailStat label="类型" value={TYPE_LABEL[downloader.kind]} />
                 </StatGrid>
               </DetailSection>

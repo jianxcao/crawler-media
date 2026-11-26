@@ -13,6 +13,7 @@ use support::{protocol, seed};
 fn movie_request_work_does_not_grow_with_unrelated_tv() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
+    store.relax_sync_for_scale_seed();
     seed(&store, MediaKind::Movie, 1000);
     let mut q = protocol();
     q.genres = vec!["Drama".into()];
@@ -195,6 +196,9 @@ fn filtered_facets_work_grows_with_members_not_bucket_times_members_squared() {
     for size in [400, 4_000] {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path()).unwrap();
+        if size >= 1_000 {
+            store.relax_sync_for_scale_seed();
+        }
         let lib = seed(&store, MediaKind::Movie, size);
         let request = FacetRequest {
             library_id: lib,
@@ -222,6 +226,9 @@ fn actual_protocol_default_sort_reads_only_a_bounded_first_page() {
     for size in [400, 4_000] {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path()).unwrap();
+        if size >= 1_000 {
+            store.relax_sync_for_scale_seed();
+        }
         let lib = seed(&store, MediaKind::Movie, size);
         let mut request = protocol();
         request.parent = ProtocolParent::Library(lib);

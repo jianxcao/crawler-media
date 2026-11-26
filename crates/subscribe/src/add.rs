@@ -69,40 +69,12 @@ pub fn admit_and_add<D: Downloader + ?Sized>(
         "候选种子通过过滤准入"
     );
     let effective_wash_filter = input.wash_filter.or(Some(input.filter));
-    let chosen = crate::choose::choose_with_policy(
-        input.subscribe,
-        effective_wash_filter,
-        &admitted,
-        &input.facts,
-        input.overlap,
-    );
     emit(input.hooks, Step::ChooseTorrent)?;
-    let mut submitted = Vec::new();
-    let mut add_errors = Vec::new();
-    let mut broken = Vec::new();
-    for scored in chosen {
-        tracing::info!(
-            media = %input.media.title,
-            torrent = %scored.torrent.title,
-            score = scored.score,
-            "将选中的种子派发给下载器"
-        );
-        let result = emit(input.hooks, Step::AddDownload)
-            .and_then(|()| input.downloader.add(&scored.torrent).map_err(Into::into));
-        match result {
-            Ok(()) => submitted.push(scored),
-            Err(SubscribeError::Downloader(downloader::DownloaderError::ExistingTaskBroken(
-                hash,
-            ))) => {
-                tracing::warn!(torrent = %scored.torrent.title, %hash, "下载器中已有任务处于错误/缺文件状态，拒绝该来源以便换源");
-                broken.push(scored);
-            }
-            Err(error) => {
-                tracing::error!(torrent = %scored.torrent.title, error = %error, "提交种子到下载器失败");
-                add_errors.push(format!("{}: {error}", scored.torrent.title));
-            }
-        }
-    }
+    let FallbackOutcome {
+        submitted,
+        add_errors,
+        broken,
+    } = submit_with_source_fallback(&input, effective_wash_filter, &admitted)?;
     let torrents_added: Vec<(i32, Torrent)> = submitted
         .iter()
         .map(|s| (s.score, s.torrent.clone()))
@@ -127,6 +99,97 @@ pub fn admit_and_add<D: Downloader + ?Sized>(
         broken,
         add_errors,
         rejected: admission.rejected,
+    })
+}
+
+struct FallbackOutcome {
+    submitted: Vec<ScoredTorrent>,
+    add_errors: Vec<String>,
+    broken: Vec<ScoredTorrent>,
+}
+
+/// 逐轮选种并投递下载器；若选中候选因源端 `.torrent` 拉取失败或任务已损坏被拒，
+/// 则在同一轮内剔除该候选并顺延补位下一候选（最多 `MAX_SOURCE_FALLBACKS` 次）。
+fn submit_with_source_fallback<D: Downloader + ?Sized>(
+    input: &RunInput<'_, D>,
+    effective_wash_filter: Option<&domain::Filter>,
+    admitted: &[ScoredTorrent],
+) -> Result<FallbackOutcome, SubscribeError> {
+    const MAX_SOURCE_FALLBACKS: usize = 8;
+    let mut excluded_enclosures = std::collections::HashSet::new();
+    let mut blocked_releases = Vec::new();
+    let mut submitted = Vec::new();
+    let mut add_errors = Vec::new();
+    let mut broken = Vec::new();
+    let mut fallbacks_used = 0usize;
+
+    loop {
+        let remaining: Vec<ScoredTorrent> = admitted
+            .iter()
+            .filter(|c| !excluded_enclosures.contains(&c.torrent.enclosure))
+            .cloned()
+            .collect();
+        if remaining.is_empty() {
+            break;
+        }
+        let working_facts = crate::facts_with_pending(
+            input.facts.clone(),
+            &blocked_releases,
+            input.subscribe,
+            input.media,
+        );
+        let chosen = crate::choose::choose_with_policy(
+            input.subscribe,
+            effective_wash_filter,
+            &remaining,
+            &working_facts,
+            input.overlap,
+        );
+        if chosen.is_empty() {
+            break;
+        }
+        let mut need_retry = false;
+        for scored in chosen {
+            excluded_enclosures.insert(scored.torrent.enclosure.clone());
+            tracing::info!(
+                media = %input.media.title,
+                torrent = %scored.torrent.title,
+                score = scored.score,
+                "将选中的种子派发给下载器"
+            );
+            let result = emit(input.hooks, Step::AddDownload)
+                .and_then(|()| input.downloader.add(&scored.torrent).map_err(Into::into));
+            match result {
+                Ok(()) => {
+                    blocked_releases.push(scored.release.clone());
+                    submitted.push(scored);
+                }
+                Err(SubscribeError::Downloader(
+                    ref err @ (downloader::DownloaderError::ExistingTaskBroken(_)
+                    | downloader::DownloaderError::SourceRejected(_)),
+                )) => {
+                    tracing::warn!(torrent = %scored.torrent.title, error = %err, "候选源不可用，排除并自动尝试下一顺位");
+                    broken.push(scored);
+                    if fallbacks_used < MAX_SOURCE_FALLBACKS {
+                        fallbacks_used += 1;
+                        need_retry = true;
+                    }
+                }
+                Err(error) => {
+                    tracing::error!(torrent = %scored.torrent.title, error = %error, "提交种子到下载器失败");
+                    blocked_releases.push(scored.release.clone());
+                    add_errors.push(format!("{}: {error}", scored.torrent.title));
+                }
+            }
+        }
+        if !need_retry {
+            break;
+        }
+    }
+    Ok(FallbackOutcome {
+        submitted,
+        add_errors,
+        broken,
     })
 }
 

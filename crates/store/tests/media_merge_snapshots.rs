@@ -8,6 +8,7 @@ use rusqlite::{Connection, params};
 use store::Store;
 use store::playback::MediaMergeRequest;
 
+#[path = "merge_support/mod.rs"]
 mod merge_support;
 use merge_support::create_media;
 

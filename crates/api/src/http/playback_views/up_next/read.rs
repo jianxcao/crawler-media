@@ -20,9 +20,30 @@ pub(super) fn capture(store: &Store, user: UserId, limit: usize) -> Result<Captu
         .iter()
         .map(|row| row.reference.item.media_id())
         .collect::<Vec<_>>();
+    let dismissed = crate::up_next_dismissed::load_dismissed(store, user)?;
+    let dismissed_sub_ids: Vec<MediaId> = dismissed
+        .keys()
+        .copied()
+        .filter(|id| !excluded.contains(id))
+        .collect();
+    let recent_watch_by_media = if dismissed_sub_ids.is_empty() {
+        HashMap::new()
+    } else {
+        store.max_user_watch_activity_for_media(user, &dismissed_sub_ids)?
+    };
     let windows = store
         .list_subscribes_for_user(user)?
         .into_iter()
+        .filter(|row| match dismissed.get(&row.media_id) {
+            Some(&dismissed_at) => {
+                recent_watch_by_media
+                    .get(&row.media_id)
+                    .copied()
+                    .unwrap_or(0)
+                    > dismissed_at
+            }
+            None => true,
+        })
         .filter_map(|row| match row.coverage {
             domain::Coverage::Tv {
                 season,

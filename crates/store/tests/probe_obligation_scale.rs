@@ -27,6 +27,7 @@ fn sample_row(media_id: MediaId, path: &str) -> store::ScannedLedger {
 
 fn setup(data_dir: &std::path::Path) -> (Store, MediaId) {
     let store = Store::open(data_dir).unwrap();
+    store.relax_sync_for_scale_seed();
     store
         .create_library(
             domain::MediaKind::Movie,
