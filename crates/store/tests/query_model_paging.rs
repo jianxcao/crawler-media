@@ -34,6 +34,7 @@ fn single_library_first_page_does_not_sort_or_window_the_entire_hitset() {
             .collect::<Vec<_>>(),
         expected
     );
+    store.relax_sync_for_scale_seed();
     support::seed_into(
         &store,
         MediaKind::Movie,
@@ -92,6 +93,7 @@ fn all_hit_genre_keeps_exact_total_and_bounded_first_page_work() {
             .collect::<Vec<_>>(),
         expected
     );
+    store.relax_sync_for_scale_seed();
     support::seed_into_with_genre(&store, MediaKind::Movie, 400, 3600, library, root, true);
     let (page, work) = store.protocol_item_page_with_stats(&query).unwrap();
     assert_eq!(page.total, 4000);

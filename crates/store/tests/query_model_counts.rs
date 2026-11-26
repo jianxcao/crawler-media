@@ -10,6 +10,9 @@ mod support;
 fn measure(count: usize) -> Vec<store::library_query::items::QueryWorkStats> {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
+    if count >= 1_000 {
+        store.relax_sync_for_scale_seed();
+    }
     let library_id = support::seed(&store, MediaKind::Movie, count);
     [vec![], vec!["Drama".into()]]
         .into_iter()

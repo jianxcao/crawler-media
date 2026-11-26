@@ -66,6 +66,7 @@ Vite + React + TS，pnpm。`web/src/main.tsx` 入口，`web/app/` 路由页面�
 # Rust
 python3 scripts/with-build-lock.py cargo fmt --all -- --check
 python3 scripts/with-build-lock.py cargo clippy -j4 --all-targets -- -D warnings
+# 若未安装 nextest：brew install cargo-nextest 或 cargo install cargo-nextest --locked
 python3 scripts/with-build-lock.py cargo nextest run --build-jobs 4 --test-threads 4 -p <crate>       # 每个改动的 crate（推荐）
 python3 scripts/with-build-lock.py cargo nextest run --build-jobs 4 --test-threads 4 -p api -E 'test(<name>)' # 定向
 python3 scripts/with-build-lock.py --exclusive cargo nextest run --build-jobs 8 --test-threads 8 --workspace --no-fail-fast # 收尾全量，仅一次（约 8.5m；Agent 伪终端加 --show-progress=none --status-level=slow --final-status-level=fail）

@@ -23,8 +23,6 @@ mod jellyfin_images;
 mod jellyfin_query_error;
 #[path = "job_updates_bounded.rs"]
 mod job_updates_bounded;
-#[path = "jobs_writer_contention.rs"]
-mod jobs_writer_contention;
 #[path = "library_delete_reimport.rs"]
 mod library_delete_reimport;
 #[path = "library_read_auth_race.rs"]
@@ -33,14 +31,10 @@ mod library_read_auth_race;
 mod library_read_perf;
 #[path = "library_removal_races.rs"]
 mod library_removal_races;
-#[path = "log_export.rs"]
-mod log_export;
 #[path = "maintenance_control.rs"]
 mod maintenance_control;
 #[path = "maintenance_sqlite.rs"]
 mod maintenance_sqlite;
-#[path = "media_poster_delivery.rs"]
-mod media_poster_delivery;
 #[path = "persistence.rs"]
 mod persistence;
 #[path = "playback_watch_time.rs"]

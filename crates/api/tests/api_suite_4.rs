@@ -5,12 +5,8 @@
 mod arrivals_runtime;
 #[path = "bounded_work_acceptance.rs"]
 mod bounded_work_acceptance;
-#[path = "catalog_douban_reads.rs"]
-mod catalog_douban_reads;
 #[path = "collections_api_reads.rs"]
 mod collections_api_reads;
-#[path = "discover_swr_and_refresh_job.rs"]
-mod discover_swr_and_refresh_job;
 #[path = "facets_budget.rs"]
 mod facets_budget;
 #[path = "fingerprint_comparison_measurement.rs"]

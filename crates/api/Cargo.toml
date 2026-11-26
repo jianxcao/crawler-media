@@ -117,6 +117,14 @@ name = "auto_resolve_matching"
 path = "tests/auto_resolve_matching.rs"
 
 [[test]]
+name = "catalog_douban_reads"
+path = "tests/catalog_douban_reads.rs"
+
+[[test]]
+name = "catalog_read_latency"
+path = "tests/catalog_read_latency.rs"
+
+[[test]]
 name = "chapter_frame_identity"
 path = "tests/chapter_frame_identity.rs"
 
@@ -143,6 +151,10 @@ path = "tests/cover_publication.rs"
 [[test]]
 name = "data_retention_control"
 path = "tests/data_retention_control.rs"
+
+[[test]]
+name = "discover_swr_and_refresh_job"
+path = "tests/discover_swr_and_refresh_job.rs"
 
 [[test]]
 name = "driver_executor_bounds"
@@ -253,6 +265,10 @@ name = "jellyfin_shared_coverage"
 path = "tests/jellyfin_shared_coverage.rs"
 
 [[test]]
+name = "jobs_writer_contention"
+path = "tests/jobs_writer_contention.rs"
+
+[[test]]
 name = "legacy_rejection"
 path = "tests/legacy_rejection.rs"
 
@@ -313,6 +329,10 @@ name = "library_work_lifecycle"
 path = "tests/library_work_lifecycle.rs"
 
 [[test]]
+name = "log_export"
+path = "tests/log_export.rs"
+
+[[test]]
 name = "marker_boundary_publication"
 path = "tests/marker_boundary_publication.rs"
 
@@ -323,6 +343,10 @@ path = "tests/marker_kind_publication.rs"
 [[test]]
 name = "marker_late_intro_capture"
 path = "tests/marker_late_intro_capture.rs"
+
+[[test]]
+name = "media_poster_delivery"
+path = "tests/media_poster_delivery.rs"
 
 [[test]]
 name = "media_posters"

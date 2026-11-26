@@ -108,34 +108,102 @@ mod watcher_presence_work;
 #[path = "writer_rank_errors.rs"]
 mod writer_rank_errors;
 
+fn collect_test_registrations(
+    cargo_toml: &str,
+    suites: &[String],
+) -> std::collections::BTreeMap<String, usize> {
+    let mut counts = std::collections::BTreeMap::new();
+    let mut in_test = false;
+    for raw_line in cargo_toml.lines() {
+        let line = raw_line.split('#').next().unwrap_or("").trim();
+        if line == "[[test]]" {
+            in_test = true;
+        } else if line.starts_with('[') {
+            in_test = false;
+        } else if in_test
+            && let Some(rest) = line.strip_prefix("path")
+            && let Some((_, rhs)) = rest.split_once('=')
+        {
+            let path = rhs.trim().trim_matches('"');
+            let rel = path.strip_prefix("tests/").unwrap_or(path);
+            *counts.entry(rel.to_string()).or_insert(0) += 1;
+        }
+    }
+    for suite in suites {
+        let mut pending_path: Option<String> = None;
+        for raw_line in suite.lines() {
+            let line = raw_line.split("//").next().unwrap_or("").trim();
+            if line.is_empty() {
+                continue;
+            }
+            if let Some(rest) = line.strip_prefix("#[path")
+                && let Some((_, quoted)) = rest.split_once('"')
+                && let Some((p, after)) = quoted.split_once('"')
+            {
+                if after.contains("mod ") && after.ends_with(';') {
+                    *counts.entry(p.to_string()).or_insert(0) += 1;
+                    pending_path = None;
+                } else {
+                    pending_path = Some(p.to_string());
+                }
+                continue;
+            }
+            if let Some(rest) = line
+                .strip_prefix("mod ")
+                .or_else(|| line.strip_prefix("pub mod "))
+                && let Some(ident) = rest.strip_suffix(';')
+            {
+                let target = pending_path
+                    .take()
+                    .unwrap_or_else(|| format!("{}.rs", ident.trim()));
+                *counts.entry(target).or_insert(0) += 1;
+            } else if !line.starts_with("#[") {
+                pending_path = None;
+            }
+        }
+    }
+    counts
+}
+
 #[test]
 fn every_top_level_store_test_file_is_registered() {
     let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let cargo_toml = std::fs::read_to_string(manifest_dir.join("Cargo.toml")).unwrap();
-    let suites: String = (1..=4)
+    let suites: Vec<String> = (1..=4)
         .map(|i| {
             std::fs::read_to_string(manifest_dir.join(format!("tests/store_suite_{i}.rs"))).unwrap()
         })
-        .collect::<Vec<_>>()
-        .join("\n");
-    let mut missing = Vec::new();
+        .collect();
+    let counts = collect_test_registrations(&cargo_toml, &suites);
+    let mut targets = Vec::new();
     for entry in std::fs::read_dir(manifest_dir.join("tests")).unwrap() {
         let path = entry.unwrap().path();
-        if path.extension().and_then(|e| e.to_str()) != Some("rs") {
-            continue;
-        }
         let name = path.file_name().unwrap().to_string_lossy();
-        if name.starts_with("store_suite_") {
-            continue;
+        if path.is_dir() && path.join("main.rs").is_file() {
+            targets.push(format!("{name}/main.rs"));
+        } else if path.is_file()
+            && path.extension().and_then(|e| e.to_str()) == Some("rs")
+            && !name.starts_with("store_suite_")
+        {
+            targets.push(name.into_owned());
         }
-        let toml_ref = format!("path = \"tests/{name}\"");
-        let suite_ref = format!("#[path = \"{name}\"]");
-        if !cargo_toml.contains(&toml_ref) && !suites.contains(&suite_ref) {
-            missing.push(name.into_owned());
+    }
+    targets.sort();
+    let mut missing = Vec::new();
+    let mut duplicates = Vec::new();
+    for target in targets {
+        match counts.get(&target).copied().unwrap_or(0) {
+            0 => missing.push(target),
+            1 => {}
+            n => duplicates.push(format!("{target} ({n}x)")),
         }
     }
     assert!(
         missing.is_empty(),
-        "Unregistered store integration test files (add to Cargo.toml or store_suite_1..4.rs): {missing:?}"
+        "Unregistered store integration test targets (add to Cargo.toml or store_suite_1..4.rs): {missing:?}"
+    );
+    assert!(
+        duplicates.is_empty(),
+        "Duplicate store integration test registrations across Cargo.toml and store_suite_1..4.rs: {duplicates:?}"
     );
 }

@@ -36,7 +36,6 @@ pub fn seed_into_with_genre(
     root: &str,
     all_drama: bool,
 ) {
-    store.relax_sync_for_scale_seed();
     let lib_id = id.to_string();
     let root_id = store
         .list_library_roots()
