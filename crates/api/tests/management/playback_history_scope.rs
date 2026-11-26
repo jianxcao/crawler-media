@@ -587,20 +587,18 @@ async fn clear_history_since_uses_unix_seconds_and_preserves_older_records() {
 }
 
 #[tokio::test]
-async fn clear_history_dismisses_subscribed_tv_from_up_next_until_replayed_or_resubscribed() {
+async fn clear_history_dismisses_subscribed_tv_by_item_and_since_window() {
     let tmp = tempfile::tempdir().unwrap();
     let clock = Arc::new(SeqClock(std::sync::atomic::AtomicI64::new(
         1_700_000_000 * 1000,
     )));
     let (app, store) = app_with_clock(&tmp, clock.clone());
     let admin = store.admin_user_id().unwrap();
-    let (lib_a, show_a, sub_a, filter_a) =
+    let (_lib_a, show_a, _, _) =
         seed_tv_library_and_show(&store, &tmp.path().join("tv-a"), "ShowA", Some(admin));
     let (_lib_b, show_b, _, _) =
         seed_tv_library_and_show(&store, &tmp.path().join("tv-b"), "ShowB", Some(admin));
-
-    let initial = get_up_next_ids(&app).await;
-    assert_eq!(initial.len(), 2);
+    assert_eq!(get_up_next_ids(&app).await.len(), 2);
 
     // 1. 单剧清除：未播过的订阅剧也应立刻从「接下来继续」移出，且返回 >= 1。
     let clear_item = app
@@ -645,21 +643,41 @@ async fn clear_history_dismisses_subscribed_tv_from_up_next_until_replayed_or_re
         .unwrap();
     assert_eq!(clear_recent.status(), StatusCode::OK);
     assert_eq!(get_up_next_ids(&app).await, vec![show_b.to_string()]);
+}
 
-    // 3. 全部清除 / 按库清除 / 重新订阅恢复。
-    let clear_all = app
-        .clone()
-        .oneshot(request(
-            "DELETE",
-            "/api/v1/playback/history?scope=all",
-            Some("management-secret"),
-            Value::Null,
-        ))
-        .await
-        .unwrap();
-    assert_eq!(clear_all.status(), StatusCode::OK);
+#[tokio::test]
+async fn clear_history_all_and_library_dismiss_until_resubscribed_and_concurrent_clears_keep_both()
+{
+    let tmp = tempfile::tempdir().unwrap();
+    let clock = Arc::new(SeqClock(std::sync::atomic::AtomicI64::new(
+        1_700_000_000 * 1000,
+    )));
+    let (app, store) = app_with_clock(&tmp, clock.clone());
+    let admin = store.admin_user_id().unwrap();
+    let (lib_a, show_a, sub_a, filter_a) =
+        seed_tv_library_and_show(&store, &tmp.path().join("tv-a"), "ShowA", Some(admin));
+    let (_lib_b, show_b, _, _) =
+        seed_tv_library_and_show(&store, &tmp.path().join("tv-b"), "ShowB", Some(admin));
+
+    // 并发单剧移出两部剧，原子写不得相互覆盖。
+    let del_a = request(
+        "DELETE",
+        &format!("/api/v1/playback/history?scope=item&media_item_id={show_a}"),
+        Some("management-secret"),
+        Value::Null,
+    );
+    let del_b = request(
+        "DELETE",
+        &format!("/api/v1/playback/history?scope=item&media_item_id={show_b}"),
+        Some("management-secret"),
+        Value::Null,
+    );
+    let (ra, rb) = tokio::join!(app.clone().oneshot(del_a), app.clone().oneshot(del_b));
+    assert_eq!(ra.unwrap().status(), StatusCode::OK);
+    assert_eq!(rb.unwrap().status(), StatusCode::OK);
     assert!(get_up_next_ids(&app).await.is_empty());
 
+    // 重新播放后再次通过 scope=all 与 scope=library 清除，最后重新订阅恢复显示。
     record_watch(
         &app,
         &clock,
@@ -696,10 +714,7 @@ async fn clear_history_dismisses_subscribed_tv_from_up_next_until_replayed_or_re
     assert_eq!(del_sub.status(), StatusCode::OK);
     let mut resub_body = subscribe_payload_with_filter("search", filter_a.as_deref());
     resub_body["media"] = serde_json::json!({
-        "kind": "tv",
-        "title": "ShowA",
-        "year": 2025,
-        "tmdb_id": "99-ShowA"
+        "kind": "tv", "title": "ShowA", "year": 2025, "tmdb_id": "99-ShowA"
     });
     resub_body["coverage"] =
         serde_json::json!({ "kind": "tv", "season": 1, "episode_from": 1, "episode_to": 12 });

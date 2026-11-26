@@ -175,3 +175,61 @@ fn downloader_api_key_persists_lists_clears_and_triggers_verification_cas() {
             .is_none()
     );
 }
+
+#[test]
+fn mutate_setting_updates_and_deletes_atomically_in_one_writer_tx() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Store::open(tmp.path()).unwrap();
+
+    // Protected Library keys must be rejected before reading/writing.
+    assert!(matches!(
+        store.mutate_setting("metadata.language", |cur| Ok((cur, ()))),
+        Err(store::StoreError::Invalid(_))
+    ));
+
+    // Concurrent calls run serialized inside one writer tx so no key is lost.
+    let store = std::sync::Arc::new(store);
+    let s1 = store.clone();
+    let s2 = store.clone();
+    let t1 = std::thread::spawn(move || {
+        s1.mutate_setting("user.test.up_next.dismissed", |cur: Option<String>| {
+            let mut items: Vec<String> = cur
+                .and_then(|s| serde_json::from_str(&s).ok())
+                .unwrap_or_default();
+            items.push("show-a".into());
+            Ok((Some(serde_json::to_string(&items).unwrap()), ()))
+        })
+        .unwrap();
+    });
+    let t2 = std::thread::spawn(move || {
+        s2.mutate_setting("user.test.up_next.dismissed", |cur: Option<String>| {
+            let mut items: Vec<String> = cur
+                .and_then(|s| serde_json::from_str(&s).ok())
+                .unwrap_or_default();
+            items.push("show-b".into());
+            Ok((Some(serde_json::to_string(&items).unwrap()), ()))
+        })
+        .unwrap();
+    });
+    t1.join().unwrap();
+    t2.join().unwrap();
+
+    let raw = store
+        .get_setting("user.test.up_next.dismissed")
+        .unwrap()
+        .unwrap();
+    let mut items: Vec<String> = serde_json::from_str(&raw).unwrap();
+    items.sort();
+    assert_eq!(items, vec!["show-a", "show-b"]);
+
+    // Returning None deletes the row cleanly.
+    store
+        .mutate_setting("user.test.up_next.dismissed", |_| Ok((None, ())))
+        .unwrap();
+    assert!(
+        store
+            .get_setting("user.test.up_next.dismissed")
+            .unwrap()
+            .is_none()
+    );
+}

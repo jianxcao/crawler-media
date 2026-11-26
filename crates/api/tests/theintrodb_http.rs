@@ -177,3 +177,36 @@ fn parses_v4_rate_limit_usage_quota_and_unauthorized_responses() {
         Err(LookupError::Unauthorized(401))
     ));
 }
+
+#[test]
+fn epoch_timestamp_in_ratelimit_reset_header_is_converted_to_relative_delay() {
+    use api::theintrodb::{LookupError, RateLimitScope};
+
+    let epoch_reset = (std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        + 42)
+        .to_string();
+    let burst = Server::for_any_episode(
+        429,
+        &[("X-RateLimit-Reset", &epoch_reset)],
+        r#"{"error":"Too Many Requests"}"#,
+        true,
+    );
+    match burst
+        .client(true)
+        .get_episode_markers("123", 1, 2, Some(2700000))
+    {
+        Err(LookupError::RateLimited {
+            scope: RateLimitScope::Burst,
+            retry_after_ms,
+        }) => {
+            assert!(
+                (30_000..=50_000).contains(&retry_after_ms),
+                "expected relative cooldown near 42s, got {retry_after_ms}ms"
+            );
+        }
+        other => panic!("unexpected result: {other:?}"),
+    }
+}

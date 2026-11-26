@@ -163,7 +163,7 @@ impl Downloader for QbitDownloader {
             crate::ownership_tag(&torrent.enclosure)
         );
         const UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
-        let mut temp_path = None;
+        let mut staged_bytes: Option<Vec<u8>> = None;
         let mut fallback_url = true;
         if download_url.starts_with("http://") || download_url.starts_with("https://") {
             match self.download_torrent_bytes_raw(download_url, UA) {
@@ -176,24 +176,14 @@ impl Downloader for QbitDownloader {
                             "种子链接返回的不是合法 .torrent（可能站点 Cookie 失效、已被删种或配额超限）".into(),
                         ));
                     };
-                    static NONCE: std::sync::atomic::AtomicU64 =
-                        std::sync::atomic::AtomicU64::new(0);
-                    let n = NONCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    let temp = std::env::temp_dir().join(format!(
-                        "cm-torrent-{}-{n}-{}.torrent",
-                        std::process::id(),
-                        tag
-                    ));
                     // D-H2: a task with the same info hash may already exist
                     // without our tags (added by hand). Claim it instead of
                     // failing every round with qBittorrent's `Fails.`.
                     if self.claim_existing(&hash, &tag, &torrent.title)? {
                         return Ok(());
                     }
-                    if std::fs::write(&temp, &bytes).is_ok() {
-                        temp_path = Some(temp);
-                        fallback_url = false;
-                    }
+                    staged_bytes = Some(bytes);
+                    fallback_url = false;
                 }
                 Err(err) if is_synthetic_test_host_dns_error(download_url, &err) => {
                     tracing::debug!(torrent = %torrent.title, "离线测试域名跳过直取，保留 enclosure URL 交由下载器处理");
@@ -206,7 +196,7 @@ impl Downloader for QbitDownloader {
                 }
             }
         }
-        if temp_path.is_none() && fallback_url && download_url != torrent.enclosure {
+        if staged_bytes.is_none() && fallback_url && download_url != torrent.enclosure {
             return Err(DownloaderError::SourceRejected(
                 "failed to fetch resolved Torrent before the signed URL expired (站点 Cookie 失效或链接未返回 .torrent)".into(),
             ));
@@ -221,10 +211,15 @@ impl Downloader for QbitDownloader {
             if let Some(save_path) = save_path.filter(|path| !path.trim().is_empty()) {
                 form = form.text("savepath", save_path);
             }
-            if let Some(ref path) = temp_path {
-                if let Ok(part) = ureq::unversioned::multipart::Part::file(path) {
-                    form = form.part("torrents", part.file_name("download.torrent"));
-                }
+            if let Some(ref bytes) = staged_bytes {
+                let part = ureq::unversioned::multipart::Part::bytes(bytes.as_slice())
+                    .file_name("download.torrent");
+                let part = match part.mime_str("application/x-bittorrent") {
+                    Ok(with_mime) => with_mime,
+                    Err(_) => ureq::unversioned::multipart::Part::bytes(bytes.as_slice())
+                        .file_name("download.torrent"),
+                };
+                form = form.part("torrents", part);
             } else if fallback_url {
                 form = form.text("urls", download_url);
             }
@@ -233,12 +228,7 @@ impl Downloader for QbitDownloader {
             }
             form
         };
-        let result = self.post_add_form(&build_form, &torrent.title, &tag);
-        // D-M4: never leave the staged .torrent behind.
-        if let Some(path) = &temp_path {
-            let _ = std::fs::remove_file(path);
-        }
-        result
+        self.post_add_form(&build_form, &torrent.title, &tag)
     }
 
     fn uploaded_by_category(&self, category: &str) -> Result<u64, DownloaderError> {

@@ -265,6 +265,17 @@ test("toDownloaderInput serializes apikey and password mode transitions properly
   assert.equal(calls[2].body.api_key, "");
   assert.equal(calls[2].body.username, "admin");
   assert.equal(calls[2].body.password, "pw");
+
+  // Switch kind to transmission: explicitly sends api_key: "" to drop stale qB key.
+  await api.updateDownloader("1", {
+    name: "tr1",
+    client_type: "transmission",
+    url: "http://127.0.0.1:9091/transmission/rpc",
+    username: "tr",
+    password: "secret",
+  });
+  assert.equal(calls[3].body.kind, "transmission");
+  assert.equal(calls[3].body.api_key, "");
 });
 
 test("DownloaderRow displays API Key auth mode cleanly when auth_type is apikey", () => {

@@ -137,7 +137,11 @@ function toDownloaderInput(payload: DownloaderPayload): Record<string, unknown> 
     path_maps: (payload.path_mappings ?? []).map((m) => ({ from: m.remote, to: m.local })),
     ...(payload.enabled !== undefined ? { enabled: payload.enabled } : {}),
   };
-  if (payload.client_type === "qbittorrent" && payload.auth_type === "apikey") {
+  if (payload.client_type !== "qbittorrent") {
+    if (payload.username !== undefined) input.username = payload.username ?? "";
+    if (payload.password !== undefined) input.password = payload.password ?? "";
+    input.api_key = "";
+  } else if (payload.auth_type === "apikey") {
     input.username = "";
     input.password = "";
     if (apiKey.length > 0) input.api_key = apiKey;

@@ -374,3 +374,54 @@ async fn verify_api_key_downloader_succeeds_via_bearer_without_login() {
         "must not call /auth/login"
     );
 }
+
+#[tokio::test]
+async fn switching_qbittorrent_to_transmission_or_creating_transmission_clears_api_key() {
+    let tmp = tempfile::tempdir().unwrap();
+    let app = app(&tmp);
+    let store = Store::open(tmp.path().join("data")).unwrap();
+
+    let tr = post_dl(
+        &app,
+        json!({
+            "name": "tr-direct",
+            "kind": "transmission",
+            "url": "http://127.0.0.1:9091/transmission/rpc",
+            "api_key": "qbt_should_not_persist"
+        }),
+    )
+    .await;
+    assert_eq!(tr["has_api_key"], false);
+    assert_eq!(tr["auth_type"], "password");
+    let tr_id = tr["id"].as_str().unwrap().parse().unwrap();
+    assert_eq!(store.get_downloader(tr_id).unwrap().unwrap().api_key, None);
+
+    let qb = post_dl(
+        &app,
+        json!({
+            "name": "qb-to-tr",
+            "kind": "qbittorrent",
+            "url": "http://127.0.0.1:8080",
+            "api_key": "qbt_valid_secret"
+        }),
+    )
+    .await;
+    assert_eq!(qb["has_api_key"], true);
+    let qb_id_str = qb["id"].as_str().unwrap().to_string();
+    let qb_id = qb_id_str.parse().unwrap();
+
+    let patched = app
+        .oneshot(request(
+            "PATCH",
+            &format!("/api/v1/downloaders/{qb_id_str}"),
+            Some("management-secret"),
+            json!({ "kind": "transmission" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(patched.status(), StatusCode::OK);
+    let patched_data = json_data(patched).await;
+    assert_eq!(patched_data["has_api_key"], false);
+    assert_eq!(patched_data["auth_type"], "password");
+    assert_eq!(store.get_downloader(qb_id).unwrap().unwrap().api_key, None);
+}

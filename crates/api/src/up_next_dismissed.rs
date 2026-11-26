@@ -9,17 +9,11 @@ fn setting_key(user_id: UserId) -> String {
     format!("user.{user_id}.up_next.dismissed")
 }
 
-/// Load `{ media_id -> dismissed_at_unix_secs }` for one user from `app.db`.
-pub(crate) fn load_dismissed(store: &Store, user_id: UserId) -> HashMap<MediaId, i64> {
-    let raw = match store.get_setting(&setting_key(user_id)) {
-        Ok(Some(raw)) => raw,
-        Ok(None) => return HashMap::new(),
-        Err(error) => {
-            tracing::warn!(%error, %user_id, "读取继续观看隐藏列表失败");
-            return HashMap::new();
-        }
+fn parse_dismissed(raw: Option<&str>, user_id: UserId) -> HashMap<MediaId, i64> {
+    let Some(raw) = raw else {
+        return HashMap::new();
     };
-    let parsed: HashMap<String, i64> = match serde_json::from_str(&raw) {
+    let parsed: HashMap<String, i64> = match serde_json::from_str(raw) {
         Ok(map) => map,
         Err(error) => {
             tracing::warn!(%error, %user_id, "解析继续观看隐藏列表失败，按空处理");
@@ -32,14 +26,25 @@ pub(crate) fn load_dismissed(store: &Store, user_id: UserId) -> HashMap<MediaId,
         .collect()
 }
 
-fn save_dismissed(
-    store: &Store,
-    user_id: UserId,
-    map: &HashMap<MediaId, i64>,
-) -> Result<(), StoreError> {
+/// Load `{ media_id -> dismissed_at_unix_secs }` for one user from `app.db`.
+pub(crate) fn load_dismissed(store: &Store, user_id: UserId) -> HashMap<MediaId, i64> {
+    match store.get_setting(&setting_key(user_id)) {
+        Ok(raw) => parse_dismissed(raw.as_deref(), user_id),
+        Err(error) => {
+            tracing::warn!(%error, %user_id, "读取继续观看隐藏列表失败");
+            HashMap::new()
+        }
+    }
+}
+
+fn encode_dismissed(map: &HashMap<MediaId, i64>) -> Result<Option<String>, StoreError> {
+    if map.is_empty() {
+        return Ok(None);
+    }
     let raw_map: HashMap<String, i64> = map.iter().map(|(id, ts)| (id.to_string(), *ts)).collect();
-    let json = serde_json::to_string(&raw_map).map_err(|e| StoreError::Invalid(e.to_string()))?;
-    store.put_setting(&setting_key(user_id), &json)
+    serde_json::to_string(&raw_map)
+        .map(Some)
+        .map_err(|e| StoreError::Invalid(e.to_string()))
 }
 
 /// Record newly dismissed TV subscriptions and prune entries no longer backed by
@@ -52,31 +57,39 @@ pub(crate) fn record_dismissed(
     active_tv_subs: &HashSet<MediaId>,
     dismissed_at_secs: i64,
 ) -> Result<usize, StoreError> {
-    let existing = load_dismissed(store, user_id);
-    let mut updated = existing.clone();
-    updated.retain(|media_id, _| active_tv_subs.contains(media_id));
-    let mut newly_dismissed = 0usize;
-    for media_id in targets {
-        if !active_tv_subs.contains(media_id) {
-            continue;
+    store.mutate_setting(&setting_key(user_id), |raw| {
+        let existing = parse_dismissed(raw.as_deref(), user_id);
+        let mut updated = existing.clone();
+        updated.retain(|media_id, _| active_tv_subs.contains(media_id));
+        let mut newly_dismissed = 0usize;
+        for media_id in targets {
+            if !active_tv_subs.contains(media_id) {
+                continue;
+            }
+            if !existing.contains_key(media_id) {
+                newly_dismissed += 1;
+            }
+            updated.insert(*media_id, dismissed_at_secs);
         }
-        if !existing.contains_key(media_id) {
-            newly_dismissed += 1;
-        }
-        updated.insert(*media_id, dismissed_at_secs);
-    }
-    if updated != existing {
-        save_dismissed(store, user_id, &updated)?;
-    }
-    Ok(newly_dismissed)
+        let next = if updated == existing {
+            raw
+        } else {
+            encode_dismissed(&updated)?
+        };
+        Ok((next, newly_dismissed))
+    })
 }
 
 /// Unhide a media item when the user explicitly subscribes to it again.
 pub(crate) fn clear_dismissed_media(store: &Store, user_id: UserId, media_id: MediaId) {
-    let mut map = load_dismissed(store, user_id);
-    if map.remove(&media_id).is_some()
-        && let Err(error) = save_dismissed(store, user_id, &map)
-    {
+    if let Err(error) = store.mutate_setting(&setting_key(user_id), |raw| {
+        let mut map = parse_dismissed(raw.as_deref(), user_id);
+        if map.remove(&media_id).is_some() {
+            Ok((encode_dismissed(&map)?, ()))
+        } else {
+            Ok((raw, ()))
+        }
+    }) {
         tracing::warn!(%error, %user_id, %media_id, "清除订阅移出标记失败");
     }
 }

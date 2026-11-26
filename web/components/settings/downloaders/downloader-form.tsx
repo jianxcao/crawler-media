@@ -104,7 +104,7 @@ export function DownloaderForm({
         ? authType === "apikey"
           ? { auth_type: "apikey", username: null, password: null, api_key: apiKey.trim() || null }
           : { auth_type: "password", username: username.trim() || null, password: password || null, api_key: "" }
-        : { username: username.trim() || null, password: password || null };
+        : { username: username.trim() || null, password: password || null, api_key: "" };
     void onSubmit({
       name: name.trim(),
       client_type: clientType,

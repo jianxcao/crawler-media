@@ -245,13 +245,28 @@ fn header_u64(headers: &ureq::http::HeaderMap, name: &str) -> Option<u64> {
         .and_then(|raw| raw.parse::<u64>().ok())
 }
 
+fn normalize_reset_secs(raw: u64, now_unix_secs: u64) -> u64 {
+    if raw >= 1_000_000_000 {
+        raw.saturating_sub(now_unix_secs)
+    } else {
+        raw
+    }
+}
+
 fn classify_429(headers: &ureq::http::HeaderMap, code: Option<&str>) -> LookupError {
+    let now_unix_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
     let retry_after = header_u64(headers, "retry-after");
-    let specific_reset = header_u64(headers, "x-usagelimit-specificmedia-reset");
+    let specific_reset = header_u64(headers, "x-usagelimit-specificmedia-reset")
+        .map(|s| normalize_reset_secs(s, now_unix_secs));
     let specific_rem = header_u64(headers, "x-usagelimit-specificmedia-remaining");
-    let usage_reset = header_u64(headers, "x-usagelimit-reset");
+    let usage_reset =
+        header_u64(headers, "x-usagelimit-reset").map(|s| normalize_reset_secs(s, now_unix_secs));
     let usage_rem = header_u64(headers, "x-usagelimit-remaining");
-    let rate_reset = header_u64(headers, "x-ratelimit-reset");
+    let rate_reset =
+        header_u64(headers, "x-ratelimit-reset").map(|s| normalize_reset_secs(s, now_unix_secs));
 
     let (scope, secs, min_ms, max_ms) = if code == Some("specific_media_usage_limit_exceeded")
         || specific_rem == Some(0)
@@ -276,7 +291,7 @@ fn classify_429(headers: &ureq::http::HeaderMap, code: Option<&str>) -> LookupEr
     } else {
         (
             RateLimitScope::Burst,
-            rate_reset.or(retry_after).unwrap_or(10),
+            retry_after.or(rate_reset).unwrap_or(10),
             1_000,
             900_000,
         )

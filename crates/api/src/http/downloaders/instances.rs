@@ -148,6 +148,11 @@ pub(crate) async fn create_downloader(
             "kind 必须是 qbittorrent 或 transmission",
         );
     }
+    let api_key = (body.kind == "qbittorrent")
+        .then_some(body.api_key)
+        .flatten()
+        .map(|k| k.trim().to_string())
+        .filter(|k| !k.is_empty());
     let row = crate::store::DownloaderRow {
         id: DownloaderId::new(),
         name: body.name,
@@ -155,10 +160,7 @@ pub(crate) async fn create_downloader(
         url: body.url,
         username: body.username.filter(|u| !u.is_empty()),
         password: body.password.filter(|p| !p.is_empty()),
-        api_key: body
-            .api_key
-            .map(|k| k.trim().to_string())
-            .filter(|k| !k.is_empty()),
+        api_key,
         category: body.category.filter(|c| !c.is_empty()),
         path_maps: parse_path_maps(body.path_maps),
         is_default: body.is_default,
@@ -254,6 +256,9 @@ fn apply_downloader_patch(row: &mut store::DownloaderRow, body: DownloaderPatch)
     if let Some(api_key) = body.api_key {
         let trimmed = api_key.trim();
         row.api_key = (!trimmed.is_empty()).then(|| trimmed.to_string());
+    }
+    if row.kind != "qbittorrent" {
+        row.api_key = None;
     }
     if let Some(category) = body.category {
         row.category = (!category.is_empty()).then_some(category);
