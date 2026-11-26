@@ -35,6 +35,7 @@ struct ResolveSnapshot {
     probe: std::sync::Arc<dyn ChapterProbe>,
     negative: std::sync::Arc<crate::theintrodb_lookup::NegativeCache>,
     now_ms: i64,
+    force_refresh: bool,
 }
 
 struct ResolveOutput {
@@ -118,7 +119,7 @@ pub async fn force_refresh_item_chapters(
             tracing::error!(%error, "chapter refresh worker failed");
             ChapterRefreshError::Unavailable(axum::http::StatusCode::SERVICE_UNAVAILABLE)
         })??;
-    Ok(resolve_item_chapters(state, row, unit, media, theintrodb).await)
+    Ok(resolve_item_chapters_inner(state, row, unit, media, theintrodb, true).await)
 }
 
 fn clear_for_refresh(
@@ -172,6 +173,17 @@ pub async fn resolve_item_chapters(
     media: &Media,
     theintrodb: Option<TheIntroDbClient>,
 ) -> Vec<ChapterMarker> {
+    resolve_item_chapters_inner(state, row, unit, media, theintrodb, false).await
+}
+
+async fn resolve_item_chapters_inner(
+    state: &ApiState,
+    row: &FileCoverage,
+    unit: UnitKey,
+    media: &Media,
+    theintrodb: Option<TheIntroDbClient>,
+    force_refresh: bool,
+) -> Vec<ChapterMarker> {
     let reservation = match state
         .chapter_work
         .reserve(std::time::Duration::from_secs(5))
@@ -183,7 +195,16 @@ pub async fn resolve_item_chapters(
             return Vec::new();
         }
     };
-    resolve_item_chapters_reserved(state, row, unit, media, theintrodb, reservation).await
+    resolve_item_chapters_reserved_inner(
+        state,
+        row,
+        unit,
+        media,
+        theintrodb,
+        reservation,
+        force_refresh,
+    )
+    .await
 }
 
 pub(crate) async fn resolve_item_chapters_reserved(
@@ -194,12 +215,25 @@ pub(crate) async fn resolve_item_chapters_reserved(
     theintrodb: Option<TheIntroDbClient>,
     reservation: crate::blocking_budget::Reservation,
 ) -> Vec<ChapterMarker> {
+    resolve_item_chapters_reserved_inner(state, row, unit, media, theintrodb, reservation, false)
+        .await
+}
+
+async fn resolve_item_chapters_reserved_inner(
+    state: &ApiState,
+    row: &FileCoverage,
+    unit: UnitKey,
+    media: &Media,
+    theintrodb: Option<TheIntroDbClient>,
+    reservation: crate::blocking_budget::Reservation,
+    force_refresh: bool,
+) -> Vec<ChapterMarker> {
     let state = state.clone();
     let row = row.clone();
     let media = media.clone();
     match reservation
         .run_to_completion(move || {
-            resolve_item_chapters_blocking(&state, &row, unit, &media, theintrodb)
+            resolve_item_chapters_blocking(&state, &row, unit, &media, theintrodb, force_refresh)
         })
         .await
     {
@@ -217,6 +251,7 @@ fn resolve_item_chapters_blocking(
     unit: UnitKey,
     media: &Media,
     theintrodb: Option<TheIntroDbClient>,
+    force_refresh: bool,
 ) -> Vec<ChapterMarker> {
     let lease = match state
         .library_work()
@@ -229,7 +264,7 @@ fn resolve_item_chapters_blocking(
         tracing::error!(file_id = %row.file.file_id, ?unit, "requested chapter unit is not covered by file");
         return Vec::new();
     }
-    let Some(snapshot) = snapshot(state, row, unit, media, theintrodb) else {
+    let Some(snapshot) = snapshot(state, row, unit, media, theintrodb, force_refresh) else {
         return Vec::new();
     };
     if let Some(mut cached) = snapshot
@@ -246,6 +281,10 @@ fn resolve_item_chapters_blocking(
     }
     let mut output = resolve_without_store(&snapshot);
     let mut chapters = std::mem::take(&mut output.chapters);
+    if snapshot.cached.is_some() && output.markers.is_empty() {
+        overlay_latest_unit_marker(&state.store, row, unit, &mut chapters);
+        return chapters;
+    }
     if crate::fingerprint_job::source::observe_source(row).is_err() {
         return Vec::new();
     }
@@ -284,18 +323,26 @@ fn resolve_item_chapters_blocking(
             tracing::warn!(status=%response.status(), file_id=%row.file.file_id, "chapter publication not admitted");
         }
     }
-    if let Some(latest) = unit_marker(&state.store, row, unit) {
-        let duration_ms = state
-            .store
+    overlay_latest_unit_marker(&state.store, row, unit, &mut chapters);
+    chapters
+}
+
+fn overlay_latest_unit_marker(
+    store: &crate::Store,
+    row: &FileCoverage,
+    unit: UnitKey,
+    chapters: &mut Vec<ChapterMarker>,
+) {
+    if let Some(latest) = unit_marker(store, row, unit) {
+        let duration_ms = store
             .file_coverage_by_id(row.file.file_id)
             .ok()
             .flatten()
             .filter(|current| current.file.version == row.file.version)
             .and_then(|current| current.file.duration_ms);
-        append_marker_chapters(&mut chapters, Some(&latest), duration_ms);
+        append_marker_chapters(chapters, Some(&latest), duration_ms);
         chapters.sort_by_key(|chapter| chapter.start_ms);
     }
-    chapters
 }
 
 fn publish_resolved(
@@ -359,6 +406,7 @@ fn snapshot(
     unit: UnitKey,
     media: &Media,
     theintrodb: Option<TheIntroDbClient>,
+    force_refresh: bool,
 ) -> Option<ResolveSnapshot> {
     let store = state.store.clone();
     if let Err(error) = crate::fingerprint_job::source::ensure_source_recorded(&store, row) {
@@ -396,21 +444,38 @@ fn snapshot(
         probe: state.chapter_probe.clone(),
         negative: state.theintrodb_negative.clone(),
         now_ms: crate::playback_events::PlaybackClock::now_ms(state.playback_clock.as_ref()),
+        force_refresh,
     })
 }
 
 fn cloud_lookup_needed(snapshot: &ResolveSnapshot) -> bool {
-    snapshot.detect_intros
-        && snapshot.row.units.len() == 1
-        && snapshot.existing_marker.is_none()
-        && snapshot.media.kind == MediaKind::Tv
-        && snapshot.theintrodb.is_some()
-        && snapshot.media.tmdb_id.is_some()
-        && snapshot.unit.episode_coordinates().is_some()
-        && snapshot
-            .cached
-            .as_ref()
-            .is_none_or(|chapters| marker_from_chapters(snapshot, chapters).is_none())
+    let Some(client) = snapshot.theintrodb.as_ref() else {
+        return false;
+    };
+    if snapshot
+        .cached
+        .as_ref()
+        .is_some_and(|chapters| marker_from_chapters(snapshot, chapters).is_some())
+    {
+        return false;
+    }
+    crate::theintrodb_lookup::cloud_lookup_eligible(
+        crate::theintrodb_lookup::CloudLookupEligibility {
+            client,
+            negative: snapshot.negative.as_ref(),
+            file_id: snapshot.row.file.file_id,
+            version: &snapshot.row.file.version,
+            unit: snapshot.unit,
+            unit_count: snapshot.row.units.len(),
+            duration_ms: snapshot.duration_ms,
+            media_kind: snapshot.media.kind,
+            tmdb_id: snapshot.media.tmdb_id.as_deref(),
+            detect_intros: snapshot.detect_intros,
+            has_marker: snapshot.existing_marker.is_some(),
+            now_ms: snapshot.now_ms,
+            force_refresh: snapshot.force_refresh,
+        },
+    )
 }
 
 fn cloud_identity_matches(
@@ -486,6 +551,7 @@ fn lookup_theintrodb_marker(snapshot: &ResolveSnapshot) -> Option<StoredFileMark
         media_title: &snapshot.media.title,
         tmdb_id,
         now_ms: snapshot.now_ms,
+        force_refresh: snapshot.force_refresh,
     })
 }
 

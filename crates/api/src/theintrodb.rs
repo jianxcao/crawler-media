@@ -257,6 +257,21 @@ fn header_u64(headers: &ureq::http::HeaderMap, name: &str) -> Option<u64> {
         .and_then(|raw| raw.parse::<u64>().ok())
 }
 
+fn retry_after_secs(headers: &ureq::http::HeaderMap, now: std::time::SystemTime) -> Option<u64> {
+    let raw = headers
+        .get("retry-after")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)?;
+    if let Ok(secs) = raw.parse::<u64>() {
+        return Some(secs);
+    }
+    let at = httpdate::parse_http_date(raw).ok()?;
+    Some(match at.duration_since(now) {
+        Ok(delta) if !delta.is_zero() => delta.as_secs().max(1),
+        _ => 0,
+    })
+}
+
 fn normalize_reset_secs(raw: u64, now_unix_secs: u64) -> u64 {
     if raw >= 1_000_000_000 {
         raw.saturating_sub(now_unix_secs)
@@ -266,11 +281,12 @@ fn normalize_reset_secs(raw: u64, now_unix_secs: u64) -> u64 {
 }
 
 fn classify_429(headers: &ureq::http::HeaderMap, code: Option<&str>) -> LookupError {
-    let now_unix_secs = std::time::SystemTime::now()
+    let now = std::time::SystemTime::now();
+    let now_unix_secs = now
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    let retry_after = header_u64(headers, "retry-after");
+    let retry_after = retry_after_secs(headers, now);
     let specific_reset = header_u64(headers, "x-usagelimit-specificmedia-reset")
         .map(|s| normalize_reset_secs(s, now_unix_secs));
     let specific_rem = header_u64(headers, "x-usagelimit-specificmedia-remaining");
@@ -281,17 +297,17 @@ fn classify_429(headers: &ureq::http::HeaderMap, code: Option<&str>) -> LookupEr
         header_u64(headers, "x-ratelimit-reset").map(|s| normalize_reset_secs(s, now_unix_secs));
 
     let (scope, secs, min_ms, max_ms) =
-        if code == Some("specific_media_usage_limit_exceeded") || specific_rem == Some(0) {
-            (
-                RateLimitScope::SpecificMedia,
-                specific_reset.or(retry_after).unwrap_or(3_600),
-                60_000,
-                86_400_000,
-            )
-        } else if code == Some("usage_limit_exceeded") || usage_rem == Some(0) {
+        if code == Some("usage_limit_exceeded") || usage_rem == Some(0) {
             (
                 RateLimitScope::DailyQuota,
                 usage_reset.or(retry_after).unwrap_or(3_600),
+                60_000,
+                86_400_000,
+            )
+        } else if code == Some("specific_media_usage_limit_exceeded") || specific_rem == Some(0) {
+            (
+                RateLimitScope::SpecificMedia,
+                specific_reset.or(retry_after).unwrap_or(3_600),
                 60_000,
                 86_400_000,
             )
@@ -313,6 +329,7 @@ fn classify_429(headers: &ureq::http::HeaderMap, code: Option<&str>) -> LookupEr
 #[cfg(test)]
 mod debug_tests {
     use super::{LookupError, RateLimitScope, TheIntroDbClient, classify_429};
+    use std::time::{Duration, SystemTime};
     use ureq::http::{HeaderMap, HeaderValue};
 
     #[test]
@@ -374,6 +391,52 @@ mod debug_tests {
                 retry_after_ms: 1_800_000,
             }
         ));
+    }
+
+    #[test]
+    fn classify_429_prioritizes_daily_quota_when_both_remaining_headers_are_zero() {
+        let mut both_zero = HeaderMap::new();
+        both_zero.insert("x-usagelimit-remaining", HeaderValue::from_static("0"));
+        both_zero.insert("x-usagelimit-reset", HeaderValue::from_static("7200"));
+        both_zero.insert(
+            "x-usagelimit-specificmedia-remaining",
+            HeaderValue::from_static("0"),
+        );
+        both_zero.insert(
+            "x-usagelimit-specificmedia-reset",
+            HeaderValue::from_static("1800"),
+        );
+        for code in [Some("usage_limit_exceeded"), None] {
+            assert!(matches!(
+                classify_429(&both_zero, code),
+                LookupError::RateLimited {
+                    scope: RateLimitScope::DailyQuota,
+                    retry_after_ms: 7_200_000,
+                }
+            ));
+        }
+    }
+
+    #[test]
+    fn classify_429_parses_rfc9110_http_date_retry_after() {
+        let mut headers = HeaderMap::new();
+        let retry_date = httpdate::fmt_http_date(SystemTime::now() + Duration::from_secs(120));
+        headers.insert(
+            "retry-after",
+            HeaderValue::from_str(&retry_date).expect("valid http-date header"),
+        );
+        match classify_429(&headers, None) {
+            LookupError::RateLimited {
+                scope: RateLimitScope::Burst,
+                retry_after_ms,
+            } => {
+                assert!(
+                    (115_000..=125_000).contains(&retry_after_ms),
+                    "expected ~120s retry window from HTTP-date, got {retry_after_ms}ms"
+                );
+            }
+            other => panic!("unexpected classification: {other:?}"),
+        }
     }
 
     #[test]

@@ -427,3 +427,109 @@ async fn unknown_duration_skips_cloud_lookup_without_network() {
     assert!(get_chapters(&f, 0).await.is_empty());
     assert_eq!(server.requests.load(Ordering::SeqCst), 0);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cached_chapters_get_returns_without_blocking_on_library_writer_lock() {
+    let server = Server::for_any_episode(
+        404,
+        &[],
+        r#"{"error":"No accepted submissions","code":"no_submissions"}"#,
+        true,
+    );
+    let mut f = setup_episodes(&server, &[None, Some(2_700_000), Some(2_700_000)]);
+    let part_one = [library::ChapterMarker {
+        start_ms: 0,
+        end_ms: 600_000,
+        title: Some("Part 1".into()),
+        marker_type: None,
+        synthetic: false,
+    }];
+    for (_, cov) in &f.files {
+        f.store
+            .put_cached_chapters(&cov.file.file_id.to_string(), &part_one)
+            .unwrap();
+    }
+    let state_store = api::Store::open(f._tmp.path().join("data")).unwrap();
+    let writers = state_store.writers();
+    f.state = api::ApiState::new(
+        state_store,
+        "management-secret".into(),
+        indexer::ProfileSet::load(None).unwrap(),
+        Arc::new(common::Fixtures {
+            requests: Mutex::new(Vec::new()),
+            bodies: HashMap::new(),
+        }),
+        Arc::new(downloader::MemoryDownloader::new(
+            f._tmp.path().join("stage2"),
+        )),
+    )
+    .unwrap()
+    .with_playback_clock(f.clock.clone())
+    .with_chapter_probe(Arc::new(NoMediaReads))
+    .with_theintrodb_factory(Arc::new(LocalClient(server.url.clone())));
+
+    let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let writer_holder = std::thread::spawn(move || {
+        writers
+            .with_writer_timeout(
+                std::time::Duration::from_secs(10),
+                store::Db::Library,
+                |_conn| {
+                    locked_tx.send(()).unwrap();
+                    let _ = release_rx.recv();
+                    Ok(())
+                },
+            )
+            .unwrap();
+    });
+    locked_rx
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .unwrap();
+
+    let fast = std::time::Duration::from_millis(800);
+    // (a) Unknown duration_ms = None with cached_chapters = Some([Part 1])
+    let unknown = tokio::time::timeout(fast, get_chapters(&f, 0))
+        .await
+        .expect("unknown-duration GET chapters must not block on Library writer");
+    assert_eq!(unknown.len(), 1);
+    assert_eq!(unknown[0]["title"], "Part 1");
+    assert_eq!(server.requests.load(Ordering::SeqCst), 0);
+
+    // (b) First 404 no_submissions + subsequent NegativeCache hit with cached_chapters = Some([Part 1])
+    let first_miss = tokio::time::timeout(fast, get_chapters(&f, 1))
+        .await
+        .expect("404 cloud miss on cached chapters must not acquire Library writer");
+    assert_eq!(first_miss[0]["title"], "Part 1");
+    assert_eq!(server.requests.load(Ordering::SeqCst), 1);
+
+    let neg_cached = tokio::time::timeout(fast, get_chapters(&f, 1))
+        .await
+        .expect("NegativeCache hit GET chapters must not block on Library writer");
+    assert_eq!(neg_cached[0]["title"], "Part 1");
+    assert_eq!(server.requests.load(Ordering::SeqCst), 1);
+
+    // (c) Active global cooldown (429 DailyQuota) with cached_chapters = Some([Part 1])
+    server.respond_with_headers(
+        429,
+        &[
+            ("X-UsageLimit-Reset", "3600"),
+            ("X-UsageLimit-Remaining", "0"),
+        ],
+        r#"{"error":"Usage limit exceeded","code":"usage_limit_exceeded"}"#,
+    );
+    let trip_cd = tokio::time::timeout(fast, get_chapters(&f, 2))
+        .await
+        .expect("429 cooldown trip on cached chapters must not acquire Library writer");
+    assert_eq!(trip_cd[0]["title"], "Part 1");
+    assert_eq!(server.requests.load(Ordering::SeqCst), 2);
+
+    let during_cd = tokio::time::timeout(fast, get_chapters(&f, 2))
+        .await
+        .expect("cooldown-active GET chapters must not block on Library writer");
+    assert_eq!(during_cd[0]["title"], "Part 1");
+    assert_eq!(server.requests.load(Ordering::SeqCst), 2);
+
+    let _ = release_tx.send(());
+    writer_holder.join().unwrap();
+}

@@ -210,3 +210,53 @@ fn epoch_timestamp_in_ratelimit_reset_header_is_converted_to_relative_delay() {
         other => panic!("unexpected result: {other:?}"),
     }
 }
+
+#[test]
+fn daily_quota_wins_over_specific_media_zero_and_http_date_retry_after_is_parsed() {
+    use api::theintrodb::{LookupError, RateLimitScope};
+    use std::time::{Duration, SystemTime};
+
+    let both_zero = Server::with_headers(
+        429,
+        &[
+            ("X-UsageLimit-Remaining", "0"),
+            ("X-UsageLimit-Reset", "7200"),
+            ("X-UsageLimit-SpecificMedia-Remaining", "0"),
+            ("X-UsageLimit-SpecificMedia-Reset", "1800"),
+        ],
+        r#"{"error":"Usage limit exceeded","code":"usage_limit_exceeded"}"#,
+        true,
+    );
+    assert!(matches!(
+        both_zero
+            .client(true)
+            .get_episode_markers("123", 1, 2, Some(2700000)),
+        Err(LookupError::RateLimited {
+            scope: RateLimitScope::DailyQuota,
+            retry_after_ms: 7_200_000,
+        })
+    ));
+
+    let retry_date = httpdate::fmt_http_date(SystemTime::now() + Duration::from_secs(120));
+    let http_date_burst = Server::for_any_episode(
+        429,
+        &[("Retry-After", &retry_date)],
+        r#"{"error":"Too Many Requests"}"#,
+        true,
+    );
+    match http_date_burst
+        .client(true)
+        .get_episode_markers("123", 1, 2, Some(2700000))
+    {
+        Err(LookupError::RateLimited {
+            scope: RateLimitScope::Burst,
+            retry_after_ms,
+        }) => {
+            assert!(
+                (110_000..=125_000).contains(&retry_after_ms),
+                "expected ~120s Burst retry window from HTTP-date Retry-After, got {retry_after_ms}ms"
+            );
+        }
+        other => panic!("unexpected result: {other:?}"),
+    }
+}

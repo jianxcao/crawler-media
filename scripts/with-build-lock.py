@@ -11,19 +11,25 @@ LOCK_SLOTS = ("cm-cargo.lock", "cm-cargo-2.lock")
 INTENT_LOCK = "cm-cargo-intent.lock"
 
 active_proc = None
+locks_acquired = False
 received_signal = None
+signaled_proc = None
 
 
 def handle_signal(signum, _frame):
-    global received_signal
-    received_signal = signum
+    global received_signal, signaled_proc
     proc = active_proc
-    if proc is None:
+    if proc is not None:
+        received_signal = signum
+        signaled_proc = proc
+        try:
+            proc.send_signal(signum)
+        except ProcessLookupError:
+            pass
+        return
+    if not locks_acquired:
         raise SystemExit(128 + signum)
-    try:
-        proc.send_signal(signum)
-    except ProcessLookupError:
-        pass
+    received_signal = signum
 
 
 def open_lock_file(lock_dir, name):
@@ -90,13 +96,14 @@ def acquire_locks(lock_dir, exclusive):
 
 
 def run_command(cmd, env):
-    global active_proc
+    global active_proc, signaled_proc
     if received_signal is not None:
         return 128 + received_signal
     proc = subprocess.Popen(cmd, env=env, close_fds=True)
     active_proc = proc
     try:
-        if received_signal is not None:
+        if received_signal is not None and signaled_proc is not proc:
+            signaled_proc = proc
             try:
                 proc.send_signal(received_signal)
             except ProcessLookupError:
@@ -112,17 +119,25 @@ def run_command(cmd, env):
 
 
 def main():
+    global active_proc, locks_acquired, received_signal, signaled_proc
     exclusive = len(sys.argv) > 1 and sys.argv[1] == "--exclusive"
     command = sys.argv[2:] if exclusive else sys.argv[1:]
     if not command:
         raise SystemExit("usage: with-build-lock.py [--exclusive] COMMAND [ARG ...]")
 
+    active_proc = None
+    locks_acquired = False
+    received_signal = None
+    signaled_proc = None
+
     signal.signal(signal.SIGINT, handle_signal)
     signal.signal(signal.SIGTERM, handle_signal)
 
     lock_dir = os.environ.get("CM_BUILD_LOCK_DIR", "/tmp")
-    held_locks = acquire_locks(lock_dir, exclusive)
+    held_locks = []
     try:
+        held_locks = acquire_locks(lock_dir, exclusive)
+        locks_acquired = True
         env = {**os.environ, "TMPDIR": "/tmp"}
         taskpolicy = None
         if sys.platform == "darwin" and os.environ.get("CM_NO_BG_QOS") != "1":
@@ -166,6 +181,7 @@ def main():
 
         return run_command(command, env)
     finally:
+        locks_acquired = False
         for lock in reversed(held_locks):
             lock.close()
 

@@ -1,5 +1,6 @@
 """Tests for scripts/with-build-lock.py QoS, lock hygiene, fairness, and signals."""
 import fcntl
+import importlib.util
 import os
 import signal
 import stat
@@ -368,6 +369,135 @@ class WithBuildLockTests(unittest.TestCase):
             check=True,
         )
         self.assertEqual(excl.returncode, 0)
+
+    def _load_module(self):
+        spec = importlib.util.spec_from_file_location(
+            "with_build_lock_under_test", "scripts/with-build-lock.py"
+        )
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def test_signal_inside_popen_race_kills_and_reaps_child_before_unlocking(self) -> None:
+        mod = self._load_module()
+        prev_int = signal.getsignal(signal.SIGINT)
+        prev_term = signal.getsignal(signal.SIGTERM)
+        self.addCleanup(signal.signal, signal.SIGINT, prev_int)
+        self.addCleanup(signal.signal, signal.SIGTERM, prev_term)
+
+        # Before locks_acquired, handle_signal still exits immediately.
+        with self.assertRaises(SystemExit) as pre_lock:
+            mod.handle_signal(signal.SIGTERM, None)
+        self.assertEqual(pre_lock.exception.code, 128 + signal.SIGTERM)
+
+        real_popen = subprocess.Popen
+        spawned_pids: list[int] = []
+        lock_held_during_wait: list[bool] = []
+
+        def racing_popen(cmd, *args, **kwargs):
+            proc = real_popen(cmd, *args, **kwargs)
+            spawned_pids.append(proc.pid)
+            self.addCleanup(self._kill_quietly, proc.pid)
+            # Simulate signal arriving after fork_exec spawned child, BEFORE Popen
+            # returns to assign active_proc!
+            self.assertIsNone(mod.active_proc)
+            self.assertTrue(mod.locks_acquired)
+            mod.handle_signal(signal.SIGTERM, None)
+
+            orig_wait = proc.wait
+
+            def checked_wait(*w_args, **w_kwargs):
+                slot_path = os.path.join(self.lock_dir, "cm-cargo.lock")
+                with open(slot_path, "a", encoding="utf-8") as probe_fh:
+                    try:
+                        fcntl.flock(probe_fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    except BlockingIOError:
+                        lock_held_during_wait.append(True)
+                    else:
+                        fcntl.flock(probe_fh.fileno(), fcntl.LOCK_UN)
+                        lock_held_during_wait.append(False)
+                return orig_wait(*w_args, **w_kwargs)
+
+            proc.wait = checked_wait  # type: ignore[method-assign]
+            return proc
+
+        mod.subprocess.Popen = racing_popen  # type: ignore[attr-defined]
+        old_argv = sys.argv[:]
+        old_env = os.environ.copy()
+
+        def restore_env() -> None:
+            os.environ.clear()
+            os.environ.update(old_env)
+
+        self.addCleanup(setattr, sys, "argv", old_argv)
+        self.addCleanup(restore_env)
+        os.environ.update(self._isolated_env(no_bg_qos=True))
+        sys.argv = [
+            "scripts/with-build-lock.py",
+            sys.executable,
+            "-c",
+            "import time; time.sleep(30)",
+        ]
+
+        rc = mod.main()
+        self.assertEqual(rc, 128 + signal.SIGTERM)
+        self.assertEqual(len(spawned_pids), 1)
+        self.assertEqual(lock_held_during_wait, [True])
+
+        # Child must already be dead and reaped before main() returned.
+        with self.assertRaises(ProcessLookupError):
+            os.kill(spawned_pids[0], 0)
+
+        # Lock slot must be released after main() returned.
+        slot_path = os.path.join(self.lock_dir, "cm-cargo.lock")
+        with open(slot_path, "a", encoding="utf-8") as probe_fh:
+            fcntl.flock(probe_fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(probe_fh.fileno(), fcntl.LOCK_UN)
+
+    def test_signal_between_precompile_and_test_run_does_not_spawn_second_process(self) -> None:
+        if sys.platform != "darwin":
+            self.skipTest("taskpolicy split-compile path is macOS-only")
+        mod = self._load_module()
+        prev_int = signal.getsignal(signal.SIGINT)
+        prev_term = signal.getsignal(signal.SIGTERM)
+        self.addCleanup(signal.signal, signal.SIGINT, prev_int)
+        self.addCleanup(signal.signal, signal.SIGTERM, prev_term)
+
+        real_popen = subprocess.Popen
+        invocations: list[list[str]] = []
+        orig_run_command = mod.run_command
+
+        def instrumented_popen(cmd, *args, **kwargs):
+            invocations.append(list(cmd))
+            return real_popen(cmd, *args, **kwargs)
+
+        def run_then_signal_after_first(cmd, env):
+            rc = orig_run_command(cmd, env)
+            if len(invocations) == 1:
+                self.assertIsNone(mod.active_proc)
+                self.assertTrue(mod.locks_acquired)
+                mod.handle_signal(signal.SIGINT, None)
+            return rc
+
+        mod.subprocess.Popen = instrumented_popen  # type: ignore[attr-defined]
+        mod.run_command = run_then_signal_after_first
+        old_argv = sys.argv[:]
+        old_env = os.environ.copy()
+
+        def restore_env() -> None:
+            os.environ.clear()
+            os.environ.update(old_env)
+
+        self.addCleanup(setattr, sys, "argv", old_argv)
+        self.addCleanup(restore_env)
+        os.environ.update(self._isolated_env(no_bg_qos=False))
+        sys.argv = ["scripts/with-build-lock.py", "cargo", "test", "-p", "domain"]
+
+        rc = mod.main()
+        self.assertEqual(rc, 128 + signal.SIGINT)
+        self.assertEqual(len(invocations), 1)
+        self.assertIn("--no-run", invocations[0])
 
 
 if __name__ == "__main__":

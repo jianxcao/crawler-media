@@ -13,7 +13,7 @@ impl ClientFactory for HttpClientFactory {
 }
 
 use crate::{ScrapeStoreExt, Store};
-use domain::{FileVersion, LedgerId, UnitKey};
+use domain::{FileVersion, LedgerId, MediaKind, UnitKey};
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use store::StoredFileMarker;
@@ -61,6 +61,57 @@ impl InFlight {
     }
 }
 
+pub(crate) struct CloudLookupEligibility<'a> {
+    pub(crate) client: &'a TheIntroDbClient,
+    pub(crate) negative: &'a NegativeCache,
+    pub(crate) file_id: LedgerId,
+    pub(crate) version: &'a FileVersion,
+    pub(crate) unit: UnitKey,
+    pub(crate) unit_count: usize,
+    pub(crate) duration_ms: Option<i64>,
+    pub(crate) media_kind: MediaKind,
+    pub(crate) tmdb_id: Option<&'a str>,
+    pub(crate) detect_intros: bool,
+    pub(crate) has_marker: bool,
+    pub(crate) now_ms: i64,
+    pub(crate) force_refresh: bool,
+}
+
+pub(crate) fn cloud_lookup_eligible(check: CloudLookupEligibility<'_>) -> bool {
+    let Some(duration_ms) = check.duration_ms.filter(|&d| d > 0) else {
+        return false;
+    };
+    if !check.detect_intros
+        || check.has_marker
+        || check.media_kind != MediaKind::Tv
+        || check.unit_count != 1
+        || check.unit.episode_coordinates().is_none()
+    {
+        return false;
+    }
+    let Some(tmdb_id) = check.tmdb_id else {
+        return false;
+    };
+    if check
+        .negative
+        .is_cooling_down(check.client.cooldown_scope(), check.now_ms)
+    {
+        return false;
+    }
+    if check.force_refresh {
+        return true;
+    }
+    let key = LookupKey {
+        file_id: check.file_id,
+        version: check.version.clone(),
+        unit: check.unit,
+        duration_ms: Some(duration_ms),
+        tmdb_id: tmdb_id.to_string(),
+        configuration: check.client.cache_scope(),
+    };
+    !check.negative.contains(&key, check.now_ms)
+}
+
 pub(crate) fn session_needs_cloud_lookup(
     store: &Store,
     factory: &dyn ClientFactory,
@@ -71,19 +122,15 @@ pub(crate) fn session_needs_cloud_lookup(
     media: &domain::Media,
     has_marker: bool,
 ) -> bool {
-    let Some(duration_ms) = coverage.file.duration_ms.filter(|&d| d > 0) else {
-        return false;
-    };
-    if has_marker
-        || media.kind != domain::MediaKind::Tv
+    if coverage.file.duration_ms.filter(|&d| d > 0).is_none()
+        || has_marker
+        || media.kind != MediaKind::Tv
         || coverage.units.len() != 1
         || unit.episode_coordinates().is_none()
+        || media.tmdb_id.is_none()
     {
         return false;
     }
-    let Some(tmdb_id) = media.tmdb_id.as_deref() else {
-        return false;
-    };
     let library_id = coverage.file.library_id.to_string();
     let detect_intros = store
         .get_library(&library_id)
@@ -96,18 +143,21 @@ pub(crate) fn session_needs_cloud_lookup(
     let Some(client) = configured_client(store, factory) else {
         return false;
     };
-    if negative.is_cooling_down(client.cooldown_scope(), now_ms) {
-        return false;
-    }
-    let key = LookupKey {
+    cloud_lookup_eligible(CloudLookupEligibility {
+        client: &client,
+        negative,
         file_id: coverage.file.file_id,
-        version: coverage.file.version.clone(),
+        version: &coverage.file.version,
         unit,
-        duration_ms: Some(duration_ms),
-        tmdb_id: tmdb_id.to_string(),
-        configuration: client.cache_scope(),
-    };
-    !negative.contains(&key, now_ms)
+        unit_count: coverage.units.len(),
+        duration_ms: coverage.file.duration_ms,
+        media_kind: media.kind,
+        tmdb_id: media.tmdb_id.as_deref(),
+        detect_intros,
+        has_marker,
+        now_ms,
+        force_refresh: false,
+    })
 }
 
 pub(crate) struct CloudLookupRequest<'a> {
@@ -120,6 +170,7 @@ pub(crate) struct CloudLookupRequest<'a> {
     pub(crate) media_title: &'a str,
     pub(crate) tmdb_id: &'a str,
     pub(crate) now_ms: i64,
+    pub(crate) force_refresh: bool,
 }
 
 pub(crate) fn lookup_cloud_marker(req: CloudLookupRequest<'_>) -> Option<StoredFileMarker> {
@@ -135,7 +186,7 @@ pub(crate) fn lookup_cloud_marker(req: CloudLookupRequest<'_>) -> Option<StoredF
         configuration: req.client.cache_scope(),
     };
     if req.negative.is_cooling_down(cooldown_scope, req.now_ms)
-        || req.negative.contains(&key, req.now_ms)
+        || (!req.force_refresh && req.negative.contains(&key, req.now_ms))
     {
         return None;
     }
