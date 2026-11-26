@@ -12,6 +12,7 @@ dist/
 !.env.example
 
 # Vite 前端（新架构）
+.vite/
 web/node_modules/
 web/dist/
 web/public/jassub/
