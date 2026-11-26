@@ -76,7 +76,7 @@ python3 scripts/e2e/perfgate.py idle --dry-run
 PERF_SKIP_BUILD=1 zsh scripts/e2e/stress-up.sh /tmp/e2e-stress
 ```
 
-新增或调整 GET 路由后须同步更新 `scripts/e2e/perf-cases.json` 的用例或豁免说明，否则 `test_perfgate.py` 与 `perfgate.py idle --dry-run` 会因路由覆盖不完整而退出非零；生产 DDL 升级后亦须同步适配 `perf_business_oracle.py` 的固定摘要与 `user_version`，否则 `test_perf_business_oracle_cli.py` 会按契约拒绝旧摘要。首次压力实例启动和播种不自动生成正式 oracle。生成器的参数帮助只列命令选项，完整准备合同见 [生成器源码](../../scripts/e2e/perf_business_oracle.py) 和 [CLI 契约测试](../../scripts/e2e/test_perf_business_oracle_cli.py)：停服快照目录为 `baseline/data`，相邻阶段目录需有 `seed-complete` 和基线清单且无活动 owner；manifest 绑定产品、来源文件、来源树、用户和工具摘要。应先适配当前 DDL 的准入与期望推导并通过正反例，再准备相符的停服快照与独立业务期望，启动工作副本并核对身份。工具适配或任一前置证据未完成时，当前树的完整性能门保持 Unverified，不能跳过校验或仅用 dry-run 充当通过。
+新增或调整 GET 路由后须同步更新 `scripts/e2e/perf-cases.json` 的用例或豁免说明，否则 `test_perfgate.py` 与 `perfgate.py idle --dry-run` 会因路由覆盖不完整而退出非零；生产 DDL 升级后亦须同步适配 `perf_business_oracle.py` 的固定摘要与 `user_version`，否则 `test_perf_business_oracle_cli.py` 会按契约拒绝旧摘要（当前仓库的 `perf-cases.json` 与 `perf_business_oracle.py` 均待补齐近期新增路由与 `library.db` `user_version=8` 适配）。首次压力实例启动和播种不自动生成正式 oracle。生成器的参数帮助只列命令选项，完整准备合同见 [生成器源码](../../scripts/e2e/perf_business_oracle.py) 和 [CLI 契约测试](../../scripts/e2e/test_perf_business_oracle_cli.py)：停服快照目录为 `baseline/data`，相邻阶段目录需有 `seed-complete` 和基线清单且无活动 owner；manifest 绑定产品、来源文件、来源树、用户和工具摘要。应先适配当前 DDL 的准入与期望推导并通过正反例，再准备相符的停服快照与独立业务期望，启动工作副本并核对身份。工具适配或任一前置证据未完成时，当前树的完整性能门保持 Unverified，不能跳过校验或仅用 dry-run 充当通过。
 
 准备完成、正式测量获得独占资源后：
 

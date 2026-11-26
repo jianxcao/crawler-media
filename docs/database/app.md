@@ -63,8 +63,8 @@ CREATE TABLE users(id TEXT PRIMARY KEY NOT NULL,login TEXT NOT NULL UNIQUE,enabl
    - 在单个 `app.db` `IMMEDIATE` 事务内将用户设为禁用（`enabled = 0`）、物理撤销 `user_tokens` 中该用户的全部会话 token（级联清除 `playback_device_credentials`），并在 `settings` 持久化操作状态：键为 `user_removal.<id>`，`version: 1`，包含 `operation_id`、`user_id`、`phase`（直接进入 `cleaning` → `finalizing`；`disabling` 仅保留作兼容恢复分支）、`cursor`、`error` 与 `updated_at`。在整个删除执行与故障恢复期间，被删除用户的 token 访问立即返回 401（Unauthorized）。
 3. **资源所有权与清理边界**：
    - 保留现行产品行为：被删除用户的 Subscribe 所有权转移至系统管理员（`admin`），私有 Collection 亦转移至管理员，不静默删除用户创建的长期订阅与合集。
-   - 原始播放记录（`playback_units`、`playback_sessions`、`playback_session_ids`、`playback_logs`、`playback_metrics`）及稀疏用户摘要（`user_library_items` 及其级联 `user_library_continue_units`）被一并清理，并在 `finalizing` 阶段从各 `libraries.member_ids_json` 中移除该用户 ID。
-   - 跨库清理完成后，删除 `users` 记录；先在 `user_removal.result.<operation_id>`（`phase = "succeeded"`，保留 7 天后修剪）保存终态结果、在 `user_removal.done.<user_id>` 保存操作 id，再清除 `user_removal.<id>` 在途项。重启可幂等重做 `finalizing`，终态回执继续可查。
+   - 在 `cleaning` 阶段，原始播放记录（`playback_units`、`playback_sessions`、`playback_session_ids`、`playback_logs`、`playback_metrics`）及稀疏用户摘要（`user_library_items` 及其级联 `user_library_continue_units`）被一并清理。
+   - `cleaning` 完成后进入 `finalizing`：先在 `app.db` 删除 `users` 记录并释放写锁，再在独立 `library.db` 事务中从各 `libraries.member_ids_json` 移除该用户 ID（若前次中断已删 `users` 行仍幂等补做成员列表清理）；随后依次写入 `user_removal.result.<operation_id>`（`phase = "succeeded"`，保留 7 天后修剪）与 `user_removal.done.<user_id>`，最后清除 `user_removal.<id>` 在途项。重启可幂等重做 `finalizing`，终态回执继续可查。
 4. **故障恢复**：进程启动与 `job_loop` 扫描 `user_removal.` 前缀的在途操作，直接驱动继续完成未决阶段。
 
 ## sites
@@ -203,7 +203,7 @@ CREATE TABLE search_snapshots(id TEXT PRIMARY KEY NOT NULL,vertical TEXT NOT NUL
 
 ## downloaders
 
-Downloader 连接、启用开关、默认选择和路径映射配置。qBittorrent v5.2+ 的 API Key 以及连接校验状态存放在同库 `settings` 表（`downloader.<id>.api_key`、`downloader.<id>.verified`、`downloader.<id>.last_error`），在新建、原子修改（`Store::mutate_downloader`）与删除的同一 `IMMEDIATE` 事务中同步维护或清理。
+Downloader 连接、启用开关、默认选择和路径映射配置。qBittorrent v5.2+ 的 API Key 与连接校验状态存放在同库 `settings` 表（`downloader.<id>.api_key`、`downloader.<id>.verified`、`downloader.<id>.last_error`）：`api_key` 在新建、原子修改（`Store::mutate_downloader`）与删除（`Store::delete_downloader`）的同一 `IMMEDIATE` 事务中同步维护或清理；`verified` 与 `last_error` 由连接校验（`Store::record_downloader_verification`）在 CAS `IMMEDIATE` 事务中写入，在 `Store::mutate_downloader` 修改连接/鉴权字段的同一 `IMMEDIATE` 事务中失效清除，并在 HTTP 删除入口中额外清理。
 
 
 | 字段 | SQLite 类型 | 主键顺位 | 显式 NOT NULL | DEFAULT | 含义 |

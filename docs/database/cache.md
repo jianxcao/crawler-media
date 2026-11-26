@@ -49,6 +49,6 @@
 
 - 来源客户端负责保留完整路径、参数、语言及必要凭证摘要；不能把 `/movie/1` 与 `/movie/10` 或子资源视作同一详情。fanart 键为 `fanart/{media_type}/{id}/{prefix}`，prefix 是 API key 的 SHA-256 前16位十六进制摘要，不是原始密钥。
 - `CatalogCache::put` 按请求键区分默认 TTL：发现/榜单等易变列表键为 **86400 秒（24小时）**，详情及其他键为 **604800 秒（7天）**；底层 `put` 可显式传 `expires_at` 或 NULL，DDL 不指定 TTL。
-- `get_fresh` 在 `expires_at <= now` 时视为过期；`get_stale` 忽略期限。启用 `with_prefer_stale` 的发现/列表键可在过期后先返回可解码的 stale 响应（SWR）；普通读取在刷新成功解码后才替换持久响应，上游暂时失败时仅可使用可解码的 stale 值，而明确 `NotFound` 会持久化为负缓存且不回退旧值。
+- `get_fresh` 在 `expires_at <= now` 时视为过期；`get_stale` 忽略期限。启用 `with_prefer_stale` 的发现/列表键可在过期后先返回可解码的 stale 响应（SWR）；普通读取在刷新成功解码后才替换持久响应，上游暂时失败时仅可使用可解码的 stale 值，而明确 `NotFound` 会按同键 TTL 持久化为负缓存且不回退旧值。
 - 底层 `get/list/details_for_prefixes` 不过滤 TTL，命中不等于 fresh。列表按 `fetched_at DESC, entry_id ASC`。
 - 来源聚合游标必须携带来源及表内 ID，不能只用 entry_id。到期决定读取新鲜度；物理删除由受控维护按预算和详情保护规则执行，不在读取到期时自动删除。

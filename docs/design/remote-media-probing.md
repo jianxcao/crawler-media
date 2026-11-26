@@ -16,6 +16,6 @@
 
 ## 耗时边界
 
-持久队列的 `queue_wait_ms` 与 worker 里的媒体信息耗时分别计算。`Remote media read admitted.waited_ms` 是共享闸门等待；媒体信息读取完成日志包含闸门与实际 probe（`media_info_elapsed_ms`）；`nfo_elapsed_ms` 单独记录 NFO 发布耗时；最后数据库发布仍由源版本 CAS 保护。
+持久队列的 `queue_wait_ms` 与 worker 里的媒体信息耗时分别计算。`Remote media read admitted.waited_ms` 是共享闸门等待；单文件「远程准入与流信息读取完成」日志的 `elapsed_ms` 包含闸门与实际 probe，任务汇总日志的 `media_info_elapsed_ms` 累计媒体信息阶段总耗时；NFO 日志中的 `nfo_elapsed_ms` 单独记录 NFO 发布耗时（同行的 `elapsed_ms` 从媒体信息阶段起点累计，不能解释为单次 NFO 写入耗时）；最后数据库发布仍由源版本 CAS 保护。
 
 现有日志仍不提供每次 HTTP 响应体精确字节数，也不能拆分 DNS、TLS、CDN 首字节和解析 CPU。系统网络采样包含协议开销且可能漏采，不替代应用字节计数。共享准入的界面配置、默认值及热修改行为见[探测设置](../api-contracts/probe-settings.md)。

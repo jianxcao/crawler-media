@@ -96,7 +96,7 @@ VidHub 用例通过已安装的 VidHub app 连接隔离实例执行。第一次�
 | NAV-02 | P1 | 在桌面与窄屏视口分别遍历侧栏、底部导航、对话框、表单和列表；切换可用主题后刷新。 | 控件不被裁切或遮挡；主题与偏好持久化；所有操作可用键盘/触控完成；加载、空数据和错误状态均有内容。 |
 | HOME-01 | P1 | 打开 `/`（自动跳转 `/library`）及库总览行，检查最近新增、继续观看、收藏或发现入口；从每个卡片打开详情再返回。 | 根路径稳定落到 `/library`；卡片信息与对应数据一致；图片失败有 fallback；返回后保留合理的滚动位置和筛选。 |
 | HOME-02 | P1 | 首次配置不完整时，从 `/settings/overview` 概览提示进入 Site、Downloader 和 Library 配置，再返回概览。 | 下一步入口指向正确页面；完成状态及时更新；未配置时有可操作说明，不显示虚假成功。 |
-| MY-01 | P1 | 在 Netflix 主题移动端打开 /my；检查 User 信息和管理员快捷入口；逐个打开 Subscribe、Transfer、缓存、活动与设置入口；再以成员 User 检查入口；在 Silver 主题直接打开 /my。 | User 信息与活动角标正确；有效入口落到对应页面；成员不显示管理员专属入口；首次加载主题偏好时页面不闪退到库页；Silver 主题按设计跳转首页入口。 |
+| MY-01 | P1 | 在 Netflix 主题移动端打开 /my；检查 User 信息和管理员快捷入口；逐个打开 Subscribe、Transfer、缓存、活动与设置入口；再以成员 User 检查入口；在 Silver 主题直接打开 /my。 | User 信息与活动角标正确；有效入口落到对应页面；成员不显示管理员专属入口；首次加载主题偏好时页面不闪退到库页；Silver 主题按设计经 `/` 重定向至 `/library`。 |
 | MY-02 | P1 | 在 /my 打开切换账号列表并切换 User；随后退出登录；若浏览器还有其他已登录 User，再检查切换结果。 | 切换后头像、数据和权限均更新；退出后个人缓存清理且进入登录页或另一个可访问页面；不会恢复前一 User 的受保护内容。 |
 | ROUTE-01 | P2 | 打开 /health、任一未知路由和已失效的详情链接。 | health 页面呈现服务状态；未知路由显示 Not Found；失效数据显示空/不可用说明并提供返回入口。 |
 
@@ -122,7 +122,7 @@ VidHub 用例通过已安装的 VidHub app 连接隔离实例执行。第一次�
 | SUB-04 | P0 | 对已拥有文件的 Subscribe 启用 Wash-cut；fake Indexer 返回较低、相同和更高 quality 的 Torrent，运行后检查每个 episode。 | 只接纳满足替换条件的候选；完成度按 episode 更新；新旧文件替换与清理符合 Transfer mode 规则；没有候选时保留现有 Library 文件。 |
 | SUB-05 | P1 | 在 Subscribe 列表按状态/Media 查询；查看 coverage、quality、最近执行和异常；删除一个测试 Subscribe。 | 列表与详情事实一致；删除需要明确确认；删除后其 Job 定义按产品约定处理，其他 User 的 Subscribe 不受影响。 |
 | FILTER-01 | P1 | 在设置中创建、编辑、复制和删除 Filter；配置内置和用户自定义 atom；在预演中输入匹配/拒绝 Torrent。 | 拒绝规则和最高命中 priority 的 score 结果清楚可解释；Filter 被 Subscribe 绑定后仍显示正确版本；无效条件给出字段提示。 |
-| JOB-01 | P0 | 在活动页任务中心（`/activity`，以及 `/tasks`、`/jobs` 重定向入口）切换全部、进行中、需要处理、定时、历史（`view=all|active|attention|scheduled|history`）；展开 Job 与下载条目阶段；按状态筛选并刷新。 | Job 与 Downloader 状态区分清楚；数量、时间线和阶段与事实一致；旧路由重定向正确，刷新不会重复创建或丢失操作结果。 |
+| JOB-01 | P0 | 在活动页任务中心（`/activity`，以及 `/tasks`、`/jobs` 重定向入口）切换全部、进行中、需要处理、定时、历史（`view` 取 `all` / `active` / `attention` / `scheduled` / `history`）；展开 Job 与下载条目阶段；按状态筛选并刷新。 | Job 与 Downloader 状态区分清楚；数量、时间线和阶段与事实一致；旧路由重定向正确，刷新不会重复创建或丢失操作结果。 |
 | JOB-02 | P1 | 对可重试 Job 执行重试/取消；忽略和撤销忽略；处理 fake Downloader 失联、任务缺失和 Site 超时。 | 仅允许合法状态转换；异常上下文可见且能定位 Site/Downloader；可恢复情形提供重试；不可恢复时保持原数据并说明原因。 |
 | DLT-01 | P1 | 对下载条目执行暂停、恢复、取消、移除和刷新状态；选择“只移除 Downloader 任务”与“连同文件处理”的可用选项。 | 操作作用于选中的 Torrent；文件删除/保留与所选动作一致并有明确确认；失败后仍可重试，其他 Downloader 任务不受影响。 |
 | ACT-01 | P1 | 打开活动页，切换 User/工作流范围，等待新的 fixture 事件；进入关联 Media、Subscribe 或 Job。 | 新事件按时间更新且不重复；范围筛选生效；每条事件跳到正确详情；空闲时不产生误报。 |

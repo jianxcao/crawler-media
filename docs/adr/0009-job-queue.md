@@ -10,25 +10,26 @@ MoviePilot 拆分：APScheduler 进程内任务（`subscribe_search`、`transfer
 
 Store 四文件之外的队列文件：`{data}/jobs.db`。它不是可随意清空的 cache：清空会丢用户修改的 def 策略／开关／周期、queued/running 工作、重试和历史。当前 Media/别名、Library 文件与 Playback 在 `library.db`，Metadata source HTTP 响应在 `cache.db`，Subscribe 在 `subscribe.db`，实例配置在 `app.db`（`crates/store/src/open.rs`、`schema/v1/*.sql`；[ADR-0008](<0008-sqlite-system-of-record.md>)）。终态历史可按明确的 latest/tie 保护规则分批删；不得据“不丢 Media 身份”推断整个 `jobs.db` 可丢。
 
-两张核心表（下面是字段摘要，不是完整 DDL；另有 `retention_cursors`、`job_change_state` 与变更 triggers，见 `crates/jobs/src/store.rs`、`retention_cursor.rs`、`change_state.rs`）：
+两张核心表（下面是字段摘要，不是完整 DDL；另有 `retention_cursors`、`job_change_state`、`subscribe_config_receipts`、`subscribe_lifecycle_fences` 与变更 triggers，见 `crates/jobs/src/schema.sql`、`store.rs`、`retention_cursor.rs`、`change_state.rs`）：
 
 ```
 job_defs (
   id TEXT PRIMARY KEY,
   kind TEXT NOT NULL,            -- subscribe_search | subscribe_rss | transfer
                                  -- | scrape | check_in | catalog_refresh | watch_intake
+                                 -- | discover_refresh | browser_reconcile | 维护类
   scope_key TEXT NOT NULL,       -- 与 kind 构成唯一结构化身份
   name TEXT NOT NULL,
   enabled INTEGER NOT NULL,
   schedule TEXT,                 -- null = 仅按需；现行仅 interval:<secs>，未实现 cron
-  payload TEXT NOT NULL,         -- JSON: subscribe_id, site_id, root_id, …
+  payload TEXT NOT NULL,         -- JSON: subscribe_id, media_id, 维护策略等
   timeout_secs INTEGER,
-  concurrency_key TEXT           -- 可选互斥，如 site:<id> 或 subscribe:<id>
+  concurrency_key TEXT           -- 可选互斥，如 subscribe:<id>、catalog:<id>、check_in
 )
 
 jobs (
   id TEXT PRIMARY KEY,
-  def_id TEXT,                   -- null 表示一次性（手动搜索）
+  def_id TEXT,                   -- null 表示按需一次性任务（如 browser_reconcile）
   kind TEXT NOT NULL,
   scope_key TEXT NOT NULL,       -- 继承任务身份；payload 仅保存参数
   payload TEXT NOT NULL,
@@ -52,7 +53,7 @@ WAL。进程内通过Queue mutex串行访问 writer 连接，**不是专用单�
 
 每秒一次循环：`SELECT … FROM jobs WHERE status='queued' AND run_after<=now ORDER BY run_after LIMIT N`。条件更新使同一 queued 状态不能被同时成功认领；超时或崩溃恢复可能重新执行 attempt，不保证 exactly-once。进程启动时，超过 `timeout_secs` 的 `running` 变为 `queued` 且 `attempt+1`。`attempt` 达到 5 后置为 `failed` 并停止。
 
-带schedule的def在完成时spawn follow-up（run_after=完成时间＋interval）；缺live child时ensure_scheduled也可立即补首个子任务。这里只是Interval循环，不是已支持cron表达式。UI 列出 `job_defs`（能跑什么）与近期 `jobs`（跑了什么）。手动搜索 POST 一个 `def_id` 为 null 的一次性 `jobs` 行。
+带schedule的def在完成时spawn follow-up（run_after=完成时间＋interval）；缺live child时ensure_scheduled也可立即补首个子任务。这里只是Interval循环，不是已支持cron表达式。UI 列出 `job_defs`（能跑什么）与近期 `jobs`（跑了什么）。按需任务（如 `browser_reconcile`）可入队 `def_id` 为 null 的一次性 `jobs` 行。
 
 并发：每tick最多claim2条，当前tick内逐条执行；后台每秒派发blocking tick且不等待上一tick结束，因此**不等价于全实例最多2个运行任务**。`concurrency_key`阻止同key的running重叠；不同key可跨tick并行，若需全局并发上限须单独设计／验收。
 
@@ -60,27 +61,29 @@ WAL。进程内通过Queue mutex串行访问 writer 连接，**不是专用单�
 
 | kind | payload | 调用 |
 |---|---|---|
-| `subscribe_search` | `subscribe_id` | Indexer.search + Filter + subscribe::run |
-| `subscribe_rss` | （无 / site 列表） | Indexer.rss，然后对每个匹配 **Subscribe** 跑同一 run |
-| `transfer` | `downloader_id` 可选 | 轮询已完成文件、**Naming template**、ledger |
-| `scrape` | runner 不使用 Job payload | `watch_scrape::run(&state)` |
-| `check_in` | `site_id` | Check-in **Plugin** |
-| `catalog_refresh` | `media_id` | TMDB（等）经 `cache.db` 的来源表缓存，更新 Media/采用元数据 |
-| `watch_intake` | runner 不使用 Job payload | `watch_intake::run(&state)` |
+| `subscribe_search` | `subscribe_id`（`Subscribe` 作用域） | Indexer.search + Filter + subscribe::run |
+| `subscribe_rss` | `{}`（Global） | Indexer.rss，然后对每个匹配 **Subscribe** 跑同一 run |
+| `transfer` | `{}`（runner 不读 payload） | 轮询已完成文件、**Naming template**、ledger |
+| `scrape` | `{}`（runner 不读 payload） | `watch_scrape::run(&state)` |
+| `watch_intake` | `{}`（runner 不读 payload） | `watch_intake::run(&state)` |
+| `check_in` | `{}`（Global） | 遍历启用 **Site** 执行 Check-in **Plugin** 与 boost 检查 |
+| `catalog_refresh` | `media_id`（`Media` 作用域） | TMDB（等）经 `cache.db` 的来源表缓存，更新 Media/采用元数据 |
+| `discover_refresh` | `{}`（Global） | `discover_refresh::run(&state)` 每日预热发现页榜单 |
+| `browser_reconcile` | `{}`（Global 按需） | 受管 Obscura 安装与进程对账（ADR-0007） |
 
 `subscribe_search` 将 Torrent 加入 Downloader 后结束；独立的 `transfer` Job 读取已完成文件并发布 Library 文件事实。两个阶段各自持久化状态与结果。
 
-投递候选时严格区分「源确定性拒绝」与「暂时性错误」：仅当 Indexer 解析下载地址或 Downloader 拉取种子明确确认源不可用（HTTP 404/410、API 成功回执但下载地址为空、响应体确定为非种子且非 Cloudflare 质询页面）或下载任务已损坏时，才持久化为 `rejected` 永久排除并在同轮内回退尝试后续候选（每组最多回退 8 次）；网络/DNS/超时、401/403/429/5xx、Cloudflare 质询、截断传输以及 qBittorrent 返回 `Fails.` 均归为暂时错误，仅记入本轮 `add_errors` 供后续轮次继续重试，避免短暂故障永久拉黑可用种子源。
+投递候选时严格区分「源确定性拒绝」与「暂时性错误」：仅当 Indexer 解析下载地址或 Downloader 拉取种子明确确认源不可用（HTTP 404/410、API 成功回执但下载地址为空、qBittorrent 预取返回非种子且非 Cloudflare 质询/截断 `d...` bencode 的响应体）或下载任务已损坏时，才持久化为 `rejected` 在自动轮次中永久排除，并在同轮内回退尝试后续候选（单轮最多回退 8 次；用户显式手动提交仍可重新激活）；网络/DNS/超时、401/403/429/5xx、Cloudflare 质询、截断传输以及 qBittorrent 返回 `Fails.` 均归为暂时错误，仅记入本轮 `add_errors` 供后续轮次继续重试，避免短暂故障永久拉黑可用种子源。
 
-手动关键词搜索是没有 **Subscribe** 的 `subscribe_search` 一次性 Job（payload 有 `query` + `filter_id`）。同一 runner，同一 UI 日志行。
+用户手动关键词搜种直接走同步 HTTP/SSE 接口（`/api/v1/search/torrents`、`/search/torrents/stream`），不入 `jobs` 表；`SubscribeSearch` 任务要求绑定具体 `SubscribeId` 作用域。
 
 ## 默认（启用）
 
-- 每个 active **Subscribe** 一个 `subscribe_search`，间隔 30 分钟（search **Fetch mode** 或 both）。
-- 实例级 `subscribe_rss`，间隔 10 分钟（rss 或 both）。
-- 实例级 `transfer`，间隔 30 秒。
-- 每个启用 **Site** 一个 `check_in`，间隔 12 小时，`concurrency_key=site:<id>`。
-- 每个被 **Subscribe** 指向的 **Media** 一个 `catalog_refresh`，间隔 24 小时。
+- 每个 active **Subscribe** 一个 `subscribe_search`，默认间隔 30 分钟（search **Fetch mode** 或 both，最小 5 分钟）。
+- 实例级 `subscribe_rss`（10 分钟）、`scrape`（10 分钟）。
+- 实例级 `transfer`（30 秒）、`watch_intake`（30 秒）。
+- 实例级 `check_in`（24 小时，`concurrency_key=check_in`）、`discover_refresh`（24 小时，`concurrency_key=discover_refresh`）。
+- 每个被 **Subscribe** 指向的 **Media** 一个 `catalog_refresh`，间隔 24 小时（`concurrency_key=catalog:<id>`）。
 
 Subscribe 创建及影响搜索策略的更新在 subscribe.db 保存 generation、lifecycle epoch、revision 和待同步意图；jobs.db 在自身事务应用配置及 receipt，再按 generation/revision 确认。已应用 revision 的重放不覆盖后续手动 Jobs 编辑。删除在 Subscribe 事务记录清理意图，按 incarnation 关闭 lifecycle fence，删除该身份定义及子任务，包括 defless 历史；恢复按窗口重试。旧 epoch 或已关闭 incarnation 的迟到投递不能覆盖新 incarnation。新 incarnation 投递前可短暂看到旧配置；runner 重读当前 Subscribe，Library 引用安全不依赖 Jobs 投影。孤儿 definition-backed Search 禁用定义并允许正在运行的 Job 完成。跨库提交不是原子事务。
 

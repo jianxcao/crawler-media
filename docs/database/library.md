@@ -77,7 +77,7 @@ Subscribe retention 是孤儿 Media 保留权威；创建、释放、补偿和�
 - [playback_metrics](#playback_metrics) — 13 字段；Playback QoE 指标；随保留策略或用户清除播放历史一并清理，不作为用户播放次数来源。
 - [playback_session_ids](#playback_session_ids) — 17 字段；签发会话的逻辑目标、物理源、生命周期、generation 与已提交事件序号。`Store::commit_playback_event` 写入前校验 `(user, device, session)` 的 generation/目标单元/文件版本/source_version 与库 `lifecycle_state`+`config_revision`+ACL，不匹配或序号不递增一律 `IgnoredStale` 不落事实；`pending` 会话的首个 progress 视为 Start 原子激活；`Stop` 只关闭上报会话并归档一条 play log，重复 Stop 因会话已 `closed` 而幂等。
 - [playback_sessions](#playback_sessions) — 31 字段；每用户/设备活动会话及源绑定、事件顺序、传输/观看统计。
-- [playback_units](#playback_units) — 20字段；用户逻辑观看/收藏事实及源绑定恢复包，不FK到物理文件。未完成 Progress 保留既有 played 断言；达到已知源时长90%阈值写 true 及毫秒断言时钟，人工 mark/unmark 写显式 true/false。目标按最新时钟、同时间 episode>season>whole 决议；effective assertion 与协议 SQL 使用同一规则。分集按请求单元/必要祖先分窗读取，在同一快照内归约。清历史同事务清恢复与断言、播放日志和 QoE 指标（favorite 保留），并同步继续观看隐藏状态。
+- [playback_units](#playback_units) — 20字段；用户逻辑观看/收藏事实及源绑定恢复包，不FK到物理文件。未完成 Progress 保留既有 played 断言；达到已知源时长90%阈值写 true 及毫秒断言时钟，人工 mark/unmark 写显式 true/false。目标按最新时钟、同时间 episode>season>whole 决议；effective assertion 与协议 SQL 使用同一规则。分集按请求单元/必要祖先分窗读取，在同一快照内归约。清历史在同一 `library.db` 事务内清恢复与断言、播放日志和 QoE 指标（favorite 保留），并在 `app.db` 同步继续观看隐藏状态（`library.db` 写入失败时补偿回滚）。
 - [probe_job_units](#probe_job_units) — 15 字段；Probe 文件单元、阶段与输出；活动单元/派发索引控制工作窗口。
 - [probe_jobs](#probe_jobs) — 17 字段；专用 Probe 作业与单元计数、阶段策略和历史；不同于 jobs.db 的通用 Job。
 - [probe_season_comparison_history](#probe_season_comparison_history) — 4 字段；每 Media/季最近比较摘要与发布时间，不是完整历史集合。
@@ -523,7 +523,7 @@ CREATE INDEX coverage_media ON library_file_units(media_id,season,episode,librar
 | `poster_path_key` | `TEXT` | — | 否 | 无 | `poster_path` 对应的规范化路径键，与 `poster_path` 同为 NULL 或同时非空。 |
 | `backdrop_path_key` | `TEXT` | — | 否 | 无 | `backdrop_path` 对应的规范化路径键，与 `backdrop_path` 同为 NULL 或同时非空。 |
 | `still_path_key` | `TEXT` | — | 否 | 无 | `still_path` 对应的规范化路径键，与 `still_path` 同为 NULL 或同时非空。 |
-| `parent_dir_key` | `TEXT` | — | 否 | `GENERATED ALWAYS AS (...) VIRTUAL` | 从 `path_key` 派生的父目录规范键（`VIRTUAL` 生成列，`PRAGMA table_info` 不返回该列）。 |
+| `parent_dir_key` | `TEXT` | — | 否 | 无 | 从 `path_key` 派生的父目录规范键（`GENERATED ALWAYS AS (...) VIRTUAL` 生成列，见下方生产表定义；`PRAGMA table_info` 不返回该列）。 |
 | `has_poster` | `INTEGER` | — | 是 | `0` | 见本表生产定义。 |
 | `has_backdrop` | `INTEGER` | — | 是 | `0` | 见本表生产定义。 |
 | `has_still` | `INTEGER` | — | 是 | `0` | 见本表生产定义。 |
@@ -1625,7 +1625,7 @@ CREATE INDEX playback_sessions_media ON playback_sessions(media_id);
 
 ## playback_units
 
-用户逻辑观看/收藏事实及一套源绑定恢复包；不 FK 到物理文件，删文件保留原始事实。
+用户逻辑观看/收藏事实及一套源绑定恢复包；不 FK 到物理文件，同一 Media 仍有其他文件或 Collection/Subscribe 保留引用时删单个文件保留原始事实，最后文件删除且无保留引用时随孤儿 Media 一并清理（ADR-0012）。
 
 
 | 字段 | SQLite 类型 | 主键顺位 | 显式 NOT NULL | DEFAULT | 含义 |

@@ -38,14 +38,15 @@
 
 ## 运行期探测队列控制
 
-管理员另可通过 `/api/v1/probe/*` 查看与控制进程内后台探测队列（不修改持久化的 `probe.remote_reads` 设置）：
+管理员另可通过 `/api/v1/probe/*`（非管理员返回 403；`resume` 与 `cancel` 同时受实例只读/维护 `write_gate` 约束）查看与控制后台探测队列：
 
-- `GET /api/v1/probe/status`：返回当前后台探测队列的 `paused`、`remote_reads_paused`、排队/运行统计与活动单元摘要。
-- `POST /api/v1/probe/pause` / `POST /api/v1/probe/resume`：暂停或恢复进程内后台探测派发（重启后不保留该内存暂停状态，不同于持久化的 STRM 远程读取暂停）。
-- `POST /api/v1/probe/cancel`：取消待处理或运行中的后台探测任务。
+- `GET /api/v1/probe/status`：返回 `{paused, remote_reads_paused, queued_metadata, running_metadata, queued_fingerprint, running_fingerprint, pending_obligations, total_pending, libraries: [{library_id, library_name, queued_count, running_count, obligation_count, total_pending}]}`（`libraries` 仅列出 `total_pending > 0` 的库）。
+- `POST /api/v1/probe/pause` / `POST /api/v1/probe/resume`：切换进程内后台探测派发开关并返回与 `/probe/status` 相同形状的状态。该开关不写入 `app.db`；生产 `serve` 每次启动/重启默认初始化为 `paused: true` 以避免积压队列自动冲击远程挂载，需经 `/probe/resume` 或库级 `POST /api/v1/libraries/{id}/media-info/refresh` 恢复（单条目 `POST /api/v1/libraries/{id}/items/{item_id}/probe` 不受该暂停限制），`/probe/resume` 还会立即补派一批待处理 `file_probe_obligations`。
+- `POST /api/v1/probe/cancel`：接受空请求体（全局取消）或严格 JSON `{"library_id"?: string}`（未知字段或非法 JSON 返回 `400 probe.invalid`），仅取消 `status = 'queued'` 的待处理探测单元并清理对应 `file_probe_obligations`，**不中断**已在运行（`running`）的单元；返回 `{cancelled_units, cleared_obligations}`。
 
 ## 验证
 
 - `crates/api/tests/probe_settings_runtime.rs`：默认读取行为、HTTP 保存/读回/参数错误/权限、重建实例后持久化、媒体信息并发热升降、后加入文件不越过旧等待文件、共享远程并发热修改及启动读取间隔。
+- `crates/api/tests/probe_queue_control_and_restart_pause.rs`、`crates/api/tests/probe_paused_manual_and_cancel.rs`：生产启动默认暂停、`/probe/{status,pause,resume,cancel}` 权限与队列统计、单条目探测豁免及仅取消排队项语义。
 - `crates/marker/tests/media_read.rs`：共享准入、读取间隔、取消、本地读取不被远程阻塞、运行时缩短间隔。
 - `web/test/probe-settings.test.mjs`：真实组件加载、范围校验、保存和失败后重试。

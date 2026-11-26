@@ -16,7 +16,7 @@ crawler-media：自托管媒体抓取/订阅/入库/播放服务。Rust workspac
 | `downloader` | qBittorrent 等下载器适配 |
 | `library` | Library 账本、扫描、文件 → Media 识别（ADR-0001） |
 | `subscribe` / `filter` / `release` | 订阅轮次、过滤原子、Release 解析 |
-| `hooks` | 外部 hooks（ADR-0002，非插件运行时） |
+| `hooks` | 进程内 Hook 总线与编译期第一方插件（ADR-0002，非插件运行时） |
 | `jobs` | 任务队列（ADR-0009） |
 | `marker` | 媒体信息/标记读取；`marker::media_read` 远程读闸门 |
 | `playback` / `media-server` | 播放会话；Jellyfin/Emby 兼容协议层（ADR-0005） |
@@ -26,7 +26,7 @@ crawler-media：自托管媒体抓取/订阅/入库/播放服务。Rust workspac
 依赖方向以各 crate 的 `Cargo.toml` 为准；禁止其他 crate 依赖 `api`。`domain` 是无 IO 的基础类型层；`store` 使用 `domain`、`downloader`、`library`、`marker`、`media`，`library` 使用 `domain`、`release`、`marker`，`subscribe` 组装 `domain`、`downloader`、`filter`、`hooks`、`library`、`release`；不能把现有依赖图简化为只依赖 `domain`/`store`。
 
 ### 前端（`web/`）
-Vite + React + TS，pnpm。`web/src/main.tsx` 入口，`web/app/` 路由页面，`web/components/` 组件，`web/lib/` 逻辑，`web/lib/api/*` API 客户端，`web/test/` 测试（`node --test`）。dev server :3334，`vite.config.ts` 把 `/api` 代理到后端 :18765（额外启用 Host 校验，局域网域名经 `CM_DEV_ALLOWED_HOSTS` 放行）—— 前端始终同源调用 `/api/v1`（含公开图片路径），不要写死后端地址。
+Vite + React + TS，pnpm。`web/src/main.tsx` 入口，`web/app/` 路由页面，`web/components/` 组件，`web/lib/` 逻辑，`web/lib/api/*` API 客户端，`web/test/` 测试（`node --test`）。dev server :3334，`vite.config.ts` 把 `/api`（及兼容保留的 `/posters`）代理到后端 :18765，并启用 Host 校验（局域网域名经 `CM_DEV_ALLOWED_HOSTS` 放行）—— 前端始终同源调用 `/api/v1`（含公开图片路径），不要写死后端地址。
 
 ### 关键位置
 - **每库单写者**：`Store` 共享 `Arc<Writers>`（`crates/store/src/writers.rs`），app/subscribe/library/cache 每库唯一 writer 连接和独立 Mutex。API 写入口是 `store_write`（`crates/api/src/http/store_wait.rs`，`STORE_WRITE_WAIT = 1s`），在实际目标库 writer 获取后复查写入准入。实际数据库 writer 不允许嵌套（debug/release 均检查）；跨库不承诺原子提交。Jobs reservation 是有界准入门，不占实际 writer。
@@ -49,7 +49,7 @@ Vite + React + TS，pnpm。`web/src/main.tsx` 入口，`web/app/` 路由页面�
 4. **探测默认值与配置**：媒体信息 worker 默认 1、远程读取并发默认 1、远程读取间隔默认 500ms。管理员可在界面配置；两个并发均为 1~8，间隔为 0~60000ms。保存即对后续任务生效，降低并发不打断活动读取，也不能让新任务超过新上限。默认值不能被无关改动提高。
 5. **删除 Library（ADR-0012）**：先隐藏 → 立即取消该库所有任务 → 删除 → 清理孤儿 Media（含 favorites / playback 进度）。某 Media 最后一个文件被删时，其 favorites / 进度一并清除。
 6. **Git**：只在当前分支提交；绝不 push `main`，绝不 force push，未经询问不开 PR。不要提交 `docs/test-reports/`、`.e2e/`，不要夹带无关改动。
-7. **静态图片端点不鉴权**：`/api/v1` 下的 `/posters/*`、`/fanart/*`、`/stills/*`、`/chapters/*`、`/libraries/{id}/cover` 必须留在 `public_routes`（`<img>` 不带 `Authorization`）。需要用户上下文时注入 `Option<axum::Extension<Option<domain::UserId>>>`。Jellyfin 视频流按 Jellyfin 协议鉴权。
+7. **静态图片端点不鉴权**：`/api/v1` 下的 `/posters/*`、`/fanart/*`、`/stills/*`、`/chapters/*`、`/libraries/{id}/cover`、`/media/{id}/poster`、`/images/proxy` 必须留在 `public_routes`（`<img>` 不带 `Authorization`）。由于 `public_routes` 不挂载 `auth::authenticate` 中间件，需要可选用户上下文时需同时结合 `Option<axum::Extension<Option<domain::UserId>>>` 与 `HeaderMap` Bearer 解析（见 `http/library_artwork/images.rs`）。Jellyfin 视频流按 Jellyfin 协议鉴权。
 8. **Issue**：除非用户明确要求，不创建/评论/关闭 GitHub issue。只做用户当前请求，不扩散。
 
 ## 资源规则（Mac mini，磁盘/CPU 紧张）

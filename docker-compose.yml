@@ -50,9 +50,9 @@ services:
       CRAWLER_MEDIA_QB_PASS: ${CRAWLER_MEDIA_QB_PASS:-}
       CRAWLER_MEDIA_QB_API_KEY: ${CRAWLER_MEDIA_QB_API_KEY:-}
       CRAWLER_MEDIA_QB_PATH_MAP: ${CRAWLER_MEDIA_QB_PATH_MAP:-/downloads=/downloads}
-      # 可选：TMDB API Key（非空环境变量会锁定该项，UI 保存返回 409；留空时可在界面 设置→刮削与整理 即时配置生效）。
+      # 可选：TMDB API Key（非空环境变量会锁定该项，UI 保存返回 409；留空时可在界面 设置→元数据源 即时配置生效）。
       CRAWLER_MEDIA_TMDB_KEY: ${CRAWLER_MEDIA_TMDB_KEY:-}
-      # 可选：元数据专属网络代理（非空时同样锁定 UI 修改，支持 http:// 与 socks5://）。
+      # 可选：元数据专属网络代理（界面 设置→元数据源 也可配置；非空环境变量同样锁定 UI 修改，支持 http:// 与 socks5://）。
       CRAWLER_MEDIA_METADATA_PROXY: ${CRAWLER_MEDIA_METADATA_PROXY:-}
       # 密钥文件模式（可选，Docker Swarm / K8s Secret 卷场景）：
       # 保密变量都支持 `_FILE` 变体，值为「存放密钥的文件路径」，优先级低于同名直接变量：
@@ -62,6 +62,7 @@ services:
       #   CRAWLER_MEDIA_QB_API_KEY_FILE: /run/secrets/qb_api_key
       #   CRAWLER_MEDIA_TMDB_KEY_FILE: /run/secrets/tmdb_key
       #   CRAWLER_MEDIA_TVDB_KEY_FILE: /run/secrets/tvdb_key
+      #   CRAWLER_MEDIA_METADATA_PROXY_USER_FILE: /run/secrets/proxy_user
       #   CRAWLER_MEDIA_METADATA_PROXY_PASS_FILE: /run/secrets/proxy_pass
     volumes:
       - crawler-data:/data

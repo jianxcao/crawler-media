@@ -34,9 +34,9 @@
 
 ### Site
 
-`{id, name, url, profile_id, cookie, api_key, rss_url, proxy, rate_limit_per_minute?, cdp_url, downloader_id?, enabled, maintenance_via: "http"|"browser", auth_type: "apikey"|"cookie"|"none"}`
+`{id, name, url, profile_id, cookie: null, api_key: null, rss_url?, proxy?, rate_limit_per_minute?, cdp_url?, downloader_id?, enabled, maintenance_via: "http"|"browser", auth_type: "apikey"|"cookie"|"none"}`
 
-`cookie` 与 `api_key` 在列表、详情及新建/更新回显中始终为 `null`（从不明文回显）；非管理员读取时 `url` 置空串、`rss_url`/`proxy`/`cdp_url` 置 `null`。站点上传激励状态由 `/sites/boost-stats` 与 `PATCH /sites/{id}/boost` 独立暴露。
+`cookie` 与 `api_key` 在列表、详情及新建/更新回显中始终为 `null`（从不明文回显）；非管理员读取时 `url` 置空串、`rss_url`/`proxy`/`cdp_url` 置 `null`（`rate_limit_per_minute` 与 `downloader_id` 保留原值）。站点上传激励状态由 `/sites/boost-stats` 与 `PATCH /sites/{id}/boost` 独立暴露。
 
 ### MediaView
 
@@ -44,7 +44,7 @@
 
 Media 的权威身份与别名位于 `library.db.media` / `media_aliases`；别名键为 `(source, kind, external_id)`，同一来源可保留多个别名、至多一个 refresh target。上面的五个可空 `*_id` 是单值投影，不代表完整别名集合。`Store::update_media` 保留未被本次编辑替换的别名，并在事务中更新相关卡片。
 
-章节与片头片尾的正式范围属于选中的 `(file_id, FileVersion, UnitKey)`。自有章节、播放会话及 Jellyfin 展示只读取当前登记版本匹配的范围；同 Media 同集的另一文件、Whole 与 E01、旧源版本的人工锁均不能共享。启用 TheIntroDB 后，云端结果可作为明确的 `theintrodb` 来源写入当前文件标记并用于播放 overlay；它不表示本文件声纹 `verified`，也不触发声纹或其他音频读取。仅对单文件单集且已知正整数当前文件时长的条目发起 `/v4/media` 请求（`duration_ms`、`details=true`、`merge_unknown=false`；未知时长直接跳过网络请求并保持已缓存章节免写锁只读）；云端未匹配时会回退热门 release，客户端必须检查 `group_duration_ms`，仅在响应坐标一致、已知 release 群组时长与文件时长差不超过 300,000ms 且范围合法位于文件时长内时采纳，未通过校验的结果直接丢弃并记入短期负缓存。已有正式标记（含人工锁和更高可信来源）优先，发布仍复查当前文件版本、时长和覆盖。`no_submissions`、空单段范围、未采纳结果与 `episode_not_found` / `media_not_found` 记入负缓存；429 区分配额耗尽、单条目限制与突发限流，全局冷却按 `(base_url, api_key)` 隔离且不受无关刮削设置保存影响，401/403、5xx 与传输失败进入对应上游冷却而不能记录为已确认没有标记。章节列表的 `image_url` 是 opaque URL：公开 `GET /chapters/{file_id}/{canonical_target_index}` 必须携带 `generation`、`artifact` query，只返回当前登记源及当前目标对应的 DB published 不可变 JPEG；旧身份查询返回 404，缺失 query 拒绝。规范化目标序号不等于显示数组下标；客户端直接使用服务器 URL。缺失/损坏文件不返回图片 URL，显式生成仅修复缺失目标。公开本地侧车图片（`/posters/{ledger_id}`、`/fanart/{ledger_id}`、`/stills/{ledger_id}`）严格限制在所属 Library `root_paths` 内并拒绝符号链接，缺失返回 404 `poster.missing`，权限或 IO 错误返回 500 `poster.permission_denied` / `poster.io_error`（`Cache-Control: no-store`）。
+章节与片头片尾的正式范围属于选中的 `(file_id, FileVersion, UnitKey)`。自有章节、播放会话及 Jellyfin 展示只读取当前登记版本匹配的范围；同 Media 同集的另一文件、Whole 与 E01、旧源版本的人工锁均不能共享。启用 TheIntroDB 后，云端结果可作为明确的 `theintrodb` 来源写入当前文件标记并用于播放 overlay；它不表示本文件声纹 `verified`，也不触发声纹或其他音频读取。仅对单文件单集且已知正整数当前文件时长的条目发起 `/v4/media` 请求（`duration_ms`、`details=true`、`merge_unknown=false`；未知时长直接跳过网络请求并保持已缓存章节免写锁只读）；云端未匹配时会回退热门 release，客户端必须检查 `group_duration_ms`，仅在响应坐标一致、已知 release 群组时长与文件时长差不超过 300,000ms 且范围合法位于文件时长内时采纳，未通过校验的结果直接丢弃并记入短期负缓存。已有正式标记（含人工锁和更高可信来源）优先，发布仍复查当前文件版本、时长和覆盖。`no_submissions`、空单段范围、未采纳结果与 `episode_not_found` / `media_not_found` 记入负缓存；429 区分配额耗尽、单条目限制与突发限流，全局冷却按 `(base_url, api_key)` 隔离且不受无关刮削设置保存影响，401/403、5xx 与传输失败进入对应上游冷却，未识别的其他 4xx/旧路由 404 及 JSON 解析错误既不写负缓存也不进全局冷却，均不能记录为已确认没有标记。章节列表的 `image_url` 是 opaque URL：公开 `GET /chapters/{file_id}/{canonical_target_index}` 必须携带 `generation`、`artifact` query，只返回当前登记源及当前目标对应的 DB published 不可变 JPEG；旧身份查询返回 404，缺失 query 拒绝。规范化目标序号不等于显示数组下标；客户端直接使用服务器 URL。缺失/损坏文件不返回图片 URL，显式生成仅修复缺失目标。公开本地侧车图片（`/posters/{ledger_id}`、`/fanart/{ledger_id}`、`/stills/{ledger_id}`）严格限制在所属 Library `root_paths` 内并拒绝符号链接，缺失返回 404 `poster.missing`，权限或 IO 错误返回 500 `poster.permission_denied` / `poster.io_error`（`Cache-Control: no-store`）。
 
 章节详情接口必须指定有效可播的 `file_id`；TV 还须提供完整 `season`/`episode`，电影省略季集。`GET /libraries/{id}/items/{item_id}/chapters` 保持数组响应；`POST .../chapters/refresh` 返回选中文件的章节，指纹任务仍覆盖整季；条目 `/probe` 仍覆盖全部文件。服务端先验证 Library 可见性、Media、file/Unit 和登记版本，拒绝错误组合，不接受路径或自动改选其他版本。
 
@@ -81,7 +81,7 @@ HTTP 路径是 `/rule-sets`；表名仍是 `filters`。这是有意的 API 别�
 
 响应 DTO：`{id, name, kind: "qbittorrent"|"transmission", url, username?, auth_type: "password"|"apikey", has_api_key, has_password, category?, path_maps: [{from, to}], is_default, enabled, status: "disabled"|"active"|"failed"|"pending", last_error?}`。
 
-`password` 与 `api_key` 仅为 `POST /downloaders` / `PATCH /downloaders/{id}` 的只写输入字段，响应 JSON 永不输出这两个键。`transmission` 仅支持 `auth_type: "password"`（传 `apikey` 返回 400 `downloader.invalid`，切换为非 qBittorrent 时清除已存 `api_key`）。`PATCH` 在单个 `app.db` `IMMEDIATE` 事务（`Store::mutate_downloader`）中原子执行读改写：省略凭据保留原值，传空串清空对应凭据；切为 `auth_type: "password"` 时同步清除 `api_key`，切为 `"apikey"` 时清除 `password`（及未显式传入的 `username`）；连接、鉴权、分类或路径映射变化时同事务重置验证状态与 `last_error`。
+`password` 与 `api_key` 仅为 `POST /downloaders`（成功返回 201）与 `PATCH /downloaders/{id}` 的只写输入字段，响应 JSON 永不输出这两个键；响应中的 `auth_type` 由服务端根据 qBittorrent 实例当前是否存有非空 `api_key` 派生。`transmission` 仅支持 `auth_type: "password"`（传 `apikey` 返回 400 `downloader.invalid`，切换为非 qBittorrent 时清除已存 `api_key`）。`POST` 选择 `auth_type: "apikey"` 时忽略 `username` 与 `password`；`PATCH` 在单个 `app.db` `IMMEDIATE` 事务（`Store::mutate_downloader`）中原子执行读改写：省略凭据保留原值，传空串清空对应凭据，切为 `auth_type: "password"` 时同步清除 `api_key`，切为 `"apikey"` 时清除 `password`（及未显式传入的 `username`），连接、鉴权、分类或路径映射变化时同事务重置验证状态与 `last_error`。
 
 ### Library
 
@@ -291,7 +291,7 @@ Web 的 persisted pagehide 保存位置和播放意图，提交递增 sequence �
 
 **Subscribe 请求字段：** 创建/PATCH 使用 `coverage` 和 `filter_id`；`POST /subscriptions/{id}/upgrade-runs` body 为 `{filter_id?, wash_cut?}`，回执也返回 `filter_id`。
 
-**Playback 历史清除与继续观看隐藏：** `DELETE /playback/history` 支持 `scope=item|library|all`（配合对应 `media_item_id` / `library_id`）及可选非负秒级时间戳 `since`，在同一 `library.db` 事务中清除观看恢复/断言、播放日志与 QoE 指标，返回 `{deleted_states, deleted_metrics}`。对范围内的活跃 TV 订阅（提供 `since` 时仅限窗口外已无更早观看状态的 Media），先经 `Store::mutate_setting` 原子写入 `app.db` 的 `user.<id>.up_next.dismissed`；若随后 `library.db` 写入被拒绝或失败（如 409 `playback.protected` / 503 `runtime.busy`），在写准入预算外执行逐 Media 补偿回滚以防静默隐藏。`GET /playback/up-next` 与 `POST /playback/up-next/{media_item_id}/dismiss` 的存储错误如实传播（读池忙返回 503 `runtime.busy`，数据损坏返回 500 `up_next.store`，绝不降级返回空隐藏表而泄漏已移除条目）；重新创建同 Media 订阅时清除对应隐藏记录，创建失败则恢复原时间戳。
+**Playback 历史清除与继续观看隐藏：** `DELETE /playback/history` 支持 `scope=item|library|all`（缺省 `all`；`item`/`library` 配合 `media_item_id` / `library_id`，没有独立的 `/up-next/.../dismiss` 端点，单条目从继续观看移除走 `scope=item`）及可选非负秒级时间戳 `since`，在同一 `library.db` 事务中清除观看恢复/断言、播放日志与 QoE 指标，返回 `{deleted_states, deleted_metrics}`（`deleted_states` 为重置的单元状态数、删除的播放日志数与本次新增隐藏订阅数之和）。对范围内的当前用户在订 TV 订阅（不论 `active`/`paused`；提供 `since` 时仅限窗口内存在观看活动或播放日志、且窗口前已无更早观看状态的 Media），先经 `Store::mutate_setting` 原子写入 `app.db` 的 `user.<id>.up_next.dismissed`（遇忙返回 503 `runtime.busy`，存储失败返回 500 `store.error` 且不触碰 `library.db`）；若随后 `library.db` 写入被拒绝或失败（如 409 `playback.protected` / 503 `runtime.busy`），在写准入预算外执行逐 Media 补偿回滚以防静默隐藏。`GET /playback/up-next` 读取隐藏表时如实传播底层 SQLite 错误（读池忙返回 503 `runtime.busy`，SQLite 读取故障返回 500 `up_next.store`，绝不把存储读取失败当成空隐藏表而泄漏已移除条目；仅当设置值本身为非法 JSON 文本时告警并按空表兜底）。重新创建同 Media 订阅时清除对应隐藏记录，创建失败则恢复原时间戳。
 
 **Playback marks 目标：** 字段为 `season_number` / `episode_number`，支持整项、整季与合法 TV S00E00。GET/POST 拒未知键、重复坐标与坏类型；坐标按 0..2147483647 checked conversion，越界 400，不饱和或截断。坏请求不写 playback_units。
 

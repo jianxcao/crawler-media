@@ -101,7 +101,7 @@ qBittorrent / Transmission 通过 `/api/v1/downloaders` 配置（持久化到 SQ
 | `CRAWLER_MEDIA_QB_PATH_MAP` | 空 | qB 路径映射 `容器路径=宿主路径,...` |
 | `CRAWLER_MEDIA_TR_PATH_MAP` | 空 | Transmission 路径映射 |
 | `CRAWLER_MEDIA_METADATA_PROXY` | 空 | 元数据代理 URL（如 `socks5://127.0.0.1:1080`；非空时锁定 `PUT /settings/proxy` 返回 409；未设时可回退通用 `ALL_PROXY` / `HTTP_PROXY` 而不锁定 UI） |
-| `CRAWLER_MEDIA_METADATA_PROXY_USER` | 空 | 元数据代理认证用户名（非空时锁定 `PUT /settings/proxy`） |
+| `CRAWLER_MEDIA_METADATA_PROXY_USER` | 空 | 元数据代理认证用户名（直接变量非空时锁定 `PUT /settings/proxy`；`_FILE` 仅在数据库未存用户名时作运行时回退且不锁定 UI） |
 | `CRAWLER_MEDIA_METADATA_PROXY_PASS` | 空 | 元数据代理认证密码（支持 `_FILE`，非空时锁定 `PUT /settings/proxy`） |
 | `CRAWLER_MEDIA_SLOW_REQUEST_MS` | `1000` | 慢请求日志阈值（毫秒），0 禁用 |
 | `CRAWLER_MEDIA_FFMPEG_LOG_LEVEL` | `info` | Chromaprint 声纹采集 ffmpeg 日志等级：`info` / `verbose` / `debug`（其他值回退 `info`） |
@@ -109,7 +109,7 @@ qBittorrent / Transmission 通过 `/api/v1/downloaders` 配置（持久化到 SQ
 | `CRAWLER_MEDIA_LEASE_TTL_MS` | `60000` | 实例租约失效窗口（正整数毫秒） |
 | `CRAWLER_MEDIA_LEASE_RETRY_MS` | TTL 的一半 | 只读实例重试获取租约的间隔（毫秒） |
 | `CRAWLER_MEDIA_ALLOW_MULTI_INSTANCE` | 关闭 | 显式绕过单实例租约，仅用于有意配置的隔离环境 |
-| `RUST_LOG` | `info` 级别默认过滤 | Rust tracing 日志过滤指令 |
+| `RUST_LOG` | 全局 `info` + 核心业务 crate `debug` | Rust tracing 日志过滤指令（默认另设 `html5ever=off,selectors=warn`） |
 
 ### 密钥文件模式
 
@@ -124,6 +124,7 @@ CRAWLER_MEDIA_QB_PASS_FILE=/run/secrets/qb_pass
 CRAWLER_MEDIA_QB_API_KEY_FILE=/run/secrets/qb_api_key
 CRAWLER_MEDIA_TMDB_KEY_FILE=/run/secrets/tmdb_key
 CRAWLER_MEDIA_TVDB_KEY_FILE=/run/secrets/tvdb_key
+CRAWLER_MEDIA_METADATA_PROXY_USER_FILE=/run/secrets/proxy_user
 CRAWLER_MEDIA_METADATA_PROXY_PASS_FILE=/run/secrets/proxy_pass
 ```
 
@@ -137,7 +138,7 @@ Site 凭证（cookie / API key / RSS URL）按 [ADR-0003](<adr/0003-plaintext-si
 
 默认文件共五个：Store 管理 `<data>/app.db`（User/token、Site、Downloader、Filter、设置）、`cache.db`（按来源分表的 HTTP 响应缓存）、`library.db`（Media/别名/采用元数据、Library/根、文件/覆盖/摘要、Playback、Probe/Scan）、`subscribe.db`（Subscribe）；另有独立队列 `<data>/jobs.db`（定义、调度配置、在途任务与历史）。`jobs.db` 不是可丢弃缓存。连接间无跨文件原子事务，备份需保持整体一致。DDL 与布局入口见 `crates/store/src/schema/layout.rs`、`crates/store/src/schema/v1/*.sql`，队列入口见 `crates/api/src/management/state.rs`。
 
-默认注册数据库轻量 optimize（每6小时）、Jobs历史清理（每天、90天、启用）、Playback历史清理（每天、90天、**关闭**），以及分类历史保留 `data_retention`（默认关闭、dry_run=true，各窗口90天）。默认只在首次注册时应用，重启保留已有 def 配置。首个启用任务可能立即执行，Jobs超90天终态历史可能在首次后台调度即删除；各def保留latest/tie组，运行／排队行不删。VACUUM默认关闭，绝不因每次DELETE自动重建库。依据 `crates/api/src/maintenance/mod.rs`。
+默认注册数据库轻量 optimize（每6小时）、Jobs历史清理（每天、90天、启用）、Playback历史清理（每天、90天、**关闭**），以及分类历史保留 `data_retention`（默认关闭、dry_run=true，QoE/临时目录缓存/探测历史窗口 90 天、操作历史窗口 30 天）。默认只在首次注册时应用，重启保留已有 def 配置。首个启用任务可能立即执行，Jobs超90天终态历史可能在首次后台调度即删除；各def保留latest/tie组，运行／排队行不删。VACUUM默认关闭，绝不因每次DELETE自动重建库。依据 `crates/api/src/maintenance/mod.rs`。
 
 `maintenance/runner.rs` 在批/库边界检查禁用、取消与停机；`jobs::update_def_config_cas` 同事务保存 payload/可选周期并刷新 queued payload，running 保持快照；预览通过 blocking budget 执行。payload token 不含周期版本，不能检测仅改周期的冲突；2 秒清理预算只在批间检查，不是单条 SQL 的硬时间上限；VACUUM 的部分页拷贝无法被 SQLite interrupt 硬停止。性能观察与维护验证方法见[性能测试方法](testing/storage-performance.md)。
 
