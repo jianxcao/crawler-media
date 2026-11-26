@@ -1,4 +1,5 @@
 //! Sequence acceptance is enforced by the Store transaction, after earlier events commit.
+#[path = "playback_event_support/mod.rs"]
 mod playback_event_support;
 use playback_event_support::*;
 

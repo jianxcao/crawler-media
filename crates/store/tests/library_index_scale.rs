@@ -54,6 +54,7 @@ fn query(library: LibraryId) -> LibraryQuery {
 }
 
 fn seed(store: &Store, count: usize) -> LibraryId {
+    store.relax_sync_for_scale_seed();
     let root = "/index-scale/movies";
     let lib = store
         .create_library(MediaKind::Movie, "Scale", &[root], "everyone", true, &[])

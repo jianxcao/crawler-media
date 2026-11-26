@@ -3,6 +3,7 @@ name = "store"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+autotests = false
 
 [features]
 # Test-only seams (`src/test_support`) are compiled only for this crate's tests or
@@ -36,3 +37,75 @@ jobs.workspace = true
 # Integration tests are separate crates and cannot see `#[cfg(test)]` items, so the
 # package enables its own test-support seam for them.
 store = { path = ".", features = ["test-support"] }
+
+[[test]]
+name = "store_suite_1"
+path = "tests/store_suite_1.rs"
+
+[[test]]
+name = "store_suite_2"
+path = "tests/store_suite_2.rs"
+
+[[test]]
+name = "store_suite_3"
+path = "tests/store_suite_3.rs"
+
+[[test]]
+name = "store_suite_4"
+path = "tests/store_suite_4.rs"
+
+[[test]]
+name = "data_retention"
+path = "tests/data_retention.rs"
+
+[[test]]
+name = "file_lifecycle_review_regressions"
+path = "tests/file_lifecycle_review_regressions.rs"
+
+[[test]]
+name = "file_reads"
+path = "tests/file_reads.rs"
+
+[[test]]
+name = "hot_read_assessment"
+path = "tests/hot_read_assessment.rs"
+
+[[test]]
+name = "library_index_scale"
+path = "tests/library_index_scale.rs"
+
+[[test]]
+name = "library_integrity_scale"
+path = "tests/library_integrity_scale.rs"
+
+[[test]]
+name = "library_roster_work"
+path = "tests/library_roster_work.rs"
+
+[[test]]
+name = "publication_batch_work"
+path = "tests/publication_batch_work.rs"
+
+[[test]]
+name = "query_model_axes_perf"
+path = "tests/query_model_axes_perf.rs"
+
+[[test]]
+name = "query_model_perf"
+path = "tests/query_model_perf.rs"
+
+[[test]]
+name = "query_work_perf"
+path = "tests/query_work_perf.rs"
+
+[[test]]
+name = "read_only_store"
+path = "tests/read_only_store.rs"
+
+[[test]]
+name = "reader_request_budget"
+path = "tests/reader_request_budget.rs"
+
+[[test]]
+name = "storage_lock_work"
+path = "tests/storage_lock_work.rs"

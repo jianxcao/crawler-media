@@ -4,6 +4,7 @@
 //! 用 test-only 原始 SQL 造数（store 没有公开的任意时间戳写入接口），读取断言
 //! 仍按真实表内容进行。
 
+#[path = "support/mod.rs"]
 mod support;
 
 use std::path::Path;

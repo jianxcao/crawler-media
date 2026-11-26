@@ -5,6 +5,7 @@
 //! 唯一例外是 `playback_metrics`：store 目前没有公开的 metrics 读取接口，
 //! 因此行数用 test-only 的直连只读 COUNT 断言（见 `metric_count`）。
 
+#[path = "support/mod.rs"]
 mod support;
 
 use std::path::Path;

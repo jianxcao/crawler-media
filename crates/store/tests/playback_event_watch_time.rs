@@ -2,6 +2,7 @@
 //! playback is actually running. `paused` and `Stopped` are facts the event already
 //! carries; these tests pin them at the public `commit_playback_event` seam.
 
+#[path = "playback_event_support/mod.rs"]
 mod playback_event_support;
 use playback_event_support::*;
 

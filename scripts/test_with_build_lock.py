@@ -1,156 +1,134 @@
-"""Process-level contract tests for the shared build wrapper."""
-
-import fcntl
+"""Tests for scripts/with-build-lock.py QoS and --no-run handling."""
 import os
-from pathlib import Path
-import signal
+import stat
 import subprocess
 import sys
 import tempfile
-import time
 import unittest
 
 
-WRAPPER = Path(__file__).with_name("with-build-lock.py")
-HOLD_COMMAND = """
-import os
-from pathlib import Path
-import signal
-import sys
-import time
-
-entered, release, ignore_term = sys.argv[1:]
-if ignore_term == "yes":
-    signal.signal(signal.SIGTERM, signal.SIG_IGN)
-Path(entered).touch()
-while not Path(release).exists():
-    time.sleep(0.01)
+FAKE_SCRIPT = """#!/bin/sh
+echo "ARGV:$0:$*" >> "${CM_TRACE_LOG}"
 """
 
 
-class BuildLockTests(unittest.TestCase):
-    def setUp(self):
-        self.temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temporary.cleanup)
-        self.directory = Path(self.temporary.name)
-        self.processes = []
-        self.releases = []
-        self.addCleanup(self.finish_processes)
+def write_exe(path: str, content: str) -> None:
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(content)
+    os.chmod(path, os.stat(path).st_mode | stat.S_IXUSR)
 
-    def wrapper_env(self):
-        return {
-            **os.environ,
-            "CM_BUILD_LOCK_DIR": str(self.directory),
-            "PYTHONDONTWRITEBYTECODE": "1",
-        }
 
-    def start_hold(self, name, *, exclusive=False, ignore_term=False):
-        entered = self.directory / f"{name}.entered"
-        release = self.directory / f"{name}.release"
-        args = [sys.executable, str(WRAPPER)]
-        if exclusive:
-            args.append("--exclusive")
-        args += [
-            sys.executable,
-            "-c",
-            HOLD_COMMAND,
-            str(entered),
-            str(release),
-            "yes" if ignore_term else "no",
-        ]
-        process = subprocess.Popen(args, env=self.wrapper_env())
-        self.processes.append(process)
-        self.releases.append(release)
-        return process, entered, release
-
-    def wait_for(self, path):
-        deadline = time.monotonic() + 5
-        while not path.exists() and time.monotonic() < deadline:
-            time.sleep(0.01)
-        self.assertTrue(path.exists(), f"command did not enter: {path.name}")
-
-    def assert_waiting(self, path):
-        time.sleep(0.25)
-        self.assertFalse(path.exists(), f"command entered too early: {path.name}")
-
-    def finish_processes(self):
-        for release in self.releases:
-            release.touch()
-        for process in self.processes:
-            try:
-                process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait(timeout=5)
-
-    def test_two_ordinary_commands_enter_while_third_waits(self):
-        _, first_entered, first_release = self.start_hold("first")
-        self.wait_for(first_entered)
-        _, second_entered, _ = self.start_hold("second")
-        self.wait_for(second_entered)
-        _, third_entered, _ = self.start_hold("third")
-        self.assert_waiting(third_entered)
-        first_release.touch()
-        self.wait_for(third_entered)
-
-    def test_existing_slot_one_holder_counts_toward_limit(self):
-        with open(self.directory / "cm-cargo.lock", "a", encoding="utf-8") as external:
-            fcntl.flock(external.fileno(), fcntl.LOCK_EX)
-            _, second_entered, _ = self.start_hold("second")
-            self.wait_for(second_entered)
-            _, third_entered, _ = self.start_hold("third")
-            self.assert_waiting(third_entered)
-            fcntl.flock(external.fileno(), fcntl.LOCK_UN)
-            self.wait_for(third_entered)
-
-    def test_exclusive_waits_for_both_slots_and_blocks_ordinary(self):
-        _, first_entered, first_release = self.start_hold("first")
-        self.wait_for(first_entered)
-        _, second_entered, second_release = self.start_hold("second")
-        self.wait_for(second_entered)
-        _, exclusive_entered, exclusive_release = self.start_hold(
-            "exclusive", exclusive=True
+class WithBuildLockTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.bin_dir = os.path.join(self.tmp.name, "bin")
+        self.lock_dir = os.path.join(self.tmp.name, "locks")
+        self.trace_log = os.path.join(self.tmp.name, "trace.log")
+        os.makedirs(self.bin_dir, exist_ok=True)
+        os.makedirs(self.lock_dir, exist_ok=True)
+        write_exe(
+            os.path.join(self.bin_dir, "taskpolicy"),
+            '#!/bin/sh\necho "TASKPOLICY:$*" >> "${CM_TRACE_LOG}"\nshift\nexec "$@"\n',
         )
-        self.assert_waiting(exclusive_entered)
-        first_release.touch()
-        self.assert_waiting(exclusive_entered)
-        second_release.touch()
-        self.wait_for(exclusive_entered)
-        _, ordinary_entered, _ = self.start_hold("ordinary")
-        self.assert_waiting(ordinary_entered)
-        exclusive_release.touch()
-        self.wait_for(ordinary_entered)
+        write_exe(
+            os.path.join(self.bin_dir, "cargo"),
+            '#!/bin/sh\necho "CARGO:$*" >> "${CM_TRACE_LOG}"\n',
+        )
 
-    def test_exit_code_and_forced_tmpdir(self):
-        completed = subprocess.run(
-            [
-                sys.executable,
-                str(WRAPPER),
-                sys.executable,
-                "-c",
-                "import os, sys; print(os.environ['TMPDIR']); sys.exit(23)",
-            ],
-            env={**self.wrapper_env(), "TMPDIR": str(self.directory)},
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def run_lock(self, *args: str) -> list[str]:
+        env = {
+            **os.environ,
+            "PATH": f"{self.bin_dir}:{os.environ.get('PATH', '')}",
+            "CM_BUILD_LOCK_DIR": self.lock_dir,
+            "CM_NO_BG_QOS": "0",
+            "CM_TRACE_LOG": self.trace_log,
+        }
+        res = subprocess.run(
+            [sys.executable, "scripts/with-build-lock.py", *args],
+            env=env,
             capture_output=True,
             text=True,
-            timeout=5,
+            check=True,
         )
-        self.assertEqual(completed.returncode, 23)
-        self.assertEqual(completed.stdout.strip(), "/tmp")
+        self.assertEqual(res.returncode, 0)
+        with open(self.trace_log, encoding="utf-8") as fh:
+            return [line.strip() for line in fh if line.strip()]
 
-    def test_termination_keeps_slot_while_command_survives(self):
-        _, first_entered, _ = self.start_hold("first")
-        self.wait_for(first_entered)
-        second, second_entered, second_release = self.start_hold(
-            "second", ignore_term=True
+    def test_cargo_test_splits_no_run_compile_under_bg_qos(self) -> None:
+        if sys.platform != "darwin":
+            self.skipTest("taskpolicy is macOS-only")
+        lines = self.run_lock("cargo", "test", "-j4", "-p", "domain", "--", "--test-threads=4")
+        self.assertEqual(
+            lines,
+            [
+                "TASKPOLICY:-b cargo test -j4 -p domain --no-run",
+                "CARGO:test -j4 -p domain --no-run",
+                "CARGO:test -j4 -p domain -- --test-threads=4",
+            ],
         )
-        self.wait_for(second_entered)
-        second.send_signal(signal.SIGTERM)
-        self.assertIsNone(second.poll(), "command should still be alive")
-        _, third_entered, _ = self.start_hold("third")
-        self.assert_waiting(third_entered)
-        second_release.touch()
-        self.wait_for(third_entered)
+
+    def test_cargo_nextest_run_splits_no_run_compile_under_bg_qos(self) -> None:
+        if sys.platform != "darwin":
+            self.skipTest("taskpolicy is macOS-only")
+        lines = self.run_lock(
+            "cargo", "nextest", "run", "--build-jobs", "4", "--test-threads", "4", "-p", "domain"
+        )
+        self.assertEqual(
+            lines,
+            [
+                "TASKPOLICY:-b cargo nextest run --build-jobs 4 --test-threads 4 -p domain --no-run",
+                "CARGO:nextest run --build-jobs 4 --test-threads 4 -p domain --no-run",
+                "CARGO:nextest run --build-jobs 4 --test-threads 4 -p domain",
+            ],
+        )
+
+    def test_cargo_nextest_run_strips_fail_fast_during_no_run(self) -> None:
+        if sys.platform != "darwin":
+            self.skipTest("taskpolicy is macOS-only")
+        lines = self.run_lock(
+            "cargo",
+            "nextest",
+            "run",
+            "--build-jobs",
+            "8",
+            "--test-threads",
+            "8",
+            "--workspace",
+            "--no-fail-fast",
+        )
+        self.assertEqual(
+            lines,
+            [
+                "TASKPOLICY:-b cargo nextest run --build-jobs 8 --test-threads 8 --workspace --no-run",
+                "CARGO:nextest run --build-jobs 8 --test-threads 8 --workspace --no-run",
+                "CARGO:nextest run --build-jobs 8 --test-threads 8 --workspace --no-fail-fast",
+            ],
+        )
+
+    def test_cargo_nextest_non_run_or_no_run_flag_does_not_double_compile(self) -> None:
+        if sys.platform != "darwin":
+            self.skipTest("taskpolicy is macOS-only")
+        lines_list = self.run_lock("cargo", "nextest", "list", "-p", "domain")
+        self.assertEqual(
+            lines_list,
+            [
+                "TASKPOLICY:-b cargo nextest list -p domain",
+                "CARGO:nextest list -p domain",
+            ],
+        )
+        with open(self.trace_log, "w", encoding="utf-8"):
+            pass
+        lines_norun = self.run_lock("cargo", "nextest", "run", "--no-run", "-p", "domain")
+        self.assertEqual(
+            lines_norun,
+            [
+                "TASKPOLICY:-b cargo nextest run --no-run -p domain",
+                "CARGO:nextest run --no-run -p domain",
+            ],
+        )
 
 
 if __name__ == "__main__":

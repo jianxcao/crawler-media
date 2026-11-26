@@ -229,6 +229,7 @@ fn recovery_compensates_retained_creation_but_user_delete_after_success_purges()
     assert!(store.get_media(expected.id).unwrap().is_none());
 }
 
+#[path = "query_model_support/mod.rs"]
 mod query_model_support;
 
 #[test]

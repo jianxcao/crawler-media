@@ -55,7 +55,7 @@ Vite + React + TS，pnpm。`web/src/main.tsx` 入口，`web/app/` 路由页面�
 ## 资源规则（Mac mini，磁盘/CPU 紧张）
 
 - 普通 cargo / test / build 最多同时运行**两组**，统一用 `python3 scripts/with-build-lock.py COMMAND [ARG ...]` 包装；它使用 `/tmp/cm-cargo.lock` 和 `/tmp/cm-cargo-2.lock`，并强制子命令 `TMPDIR=/tmp`。已占用第一个锁的旧任务也计入上限；旧任务退出前不要按全局 `-j8` 预算估算剩余容量。
-- 每组普通 cargo 用 `-j4`，测试用 `-- --test-threads=4`。最终 workspace 套件和正式性能测量用包装器 `--exclusive` 独占两槽，cargo `-j8`、测试 `-- --test-threads=8`。
+- 每组普通 cargo 用 `-j4`，测试用 `-- --test-threads=4`（`cargo nextest run` 用 `--build-jobs 4 --test-threads 4`）。最终 workspace 套件和正式性能测量用包装器 `--exclusive` 独占两槽，cargo `-j8`、测试 `-- --test-threads=8`（`nextest` 用 `--build-jobs 8 --test-threads 8`）。
 - subagent 可以并行改代码；build/test 必须经包装器受两槽上限约束。真实 115 验收沿用默认远程并发 1、间隔 500ms；未经用户明确授权不得为加速验收提高并发或降低间隔。
 - 优先跑定向测试（`-p <crate>`、`--test <name>`、测试名过滤）；全量套件只在最后跑一次，带 `--no-fail-fast`。
 - 临时文件放 `/tmp`，用完删除。
@@ -66,9 +66,11 @@ Vite + React + TS，pnpm。`web/src/main.tsx` 入口，`web/app/` 路由页面�
 # Rust
 python3 scripts/with-build-lock.py cargo fmt --all -- --check
 python3 scripts/with-build-lock.py cargo clippy -j4 --all-targets -- -D warnings
-python3 scripts/with-build-lock.py cargo test -j4 -p <crate> -- --test-threads=4                 # 每个改动的 crate
-python3 scripts/with-build-lock.py cargo test -j4 -p api --test <file> <name> -- --test-threads=4 # 定向
-python3 scripts/with-build-lock.py --exclusive cargo test -j8 --workspace --no-fail-fast -- --test-threads=8 # 收尾全量，仅一次
+python3 scripts/with-build-lock.py cargo nextest run --build-jobs 4 --test-threads 4 -p <crate>       # 每个改动的 crate（推荐）
+python3 scripts/with-build-lock.py cargo nextest run --build-jobs 4 --test-threads 4 -p api <name>  # 定向
+python3 scripts/with-build-lock.py --exclusive cargo nextest run --build-jobs 8 --test-threads 8 --workspace --no-fail-fast # 收尾全量，仅一次（也可用 cargo test）
+python3 scripts/with-build-lock.py cargo test -j4 -p <crate> -- --test-threads=4                     # cargo test 兼容命令
+python3 scripts/with-build-lock.py cargo test -j4 -p api --test <file> <name> -- --test-threads=4     # 定向 cargo test
 
 # Web（仓库根目录）
 python3 scripts/with-build-lock.py pnpm --dir web lint

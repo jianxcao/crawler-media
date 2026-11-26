@@ -1,3 +1,4 @@
+#[path = "query_model_support/mod.rs"]
 mod query_model_support;
 use store::Store;
 #[path = "query_work/support.rs"]

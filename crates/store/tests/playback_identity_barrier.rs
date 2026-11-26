@@ -6,7 +6,9 @@ use store::Store;
 use store::library_write::{FilePublication as StorePublication, WriteScope};
 use store::playback::{MediaMergeRequest, PlaybackMutation};
 
+#[path = "merge_support/mod.rs"]
 mod merge_support;
+#[path = "playback_event_support/mod.rs"]
 mod playback_event_support;
 
 const USER: &str = "00000000-0000-0000-0002-000000000001";

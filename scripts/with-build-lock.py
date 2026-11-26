@@ -61,16 +61,31 @@ is_cargo_test = (
     and os.path.basename(command[0]) == "cargo"
     and command[1] == "test"
 )
-if taskpolicy is not None and is_cargo_test:
-    # Run the heavy compile+link pass in macOS Background QoS so desktop UI stays
-    # responsive, then run compiled test binaries at normal QoS so strict
-    # millisecond timing assertions are not tripped by E-core/IO throttling.
+is_cargo_nextest_run = (
+    len(command) >= 3
+    and os.path.basename(command[0]) == "cargo"
+    and command[1] == "nextest"
+    and command[2] == "run"
+)
+if taskpolicy is not None:
     cargo_args = command[: command.index("--")] if "--" in command else list(command)
-    if "--no-run" not in cargo_args and "--doc" not in cargo_args:
-        status = subprocess.run([taskpolicy, "-b", *cargo_args, "--no-run"], env=env)
+    split_compile = (is_cargo_test or is_cargo_nextest_run) and (
+        "--no-run" not in cargo_args
+        and (not is_cargo_test or "--doc" not in cargo_args)
+    )
+    if split_compile:
+        # Run the heavy compile+link pass in macOS Background QoS so desktop UI stays
+        # responsive, then run compiled test binaries at normal QoS so strict
+        # millisecond timing assertions are not tripped by E-core/IO throttling.
+        compile_args = (
+            [a for a in cargo_args if a not in ("--fail-fast", "--no-fail-fast")]
+            if is_cargo_nextest_run
+            else cargo_args
+        )
+        status = subprocess.run([taskpolicy, "-b", *compile_args, "--no-run"], env=env)
         if status.returncode != 0:
             raise SystemExit(status.returncode)
-elif taskpolicy is not None:
-    command = [taskpolicy, "-b", *command]
+    else:
+        command = [taskpolicy, "-b", *command]
 
 os.execvpe(command[0], command, env)

@@ -6,6 +6,7 @@
 //! active session, a replaced source must not accept writes from the old session, and a
 //! repeated `Stop` must be a no-op rather than a second close.
 
+#[path = "playback_event_support/mod.rs"]
 mod playback_event_support;
 use playback_event_support::*;
 

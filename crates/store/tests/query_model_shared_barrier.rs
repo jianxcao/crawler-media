@@ -1,3 +1,4 @@
+#[path = "query_model_support/mod.rs"]
 mod query_model_support;
 use domain::{FilePresence, LedgerId, UnitKey};
 use query_model_support::setup;

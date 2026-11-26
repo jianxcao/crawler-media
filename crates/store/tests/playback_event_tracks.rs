@@ -1,4 +1,5 @@
 //! A heartbeat cannot rebind omitted track selections to a different source or track revision.
+#[path = "playback_event_support/mod.rs"]
 mod playback_event_support;
 use playback_event_support::*;
 use store::library_write::probe::{Observed, ProbePublication};

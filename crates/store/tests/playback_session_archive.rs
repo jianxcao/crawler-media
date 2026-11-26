@@ -1,4 +1,5 @@
 //! Session sequence ordering survives live-row archival without preventing resumed playback.
+#[path = "playback_event_support/mod.rs"]
 mod playback_event_support;
 use playback_event_support::*;
 

@@ -1,4 +1,5 @@
 //! Repeated live intervals of one issued session merge into one play log.
+#[path = "playback_event_support/mod.rs"]
 mod playback_event_support;
 use playback_event_support::*;
 
