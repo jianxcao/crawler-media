@@ -87,8 +87,7 @@ pub(crate) async fn up_next(
         {
             Ok(Ok(value)) => value,
             Ok(Err(error)) => {
-                tracing::error!(%error, %user, "up-next selection failed");
-                return store_failed();
+                return up_next_store_error(error, user, "up-next selection failed");
             }
             Err(error) => return error.response(),
         };
@@ -114,8 +113,7 @@ pub(crate) async fn up_next(
         {
             Ok(Ok(value)) => value,
             Ok(Err(error)) => {
-                tracing::error!(%error, %user, "up-next validation failed");
-                return store_failed();
+                return up_next_store_error(error, user, "up-next validation failed");
             }
             Err(error) => return error.response(),
         };
@@ -373,6 +371,23 @@ mod tests {
             !reserve_enrichment_attempt("capacity-regression", 0),
             "an unexpired reservation must survive a full table"
         );
+    }
+}
+
+fn up_next_store_error(
+    error: store::StoreError,
+    user: domain::UserId,
+    stage: &'static str,
+) -> Response {
+    match error {
+        store::StoreError::ReadBusy
+        | store::StoreError::ReadDeadline
+        | store::StoreError::ReadClosed
+        | store::StoreError::ReadCancelled => super::super::store_wait::busy_response(),
+        error => {
+            tracing::error!(%error, %user, "{stage}");
+            store_failed()
+        }
     }
 }
 

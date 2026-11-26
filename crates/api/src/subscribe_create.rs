@@ -40,6 +40,19 @@ pub(crate) fn create(
     let (media, creation) = {
         let store = state.store.as_ref();
         let (media, previous) = store.ensure_media_with_previous(incoming)?;
+        if let Err(error) =
+            crate::up_next_dismissed::clear_dismissed_media(store, subscribe.user_id, media.id)
+        {
+            if let Err(undo_error) = store.undo_ensured_media(&media, previous.as_ref()) {
+                tracing::error!(
+                    media_id = %media.id,
+                    %error,
+                    %undo_error,
+                    "回滚订阅创建前的 Media 写入失败"
+                );
+            }
+            return Err(error.into());
+        }
         subscribe.media_id = media.id;
         let creation = match store.begin_compensatable_subscribe_creation(
             &subscribe,

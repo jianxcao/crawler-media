@@ -71,6 +71,9 @@ pub(crate) fn session_needs_cloud_lookup(
     media: &domain::Media,
     has_marker: bool,
 ) -> bool {
+    let Some(duration_ms) = coverage.file.duration_ms.filter(|&d| d > 0) else {
+        return false;
+    };
     if has_marker
         || media.kind != domain::MediaKind::Tv
         || coverage.units.len() != 1
@@ -93,17 +96,16 @@ pub(crate) fn session_needs_cloud_lookup(
     let Some(client) = configured_client(store, factory) else {
         return false;
     };
-    let scope = client.cache_scope();
-    if negative.is_cooling_down(scope, now_ms) {
+    if negative.is_cooling_down(client.cooldown_scope(), now_ms) {
         return false;
     }
     let key = LookupKey {
         file_id: coverage.file.file_id,
         version: coverage.file.version.clone(),
         unit,
-        duration_ms: coverage.file.duration_ms.filter(|d| *d > 0),
+        duration_ms: Some(duration_ms),
         tmdb_id: tmdb_id.to_string(),
-        configuration: scope,
+        configuration: client.cache_scope(),
     };
     !negative.contains(&key, now_ms)
 }
@@ -122,16 +124,17 @@ pub(crate) struct CloudLookupRequest<'a> {
 
 pub(crate) fn lookup_cloud_marker(req: CloudLookupRequest<'_>) -> Option<StoredFileMarker> {
     let (season, episode) = req.unit.episode_coordinates()?;
-    let norm_duration = req.duration_ms.filter(|d| *d > 0);
+    let duration = req.duration_ms.filter(|&d| d > 0)?;
+    let cooldown_scope = req.client.cooldown_scope();
     let key = LookupKey {
         file_id: req.file_id,
         version: req.version.clone(),
         unit: req.unit,
-        duration_ms: norm_duration,
+        duration_ms: Some(duration),
         tmdb_id: req.tmdb_id.to_string(),
         configuration: req.client.cache_scope(),
     };
-    if req.negative.is_cooling_down(key.configuration, req.now_ms)
+    if req.negative.is_cooling_down(cooldown_scope, req.now_ms)
         || req.negative.contains(&key, req.now_ms)
     {
         return None;
@@ -139,7 +142,7 @@ pub(crate) fn lookup_cloud_marker(req: CloudLookupRequest<'_>) -> Option<StoredF
     let candidate =
         match req
             .client
-            .get_episode_markers(req.tmdb_id, season, episode, norm_duration)
+            .get_episode_markers(req.tmdb_id, season, episode, Some(duration))
         {
             Ok(Some(candidate)) => candidate,
             Ok(None) => {
@@ -149,6 +152,7 @@ pub(crate) fn lookup_cloud_marker(req: CloudLookupRequest<'_>) -> Option<StoredF
             Err(error) => {
                 record_lookup_error(
                     req.negative,
+                    cooldown_scope,
                     key,
                     req.media_title,
                     season,
@@ -159,10 +163,6 @@ pub(crate) fn lookup_cloud_marker(req: CloudLookupRequest<'_>) -> Option<StoredF
                 return None;
             }
         };
-    let Some(duration) = norm_duration else {
-        req.negative.insert(key, req.now_ms);
-        return None;
-    };
     let Some(group_duration) = candidate.group_duration_ms.filter(|d| *d > 0) else {
         req.negative.insert(key, req.now_ms);
         return None;
@@ -214,6 +214,7 @@ pub(crate) fn lookup_cloud_marker(req: CloudLookupRequest<'_>) -> Option<StoredF
 
 fn record_lookup_error(
     negative: &NegativeCache,
+    cooldown_scope: u64,
     key: LookupKey,
     title: &str,
     season: u32,
@@ -221,7 +222,6 @@ fn record_lookup_error(
     now_ms: i64,
     error: LookupError,
 ) {
-    let scope = key.configuration;
     match &error {
         LookupError::RateLimited {
             scope: RateLimitScope::SpecificMedia,
@@ -235,7 +235,7 @@ fn record_lookup_error(
             retry_after_ms,
         } => {
             tracing::warn!(%error, ?rl_scope, retry_after_ms, title, season, episode, "TheIntroDB 触发限流/配额熔断，进入全局冷却");
-            negative.trip_cooldown(scope, now_ms, *retry_after_ms);
+            negative.trip_cooldown(cooldown_scope, now_ms, *retry_after_ms);
         }
         LookupError::Unauthorized(status) => {
             tracing::warn!(
@@ -245,7 +245,7 @@ fn record_lookup_error(
                 episode,
                 "TheIntroDB API Key 认证失败，冷却 1 小时"
             );
-            negative.trip_cooldown(scope, now_ms, UNAUTHORIZED_COOLDOWN_MS);
+            negative.trip_cooldown(cooldown_scope, now_ms, UNAUTHORIZED_COOLDOWN_MS);
         }
         LookupError::Http(status) if *status >= 500 => {
             tracing::warn!(
@@ -255,11 +255,11 @@ fn record_lookup_error(
                 episode,
                 "TheIntroDB 上游异常，短冷却 60 秒"
             );
-            negative.trip_cooldown(scope, now_ms, TRANSIENT_COOLDOWN_MS);
+            negative.trip_cooldown(cooldown_scope, now_ms, TRANSIENT_COOLDOWN_MS);
         }
         LookupError::Transport(_) => {
             tracing::warn!(%error, title, season, episode, "TheIntroDB 网络失败，短冷却 60 秒");
-            negative.trip_cooldown(scope, now_ms, TRANSIENT_COOLDOWN_MS);
+            negative.trip_cooldown(cooldown_scope, now_ms, TRANSIENT_COOLDOWN_MS);
         }
         LookupError::EpisodeNotFound
         | LookupError::MediaNotFound

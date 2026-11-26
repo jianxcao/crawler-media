@@ -112,6 +112,18 @@ impl TheIntroDbClient {
         hasher.finish()
     }
 
+    pub(crate) fn cooldown_scope(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        self.base_url.hash(&mut hasher);
+        self.api_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|key| !key.is_empty())
+            .hash(&mut hasher);
+        hasher.finish()
+    }
+
     /// Select a release by this file's duration. The API may fall back to an
     /// unrelated popular release, so callers must check `group_duration_ms`.
     pub fn get_episode_markers(
@@ -268,34 +280,29 @@ fn classify_429(headers: &ureq::http::HeaderMap, code: Option<&str>) -> LookupEr
     let rate_reset =
         header_u64(headers, "x-ratelimit-reset").map(|s| normalize_reset_secs(s, now_unix_secs));
 
-    let (scope, secs, min_ms, max_ms) = if code == Some("specific_media_usage_limit_exceeded")
-        || specific_rem == Some(0)
-        || (specific_reset.is_some()
-            && code != Some("usage_limit_exceeded")
-            && usage_rem != Some(0))
-    {
-        (
-            RateLimitScope::SpecificMedia,
-            specific_reset.or(retry_after).unwrap_or(3_600),
-            60_000,
-            86_400_000,
-        )
-    } else if code == Some("usage_limit_exceeded") || usage_rem == Some(0) || usage_reset.is_some()
-    {
-        (
-            RateLimitScope::DailyQuota,
-            usage_reset.or(retry_after).unwrap_or(3_600),
-            60_000,
-            86_400_000,
-        )
-    } else {
-        (
-            RateLimitScope::Burst,
-            retry_after.or(rate_reset).unwrap_or(10),
-            1_000,
-            900_000,
-        )
-    };
+    let (scope, secs, min_ms, max_ms) =
+        if code == Some("specific_media_usage_limit_exceeded") || specific_rem == Some(0) {
+            (
+                RateLimitScope::SpecificMedia,
+                specific_reset.or(retry_after).unwrap_or(3_600),
+                60_000,
+                86_400_000,
+            )
+        } else if code == Some("usage_limit_exceeded") || usage_rem == Some(0) {
+            (
+                RateLimitScope::DailyQuota,
+                usage_reset.or(retry_after).unwrap_or(3_600),
+                60_000,
+                86_400_000,
+            )
+        } else {
+            (
+                RateLimitScope::Burst,
+                retry_after.or(rate_reset).unwrap_or(10),
+                1_000,
+                900_000,
+            )
+        };
     let retry_after_ms = secs.saturating_mul(1_000).clamp(min_ms, max_ms) as i64;
     LookupError::RateLimited {
         scope,
@@ -305,7 +312,8 @@ fn classify_429(headers: &ureq::http::HeaderMap, code: Option<&str>) -> LookupEr
 
 #[cfg(test)]
 mod debug_tests {
-    use super::TheIntroDbClient;
+    use super::{LookupError, RateLimitScope, TheIntroDbClient, classify_429};
+    use ureq::http::{HeaderMap, HeaderValue};
 
     #[test]
     fn debug_never_prints_the_api_key() {
@@ -315,5 +323,66 @@ mod debug_tests {
         assert!(rendered.contains("<redacted>"));
         assert!(rendered.contains("api.theintrodb.org"));
         assert!(format!("{:?}", TheIntroDbClient::default()).contains("None"));
+    }
+
+    #[test]
+    fn classify_429_ignores_informational_usage_reset_headers_unless_quota_exhausted() {
+        let mut burst_headers = HeaderMap::new();
+        burst_headers.insert("x-usagelimit-remaining", HeaderValue::from_static("42"));
+        burst_headers.insert("x-usagelimit-reset", HeaderValue::from_static("86400"));
+        burst_headers.insert(
+            "x-usagelimit-specificmedia-remaining",
+            HeaderValue::from_static("5"),
+        );
+        burst_headers.insert(
+            "x-usagelimit-specificmedia-reset",
+            HeaderValue::from_static("3600"),
+        );
+        burst_headers.insert("x-ratelimit-reset", HeaderValue::from_static("5"));
+        assert!(matches!(
+            classify_429(&burst_headers, None),
+            LookupError::RateLimited {
+                scope: RateLimitScope::Burst,
+                retry_after_ms: 5_000,
+            }
+        ));
+
+        let mut daily_zero = HeaderMap::new();
+        daily_zero.insert("x-usagelimit-remaining", HeaderValue::from_static("0"));
+        daily_zero.insert("x-usagelimit-reset", HeaderValue::from_static("7200"));
+        assert!(matches!(
+            classify_429(&daily_zero, None),
+            LookupError::RateLimited {
+                scope: RateLimitScope::DailyQuota,
+                retry_after_ms: 7_200_000,
+            }
+        ));
+
+        let mut specific_zero = HeaderMap::new();
+        specific_zero.insert(
+            "x-usagelimit-specificmedia-remaining",
+            HeaderValue::from_static("0"),
+        );
+        specific_zero.insert(
+            "x-usagelimit-specificmedia-reset",
+            HeaderValue::from_static("1800"),
+        );
+        assert!(matches!(
+            classify_429(&specific_zero, None),
+            LookupError::RateLimited {
+                scope: RateLimitScope::SpecificMedia,
+                retry_after_ms: 1_800_000,
+            }
+        ));
+    }
+
+    #[test]
+    fn cooldown_scope_ignores_configuration_revision_until_credentials_change() {
+        let rev_one = TheIntroDbClient::new(Some("key-a".into())).with_configuration_revision(1);
+        let rev_two = TheIntroDbClient::new(Some("key-a".into())).with_configuration_revision(2);
+        let next_key = TheIntroDbClient::new(Some("key-b".into())).with_configuration_revision(2);
+        assert_eq!(rev_one.cooldown_scope(), rev_two.cooldown_scope());
+        assert_ne!(rev_one.cache_scope(), rev_two.cache_scope());
+        assert_ne!(rev_two.cooldown_scope(), next_key.cooldown_scope());
     }
 }

@@ -114,6 +114,7 @@ mod system_logs;
 mod target_prefs_and_presets;
 mod unidentified;
 mod unwatched_first;
+mod up_next_dismissed_errors;
 mod user_lifecycle;
 mod user_state_isolation;
 mod wash_cut;

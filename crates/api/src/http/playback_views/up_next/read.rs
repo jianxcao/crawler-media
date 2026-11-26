@@ -20,7 +20,7 @@ pub(super) fn capture(store: &Store, user: UserId, limit: usize) -> Result<Captu
         .iter()
         .map(|row| row.reference.item.media_id())
         .collect::<Vec<_>>();
-    let dismissed = crate::up_next_dismissed::load_dismissed(store, user);
+    let dismissed = crate::up_next_dismissed::load_dismissed(store, user)?;
     let dismissed_sub_ids: Vec<MediaId> = dismissed
         .keys()
         .copied()

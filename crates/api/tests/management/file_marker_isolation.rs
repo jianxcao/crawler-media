@@ -227,28 +227,26 @@ async fn theintrodb_candidate_without_known_file_duration_is_not_published_or_ov
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
     let address = listener.local_addr().unwrap();
+    let requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let server_requests = requests.clone();
+    let server_stop = stop.clone();
     let server = std::thread::spawn(move || {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        loop {
+        while !server_stop.load(std::sync::atomic::Ordering::SeqCst) {
             match listener.accept() {
                 Ok((mut stream, _)) => {
-                    // macOS inherits the listener's nonblocking mode on accept.
+                    server_requests.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     stream.set_nonblocking(false).unwrap();
-                    stream
-                        .set_read_timeout(Some(std::time::Duration::from_secs(2)))
-                        .unwrap();
                     let mut request = [0_u8; 4096];
-                    let read = stream.read(&mut request).unwrap();
-                    assert!(read > 0, "candidate lookup must send an HTTP request");
+                    let _ = stream.read(&mut request);
                     let body = r#"{"tvdb_id":169,"type":"tv","season":1,"episode":1,"group_duration_ms":2700000,"intro":[{"start_ms":10000,"end_ms":70000}]}"#;
-                    write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
-                    return;
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    assert!(
-                        std::time::Instant::now() < deadline,
-                        "candidate lookup was never requested"
-                    );
                     std::thread::sleep(std::time::Duration::from_millis(5));
                 }
                 Err(error) => panic!("candidate fixture failed: {error}"),
@@ -273,7 +271,13 @@ async fn theintrodb_candidate_without_known_file_duration_is_not_published_or_ov
         ),
     )
     .await;
+    stop.store(true, std::sync::atomic::Ordering::SeqCst);
     server.join().unwrap();
+    assert_eq!(
+        requests.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "unknown file duration must skip TheIntroDB HTTP lookup instead of wasting quota"
+    );
     assert!(
         chapters.is_empty(),
         "unknown file duration cannot select a safe release for chapter overlay"

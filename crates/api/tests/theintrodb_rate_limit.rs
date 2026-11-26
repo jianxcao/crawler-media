@@ -296,13 +296,14 @@ async fn specific_media_429_and_rejected_candidates_cache_per_file_without_block
     assert!(ep4.iter().any(|c| c["marker_type"] == "IntroStart"));
     assert_eq!(server.requests.load(Ordering::SeqCst), 2);
 
-    // Ep 3 (unknown duration): first attempt refuses without adopting, then caches; second skips HTTP.
+    // Ep 3 (unknown duration): skips cloud lookup completely without making HTTP requests.
+    assert!(!open_session_pending(&f, 1).await);
     assert!(get_chapters(&f, 1).await.is_empty());
-    assert_eq!(server.requests.load(Ordering::SeqCst), 3);
+    assert_eq!(server.requests.load(Ordering::SeqCst), 2);
     assert!(get_chapters(&f, 1).await.is_empty());
-    assert_eq!(server.requests.load(Ordering::SeqCst), 3);
+    assert_eq!(server.requests.load(Ordering::SeqCst), 2);
 
-    // Once probe populates duration_ms for Ep 3, LookupKey changes so cloud lookup runs immediately!
+    // Once probe populates duration_ms for Ep 3, cloud lookup runs and adopts IntroStart!
     let ep3_cov = f.files[1].1.clone();
     f.store
         .publish_probe_result(
@@ -326,7 +327,7 @@ async fn specific_media_429_and_rejected_candidates_cache_per_file_without_block
         .unwrap();
     let ep3 = get_chapters(&f, 1).await;
     assert!(ep3.iter().any(|c| c["marker_type"] == "IntroStart"));
-    assert_eq!(server.requests.load(Ordering::SeqCst), 4);
+    assert_eq!(server.requests.load(Ordering::SeqCst), 3);
 }
 
 #[tokio::test]
@@ -345,4 +346,84 @@ async fn unauthorized_401_cools_down_scope_for_one_hour_until_key_updated() {
 
     f.clock.0.store(10_000 + 3_600_001, Ordering::SeqCst);
     assert!(open_session_pending(&f, 1).await);
+}
+
+#[tokio::test]
+async fn burst_429_with_informational_usage_headers_is_not_a_daily_cooldown() {
+    let server = Server::for_any_episode(
+        429,
+        &[
+            ("X-UsageLimit-Remaining", "42"),
+            ("X-UsageLimit-Reset", "86400"),
+            ("X-RateLimit-Reset", "5"),
+        ],
+        r#"{"error":"Too Many Requests"}"#,
+        true,
+    );
+    let f = setup_episodes(&server, &[Some(2_700_000), Some(2_700_000)]);
+
+    assert!(get_chapters(&f, 0).await.is_empty());
+    assert_eq!(server.requests.load(Ordering::SeqCst), 1);
+
+    server.respond_with_headers(200, &[], RESPONSE);
+    f.clock.0.store(10_000 + 4_000, Ordering::SeqCst);
+    assert!(!open_session_pending(&f, 1).await);
+    assert_eq!(server.requests.load(Ordering::SeqCst), 1);
+
+    // Recovers right after 5s Burst window, NOT blocked for 86400s DailyQuota.
+    f.clock.0.store(10_000 + 5_001, Ordering::SeqCst);
+    let chapters = get_chapters(&f, 1).await;
+    assert!(chapters.iter().any(|c| c["marker_type"] == "IntroStart"));
+    assert_eq!(server.requests.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn unrelated_configuration_revision_change_keeps_daily_cooldown() {
+    let server = Server::for_any_episode(
+        429,
+        &[
+            ("X-UsageLimit-Reset", "3600"),
+            ("X-UsageLimit-Remaining", "0"),
+        ],
+        r#"{"error":"Usage limit exceeded","code":"usage_limit_exceeded"}"#,
+        true,
+    );
+    let f = setup_episodes(&server, &[Some(2_700_000), Some(2_700_000)]);
+
+    assert!(get_chapters(&f, 0).await.is_empty());
+    assert_eq!(server.requests.load(Ordering::SeqCst), 1);
+
+    // Unrelated scrape settings update bumps configuration_revision while keeping key-a:
+    // active DailyQuota cooldown must stay in effect.
+    server.respond_with_headers(200, &[], RESPONSE);
+    let rev_before = f.store.raw_scrape_settings().unwrap().revision;
+    f.store
+        .save_raw_scrape_settings(
+            r#"{"theintrodb_enabled":true,"theintrodb_api_key":"key-a","tmdb_language":"en-US"}"#,
+        )
+        .unwrap();
+    assert!(f.store.raw_scrape_settings().unwrap().revision > rev_before);
+    assert!(!open_session_pending(&f, 1).await);
+    assert!(get_chapters(&f, 1).await.is_empty());
+    assert_eq!(server.requests.load(Ordering::SeqCst), 1);
+
+    // Changing theintrodb_api_key switches cooldown_scope and recovers immediately.
+    f.store
+        .save_raw_scrape_settings(
+            r#"{"theintrodb_enabled":true,"theintrodb_api_key":"key-b","tmdb_language":"en-US"}"#,
+        )
+        .unwrap();
+    let chapters = get_chapters(&f, 1).await;
+    assert!(chapters.iter().any(|c| c["marker_type"] == "IntroStart"));
+    assert_eq!(server.requests.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn unknown_duration_skips_cloud_lookup_without_network() {
+    let server = Server::for_any_episode(200, &[], RESPONSE, true);
+    let f = setup_episodes(&server, &[None]);
+
+    assert!(!open_session_pending(&f, 0).await);
+    assert!(get_chapters(&f, 0).await.is_empty());
+    assert_eq!(server.requests.load(Ordering::SeqCst), 0);
 }

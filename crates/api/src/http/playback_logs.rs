@@ -268,7 +268,9 @@ fn clear_history_store_error(
         }
         store::StoreError::WriteBusy
         | store::StoreError::ReadBusy
-        | store::StoreError::ReadDeadline => crate::http::store_wait::busy_response(),
+        | store::StoreError::ReadClosed
+        | store::StoreError::ReadDeadline
+        | store::StoreError::ReadCancelled => crate::http::store_wait::busy_response(),
         other => {
             tracing::error!(error = %other, %user_id, scope, "{message}");
             err(StatusCode::INTERNAL_SERVER_ERROR, "store.error", message)
@@ -299,52 +301,78 @@ fn clear_history_on_store(
         };
     let media_filter: Option<std::collections::HashSet<domain::MediaId>> =
         media_ids.as_ref().map(|ids| ids.iter().copied().collect());
+    let mut pre_dismissed = 0usize;
+    if since.is_none() {
+        let sub_targets: Vec<domain::MediaId> = match &media_filter {
+            Some(allowed) => active_tv_subs.intersection(allowed).copied().collect(),
+            None => active_tv_subs.iter().copied().collect(),
+        };
+        if !sub_targets.is_empty() {
+            match crate::up_next_dismissed::record_dismissed(
+                store,
+                user_id,
+                &sub_targets,
+                &active_tv_subs,
+                now_secs.saturating_sub(1),
+            ) {
+                Ok(dismissed) => pre_dismissed = dismissed,
+                Err(error) => {
+                    return clear_history_store_error(
+                        error,
+                        user_id,
+                        scope,
+                        "写入继续观看隐藏列表失败",
+                    );
+                }
+            }
+        }
+    }
     let (mut deleted_states, deleted_metrics, watched_in_window) =
         match store.playback_write(|db| {
-            let mut watched = db.user_playback_media_ids(user_id, since)?;
-            if let Some(allowed) = &media_filter {
-                watched.retain(|id| allowed.contains(id));
-            }
+            let watched = if since.is_some() {
+                let mut watched = db.user_playback_media_ids(user_id, since)?;
+                if let Some(allowed) = &media_filter {
+                    watched.retain(|id| allowed.contains(id));
+                }
+                watched
+            } else {
+                Vec::new()
+            };
             let states = db.clear_units(user_id, media_ids.as_deref(), since)?
                 + db.delete_logs(user_id, media_ids.as_deref(), since)?;
             let metrics = db.delete_metrics(user_id, media_ids.as_deref(), since)?;
-            Ok((states, metrics, watched))
+            Ok((states + pre_dismissed, metrics, watched))
         }) {
             Ok(counts) => counts,
             Err(error) => {
                 return clear_history_store_error(error, user_id, scope, "清除观看记录失败");
             }
         };
-    let sub_targets: Vec<domain::MediaId> = if since.is_none() {
-        match &media_filter {
-            Some(allowed) => active_tv_subs.intersection(allowed).copied().collect(),
-            None => active_tv_subs.iter().copied().collect(),
-        }
-    } else {
-        watched_in_window
+    if since.is_some() {
+        let sub_targets: Vec<domain::MediaId> = watched_in_window
             .into_iter()
             .filter(|id| active_tv_subs.contains(id))
-            .collect()
-    };
-    if !sub_targets.is_empty() {
-        match crate::up_next_dismissed::record_dismissed(
-            store,
-            user_id,
-            &sub_targets,
-            &active_tv_subs,
-            now_secs.saturating_sub(1),
-        ) {
-            Ok(dismissed) => deleted_states += dismissed,
-            Err(error) if since.is_none() || (deleted_states == 0 && deleted_metrics == 0) => {
-                return clear_history_store_error(
-                    error,
-                    user_id,
-                    scope,
-                    "写入继续观看隐藏列表失败",
-                );
-            }
-            Err(error) => {
-                tracing::warn!(%error, %user_id, scope, "清除播放历史后写入继续观看隐藏列表失败");
+            .collect();
+        if !sub_targets.is_empty() {
+            match crate::up_next_dismissed::record_dismissed(
+                store,
+                user_id,
+                &sub_targets,
+                &active_tv_subs,
+                now_secs.saturating_sub(1),
+            ) {
+                Ok(dismissed) => deleted_states += dismissed,
+                Err(error) if deleted_states == 0 && deleted_metrics == 0 => {
+                    return clear_history_store_error(
+                        error,
+                        user_id,
+                        scope,
+                        "写入继续观看隐藏列表失败",
+                    );
+                }
+                Err(error) => {
+                    tracing::warn!(%error, %user_id, scope, "清除播放历史后写入继续观看隐藏列表失败");
+                }
             }
         }
     }

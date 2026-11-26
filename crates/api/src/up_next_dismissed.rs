@@ -27,14 +27,12 @@ fn parse_dismissed(raw: Option<&str>, user_id: UserId) -> HashMap<MediaId, i64> 
 }
 
 /// Load `{ media_id -> dismissed_at_unix_secs }` for one user from `app.db`.
-pub(crate) fn load_dismissed(store: &Store, user_id: UserId) -> HashMap<MediaId, i64> {
-    match store.get_setting(&setting_key(user_id)) {
-        Ok(raw) => parse_dismissed(raw.as_deref(), user_id),
-        Err(error) => {
-            tracing::warn!(%error, %user_id, "读取继续观看隐藏列表失败");
-            HashMap::new()
-        }
-    }
+pub(crate) fn load_dismissed(
+    store: &Store,
+    user_id: UserId,
+) -> Result<HashMap<MediaId, i64>, StoreError> {
+    let raw = store.get_setting(&setting_key(user_id))?;
+    Ok(parse_dismissed(raw.as_deref(), user_id))
 }
 
 fn encode_dismissed(map: &HashMap<MediaId, i64>) -> Result<Option<String>, StoreError> {
@@ -81,15 +79,17 @@ pub(crate) fn record_dismissed(
 }
 
 /// Unhide a media item when the user explicitly subscribes to it again.
-pub(crate) fn clear_dismissed_media(store: &Store, user_id: UserId, media_id: MediaId) {
-    if let Err(error) = store.mutate_setting(&setting_key(user_id), |raw| {
+pub(crate) fn clear_dismissed_media(
+    store: &Store,
+    user_id: UserId,
+    media_id: MediaId,
+) -> Result<(), StoreError> {
+    store.mutate_setting(&setting_key(user_id), |raw| {
         let mut map = parse_dismissed(raw.as_deref(), user_id);
         if map.remove(&media_id).is_some() {
             Ok((encode_dismissed(&map)?, ()))
         } else {
             Ok((raw, ()))
         }
-    }) {
-        tracing::warn!(%error, %user_id, %media_id, "清除订阅移出标记失败");
-    }
+    })
 }
