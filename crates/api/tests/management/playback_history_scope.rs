@@ -732,3 +732,56 @@ async fn clear_history_all_and_library_dismiss_until_resubscribed_and_concurrent
     assert_eq!(resub.status(), StatusCode::CREATED);
     assert_eq!(get_up_next_ids(&app).await, vec![show_a.to_string()]);
 }
+
+#[tokio::test]
+async fn clear_history_returns_503_when_app_writer_is_busy_instead_of_false_200() {
+    let tmp = tempfile::tempdir().unwrap();
+    let clock = Arc::new(SeqClock(std::sync::atomic::AtomicI64::new(
+        1_700_000_000 * 1000,
+    )));
+    let (app, store) = app_with_clock(&tmp, clock);
+    let admin = store.admin_user_id().unwrap();
+    let (_lib, show_id, _, _) =
+        seed_tv_library_and_show(&store, &tmp.path().join("tv"), "BusyShow", Some(admin));
+
+    let entered = Arc::new(std::sync::Barrier::new(2));
+    let entered_worker = entered.clone();
+    let store_holder = store.clone();
+    let blocker = std::thread::spawn(move || {
+        store_holder
+            .mutate_setting("test.lock.probe", |cur| {
+                entered_worker.wait();
+                std::thread::sleep(std::time::Duration::from_millis(1_150));
+                Ok((cur, ()))
+            })
+            .unwrap();
+    });
+    tokio::task::spawn_blocking(move || entered.wait())
+        .await
+        .unwrap();
+
+    let res = app
+        .clone()
+        .oneshot(request(
+            "DELETE",
+            &format!("/api/v1/playback/history?scope=item&media_item_id={show_id}"),
+            Some("management-secret"),
+            Value::Null,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::SERVICE_UNAVAILABLE);
+    blocker.join().unwrap();
+
+    let retry = app
+        .oneshot(request(
+            "DELETE",
+            &format!("/api/v1/playback/history?scope=item&media_item_id={show_id}"),
+            Some("management-secret"),
+            Value::Null,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(retry.status(), StatusCode::OK);
+    assert!(json_data(retry).await["deleted_states"].as_i64().unwrap() >= 1);
+}

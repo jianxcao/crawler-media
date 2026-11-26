@@ -201,16 +201,9 @@ fn resolve_history_media_ids(
             let Ok(library_id) = library.id.parse() else {
                 return Ok(Some(Vec::new()));
             };
-            let ids =
-                store
-                    .media_ids_in_libraries(&[library_id])
-                    .map_err(|e: store::StoreError| {
-                        err(
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            "store.error",
-                            &e.to_string(),
-                        )
-                    })?;
+            let ids = store
+                .media_ids_in_libraries(&[library_id])
+                .map_err(|e| clear_history_store_error(e, user_id, scope, "读取媒体库条目失败"))?;
             Ok(Some(ids))
         }
         _ => Err(err(
@@ -262,6 +255,27 @@ fn parse_clear_since(raw: Option<&str>) -> Result<Option<i64>, Response> {
     }
 }
 
+fn clear_history_store_error(
+    error: store::StoreError,
+    user_id: domain::UserId,
+    scope: &str,
+    message: &str,
+) -> Response {
+    match error {
+        store::StoreError::Protected(reason) => {
+            tracing::warn!(%reason, %user_id, scope, "Playback history clear rejected by write barrier");
+            err(StatusCode::CONFLICT, "playback.protected", &reason)
+        }
+        store::StoreError::WriteBusy
+        | store::StoreError::ReadBusy
+        | store::StoreError::ReadDeadline => crate::http::store_wait::busy_response(),
+        other => {
+            tracing::error!(error = %other, %user_id, scope, "{message}");
+            err(StatusCode::INTERNAL_SERVER_ERROR, "store.error", message)
+        }
+    }
+}
+
 fn clear_history_on_store(
     store: &crate::Store,
     user_id: domain::UserId,
@@ -274,19 +288,19 @@ fn clear_history_on_store(
         Ok(ids) => ids,
         Err(resp) => return resp,
     };
-    let active_tv_subs: std::collections::HashSet<domain::MediaId> = store
-        .list_subscribes_for_user(user_id)
-        .map(|rows| {
-            rows.into_iter()
+    let active_tv_subs: std::collections::HashSet<domain::MediaId> =
+        match store.list_subscribes_for_user(user_id) {
+            Ok(rows) => rows
+                .into_iter()
                 .filter(|row| matches!(row.coverage, domain::Coverage::Tv { .. }))
                 .map(|row| row.media_id)
-                .collect()
-        })
-        .unwrap_or_default();
+                .collect(),
+            Err(error) => return clear_history_store_error(error, user_id, scope, "读取订阅失败"),
+        };
     let media_filter: Option<std::collections::HashSet<domain::MediaId>> =
         media_ids.as_ref().map(|ids| ids.iter().copied().collect());
-    let (mut deleted_states, deleted_metrics, watched_in_window) = match store.playback_write(
-        |db| {
+    let (mut deleted_states, deleted_metrics, watched_in_window) =
+        match store.playback_write(|db| {
             let mut watched = db.user_playback_media_ids(user_id, since)?;
             if let Some(allowed) = &media_filter {
                 watched.retain(|id| allowed.contains(id));
@@ -295,23 +309,12 @@ fn clear_history_on_store(
                 + db.delete_logs(user_id, media_ids.as_deref(), since)?;
             let metrics = db.delete_metrics(user_id, media_ids.as_deref(), since)?;
             Ok((states, metrics, watched))
-        },
-    ) {
-        Ok(counts) => counts,
-        Err(store::StoreError::Protected(message)) => {
-            tracing::warn!(%message, %user_id, scope, "Playback history clear rejected by write barrier");
-            return err(StatusCode::CONFLICT, "playback.protected", &message);
-        }
-        Err(store::StoreError::WriteBusy) => return crate::http::store_wait::busy_response(),
-        Err(error) => {
-            tracing::error!(%error, %user_id, scope, "Playback history clear failed");
-            return err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "store.error",
-                "清除观看记录失败",
-            );
-        }
-    };
+        }) {
+            Ok(counts) => counts,
+            Err(error) => {
+                return clear_history_store_error(error, user_id, scope, "清除观看记录失败");
+            }
+        };
     let sub_targets: Vec<domain::MediaId> = if since.is_none() {
         match &media_filter {
             Some(allowed) => active_tv_subs.intersection(allowed).copied().collect(),
@@ -323,16 +326,27 @@ fn clear_history_on_store(
             .filter(|id| active_tv_subs.contains(id))
             .collect()
     };
-    if !sub_targets.is_empty()
-        && let Ok(dismissed) = crate::up_next_dismissed::record_dismissed(
+    if !sub_targets.is_empty() {
+        match crate::up_next_dismissed::record_dismissed(
             store,
             user_id,
             &sub_targets,
             &active_tv_subs,
             now_secs.saturating_sub(1),
-        )
-    {
-        deleted_states += dismissed;
+        ) {
+            Ok(dismissed) => deleted_states += dismissed,
+            Err(error) if since.is_none() || (deleted_states == 0 && deleted_metrics == 0) => {
+                return clear_history_store_error(
+                    error,
+                    user_id,
+                    scope,
+                    "写入继续观看隐藏列表失败",
+                );
+            }
+            Err(error) => {
+                tracing::warn!(%error, %user_id, scope, "清除播放历史后写入继续观看隐藏列表失败");
+            }
+        }
     }
     ok(json!({
         "deleted_states": deleted_states,
