@@ -174,7 +174,19 @@ pub(crate) struct CloudLookupRequest<'a> {
 }
 
 pub(crate) fn lookup_cloud_marker(req: CloudLookupRequest<'_>) -> Option<StoredFileMarker> {
-    let (season, episode) = req.unit.episode_coordinates()?;
+    lookup_cloud_marker_for_kind(req, MediaKind::Tv)
+}
+
+pub(crate) fn lookup_cloud_marker_for_kind(
+    req: CloudLookupRequest<'_>,
+    kind: MediaKind,
+) -> Option<StoredFileMarker> {
+    let coords = match kind {
+        MediaKind::Tv => Some(req.unit.episode_coordinates()?),
+        MediaKind::Movie if req.unit.is_whole() => None,
+        _ => return None,
+    };
+    let (log_season, log_ep) = coords.unwrap_or((0, 0));
     let duration = req.duration_ms.filter(|&d| d > 0)?;
     let cooldown_scope = req.client.cooldown_scope();
     let key = LookupKey {
@@ -190,30 +202,33 @@ pub(crate) fn lookup_cloud_marker(req: CloudLookupRequest<'_>) -> Option<StoredF
     {
         return None;
     }
-    let candidate =
-        match req
-            .client
-            .get_episode_markers(req.tmdb_id, season, episode, Some(duration))
-        {
-            Ok(Some(candidate)) => candidate,
-            Ok(None) => {
-                req.negative.insert(key, req.now_ms);
-                return None;
-            }
-            Err(error) => {
-                record_lookup_error(
-                    req.negative,
-                    cooldown_scope,
-                    key,
-                    req.media_title,
-                    season,
-                    episode,
-                    req.now_ms,
-                    error,
-                );
-                return None;
-            }
-        };
+    let lookup = match coords {
+        Some((season, episode)) => {
+            req.client
+                .get_episode_markers(req.tmdb_id, season, episode, Some(duration))
+        }
+        None => req.client.get_movie_markers(req.tmdb_id, Some(duration)),
+    };
+    let candidate = match lookup {
+        Ok(Some(candidate)) => candidate,
+        Ok(None) => {
+            req.negative.insert(key, req.now_ms);
+            return None;
+        }
+        Err(error) => {
+            record_lookup_error(
+                req.negative,
+                cooldown_scope,
+                key,
+                req.media_title,
+                log_season,
+                log_ep,
+                req.now_ms,
+                error,
+            );
+            return None;
+        }
+    };
     let Some(group_duration) = candidate.group_duration_ms.filter(|d| *d > 0) else {
         req.negative.insert(key, req.now_ms);
         return None;

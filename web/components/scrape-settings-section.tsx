@@ -103,7 +103,17 @@ export function ScrapeSettingsSection() {
   const set = <K extends keyof ScrapeSetting>(key: K, value: ScrapeSetting[K]) =>
     setDraft((d) => ({ ...d, [key]: value }));
 
+  const invalidFpDuration =
+    draft.fingerprint_duration_secs != null &&
+    (!Number.isInteger(draft.fingerprint_duration_secs) ||
+      draft.fingerprint_duration_secs < 30 ||
+      draft.fingerprint_duration_secs > 3600);
+
   const save = async () => {
+    if (invalidFpDuration) {
+      toast.error("单集音频采样时长必须为 30–3600 之间的整数秒");
+      return;
+    }
     setBusy(true);
     try {
       const next = await saveScrapeConfig(draft);
@@ -377,21 +387,37 @@ export function ScrapeSettingsSection() {
                 </p>
               </div>
               <div className="space-y-2">
-                <label className="text-sub font-medium text-white/80">单集音频采样时长（秒）</label>
+                <label
+                  htmlFor="scrape-fp-duration-secs"
+                  className="text-sub font-medium text-white/80"
+                >
+                  单集音频采样时长（秒）
+                </label>
                 <input
+                  id="scrape-fp-duration-secs"
                   type="number"
                   min={30}
                   max={3600}
                   step={10}
                   className={INPUT_CLASS}
                   placeholder="默认 180（3 分钟）"
-                  value={draft.fingerprint_duration_secs ?? ""}
+                  value={
+                    draft.fingerprint_duration_secs == null ||
+                    Number.isNaN(draft.fingerprint_duration_secs)
+                      ? ""
+                      : draft.fingerprint_duration_secs
+                  }
                   onChange={(e) => {
                     const raw = e.target.value;
                     const parsed = raw === "" ? null : Number(raw);
                     set("fingerprint_duration_secs", parsed);
                   }}
                 />
+                {invalidFpDuration && (
+                  <p role="alert" className="text-caption text-[var(--danger)]">
+                    单集音频采样时长需为 30–3600 之间的整数秒（留空跟随默认 180 秒）。
+                  </p>
+                )}
                 <p className="text-caption text-white/40">
                   从每集开头截取多长音频做声纹比对以定位片头。越长越精确但越费流量：本地文件建议 180~300 秒；
                   STRM / 网盘挂载建议 90~180 秒，避免拉取过多音频流。留空跟随默认 180 秒。
@@ -411,7 +437,7 @@ export function ScrapeSettingsSection() {
         <button
           type="button"
           onClick={save}
-          disabled={busy || !dirty}
+          disabled={busy || !dirty || invalidFpDuration}
           className="rounded-xl bg-white/15 px-5 py-2.5 text-ui font-medium text-white transition hover:bg-white/25 disabled:opacity-40"
         >
           {busy ? "保存中…" : "保存设置"}

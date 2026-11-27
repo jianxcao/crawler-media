@@ -43,6 +43,15 @@ impl Store {
         self.with_library_write(|db| db.delete_file_marker(file_id, unit))
     }
 
+    pub fn delete_file_marker_checked(
+        &self,
+        file_id: domain::LedgerId,
+        unit: domain::UnitKey,
+        members: &[SourceObservation],
+    ) -> Result<(), StoreError> {
+        self.with_library_write(|db| db.delete_file_marker_checked(file_id, unit, members))
+    }
+
     /// Replace a season's marker rows in one transaction.
     /// Existing results remain readable until this transaction commits.
     #[cfg(any(test, feature = "test-support"))]
@@ -143,7 +152,7 @@ fn upsert_marker_row(
             intro_start_ms=excluded.intro_start_ms,intro_end_ms=excluded.intro_end_ms,
             outro_start_ms=excluded.outro_start_ms,outro_end_ms=excluded.outro_end_ms,
             source=excluded.source,locked=excluded.locked,updated_at=excluded.updated_at
-         WHERE file_markers.locked=0 OR excluded.locked=1
+         WHERE file_markers.locked=0 OR excluded.locked=1 OR excluded.source='manual'
             OR file_markers.file_revision!=excluded.file_revision OR file_markers.source_version!=excluded.source_version",
         params![marker.file_id.to_string(),marker.version.revision,marker.version.source_version,
             marker.unit.season,marker.unit.episode,marker.intro_start_ms,marker.intro_end_ms,

@@ -213,3 +213,145 @@ fn early_outro_prediction_preserves_bounded_tail_window_beyond_180s() {
         other => panic!("expected Verify window [1_240_000, 1_350_000], got {other:?}"),
     }
 }
+
+#[test]
+fn off_diagonal_noise_does_not_block_collinear_bridging_and_2s_gap_cap_holds() {
+    let total_items = 1454usize;
+    let op_start = 160usize;
+    let op_len = 726usize;
+    let shared_op = distinct_words(9101, op_len);
+
+    let mut ep1 = distinct_words(401, total_items);
+    let mut ep2 = distinct_words(502, total_items);
+    for (idx, &word) in shared_op.iter().enumerate() {
+        ep1[op_start + idx] = word;
+        ep2[op_start + idx] = word ^ 0b01;
+    }
+    // 1.7s (14-item) voiceover spike splits main diagonal into [160..515] and [529..886].
+    let spike_offset = op_start + 355;
+    for item in &mut ep1[spike_offset..spike_offset + 14] {
+        *item ^= 0x0FFF_0FFF;
+    }
+    // Inject an off-diagonal exact match at ep1[320..370] == ep2[1100..1150] (offset1=320 sits
+    // right between the two main-diagonal halves 160 and 529, without breaking ep1[320..370]!).
+    let off_diag = ep1[320..370].to_vec();
+    ep2[1100..1150].copy_from_slice(&off_diag);
+
+    let seg = marker::find_common_segment(&ep1, &ep2, 15.0, 240.0)
+        .expect("off-diagonal noise must not block main-diagonal bridging");
+    assert!(
+        (87.0..93.0).contains(&seg.duration_sec),
+        "expected full ~90s OP despite off-diagonal noise, got {seg:?}"
+    );
+
+    // A >=16-item (~2.0s) sustained weak run inside the OP must NOT bridge across episodes.
+    let mut ep3 = distinct_words(603, total_items);
+    for (idx, &word) in shared_op.iter().enumerate() {
+        ep3[op_start + idx] = word ^ 0b10;
+    }
+    let mut ep_16_weak = ep2.clone();
+    for item in &mut ep_16_weak[op_start + 350..op_start + 366] {
+        *item ^= 0x0FFF_0FFF;
+    }
+    if let Some(piece) = marker::find_common_segment(&ep_16_weak, &ep3, 15.0, 240.0) {
+        assert!(
+            piece.duration_sec < 55.0,
+            "16 consecutive weak items (~2.0s cap) must not bridge: {piece:?}"
+        );
+    }
+}
+
+#[test]
+fn adjacent_sub_bumper_segments_merging_above_six_seconds_report_uncertain_not_no_match() {
+    let total_items = 1454usize;
+    let shared_9s = distinct_words(3333, 74); // ~9.16s total
+    let mut a = distinct_words(61, total_items);
+    let mut b = distinct_words(72, total_items);
+    a[200..274].copy_from_slice(&shared_9s);
+    b[200..237].copy_from_slice(&shared_9s[..37]); // first ~4.58s exact (score 0)
+    for (dst, &src) in b[237..274].iter_mut().zip(&shared_9s[37..]) {
+        *dst = src ^ 0b111; // second ~4.58s score 3.0 -> upstream emits 2 adjacent <6s segments
+    }
+    assert_eq!(
+        ChromaprintEngine.compare_fingerprints(&a, &b, 15.0, 240.0),
+        PairFingerprintDecision::Uncertain("native_candidates_rejected".into()),
+        "two ~4.5s adjacent segments merging to ~9s (>=6s) must return Uncertain, not NoMatch"
+    );
+}
+
+#[test]
+fn guard_clipped_late_intro_and_early_outro_predictions_preserve_min_guard_margin() {
+    let policy = SamplingPolicy::default(); // full_window = 180s, min_guard_ms = 3_000ms
+    let intro_tpl = TemplateModel {
+        model_id: "intro-near-edge".into(),
+        version: 1,
+        kind: SegmentKind::Intro,
+        references: (1..=3)
+            .map(|ep| TemplateReference {
+                sample_id: format!("si{ep}"),
+                ledger_id: format!("li{ep}"),
+                episode: ep,
+                source_version: "v1".into(),
+                // Ends at 178.5s <= 180s, but requires right guard up to 181.5s > 180s!
+                match_interval_ms: (88_500, 178_500),
+                match_from_end_ms: None,
+            })
+            .collect(),
+        expected_duration_ms: 90_000,
+        is_stable: true,
+    };
+    let outro_tpl = TemplateModel {
+        model_id: "outro-near-edge".into(),
+        version: 1,
+        kind: SegmentKind::Outro,
+        references: (1..=3)
+            .map(|ep| TemplateReference {
+                sample_id: format!("so{ep}"),
+                ledger_id: format!("lo{ep}"),
+                episode: ep,
+                source_version: "v1".into(),
+                match_interval_ms: (1_321_500, 1_411_500),
+                // Starts 178.5s from end -> 1_321_500 >= 1_320_000, but left guard needs 1_318_500!
+                match_from_end_ms: Some((178_500, 88_500)),
+            })
+            .collect(),
+        expected_duration_ms: 90_000,
+        is_stable: true,
+    };
+    let templates = TemplateContext {
+        models: vec![intro_tpl, outro_tpl],
+        ..Default::default()
+    };
+    let target = EpisodeDescriptor {
+        ledger_id: "l4".into(),
+        episode: 4,
+        source_version: "v1".into(),
+        duration_ms: 1_500_000,
+    };
+
+    match plan_episode_window(
+        &target,
+        SegmentKind::Intro,
+        &templates,
+        &policy,
+        &SourceCostSummary::default(),
+    ) {
+        WindowDecision::Verify { window, .. } => {
+            assert_eq!((window.start_ms, window.end_ms), (78_500, 188_500));
+        }
+        other => panic!("expected late-guard Intro Verify [78_500, 188_500], got {other:?}"),
+    }
+
+    match plan_episode_window(
+        &target,
+        SegmentKind::Outro,
+        &templates,
+        &policy,
+        &SourceCostSummary::default(),
+    ) {
+        WindowDecision::Verify { window, .. } => {
+            assert_eq!((window.start_ms, window.end_ms), (1_311_500, 1_421_500));
+        }
+        other => panic!("expected early-guard Outro Verify [1_311_500, 1_421_500], got {other:?}"),
+    }
+}

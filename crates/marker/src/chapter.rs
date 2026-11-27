@@ -147,7 +147,7 @@ pub fn probe_chapters_controlled(
     Some(chapters)
 }
 
-/// 构造完整连续的剧集时间轴章节（类似 Infuse / Apple TV）：
+/// 构造完整连续的分集时间轴章节（类似 Infuse / Apple TV）：
 /// 如果原本没有内嵌章节，或者只有单独的 Marker，
 /// 则依据片头、片尾和视频总时长，自动切分为：
 /// 1. `[0 -> intro_start]` (若 > 0): 序幕 / 前情提要 (Cold Open / Recap)

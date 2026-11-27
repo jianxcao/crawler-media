@@ -406,3 +406,103 @@ fn direct_chapter_probe_waits_for_shared_remote_admission_and_cancels() {
         "chapter ffprobe bypassed the shared remote read permit"
     );
 }
+
+#[test]
+fn linked_abort_merges_read_stops_without_mutating_parents() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let dir = tempfile::tempdir().unwrap();
+    let path = remote(dir.path());
+    let gate = Arc::new(MediaReadGate::new(1, Duration::ZERO));
+    let _active = gate.acquire(&path, &WorkControl::default()).unwrap();
+
+    let stop_a = Arc::new(AtomicBool::new(false));
+    let stop_b = Arc::new(AtomicBool::new(false));
+    let stop_c = Arc::new(AtomicBool::new(false));
+    let parent = WorkControl::default()
+        .with_read_stop(stop_a.clone())
+        .with_read_stop(stop_b.clone());
+    let other = WorkControl::default().with_read_stop(stop_c.clone());
+    let child = parent.with_linked_abort(&other);
+
+    assert!(!child.should_stop_read_wait());
+    stop_b.store(true, Ordering::Release);
+    assert!(parent.should_stop_read_wait());
+    assert!(child.should_stop_read_wait());
+    stop_b.store(false, Ordering::Release);
+
+    let (tx, rx) = mpsc::channel();
+    let waiter_gate = gate.clone();
+    let waiter_path = path.clone();
+    let waiter_ctrl = child.clone();
+    let waiter = std::thread::spawn(move || {
+        tx.send(()).unwrap();
+        waiter_gate.acquire(&waiter_path, &waiter_ctrl).map(|_| ())
+    });
+    rx.recv_timeout(Duration::from_secs(1)).unwrap();
+    std::thread::sleep(Duration::from_millis(30));
+    stop_c.store(true, Ordering::Release);
+    let err = waiter.join().unwrap().unwrap_err();
+    assert_eq!(err, marker::media_read::READ_WAIT_STOPPED);
+
+    child.cancel();
+    assert!(child.is_cancelled());
+    assert!(child.should_stop_read_wait());
+    assert!(!parent.is_cancelled());
+    assert!(!other.is_cancelled());
+}
+
+#[test]
+fn linked_abort_serializes_other_cancel_with_child_publish_deadlock_free() {
+    let parent = WorkControl::default();
+    let other = WorkControl::default();
+    let child = parent.with_linked_abort(&other);
+
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let (cancel_done_tx, cancel_done_rx) = mpsc::channel();
+
+    let pub_child = child.clone();
+    let publisher = std::thread::spawn(move || {
+        pub_child.publish(|| {
+            entered_tx.send(()).unwrap();
+            release_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+            Ok(99usize)
+        })
+    });
+    entered_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+
+    let canceller_other = other.clone();
+    let canceller = std::thread::spawn(move || {
+        canceller_other.cancel();
+        cancel_done_tx.send(()).unwrap();
+    });
+    assert!(
+        cancel_done_rx
+            .recv_timeout(Duration::from_millis(80))
+            .is_err(),
+        "other.cancel() must block while child.publish() holds merged publication lock"
+    );
+    release_tx.send(()).unwrap();
+    assert_eq!(publisher.join().unwrap().unwrap(), 99);
+    cancel_done_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+    canceller.join().unwrap();
+    assert!(child.publish(|| Ok(1usize)).is_err());
+
+    // Verify opposite merge order cannot deadlock under concurrent publish/cancel.
+    let a = WorkControl::default();
+    let b = WorkControl::default();
+    let ab = a.with_linked_abort(&b);
+    let ba = b.with_linked_abort(&a);
+    let t1 = std::thread::spawn(move || {
+        for _ in 0..200 {
+            let _ = ab.publish(|| Ok(()));
+        }
+    });
+    let t2 = std::thread::spawn(move || {
+        for _ in 0..200 {
+            let _ = ba.publish(|| Ok(()));
+        }
+    });
+    t1.join().unwrap();
+    t2.join().unwrap();
+}

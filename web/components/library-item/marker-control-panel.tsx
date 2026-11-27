@@ -13,63 +13,25 @@ import {
 } from "@/lib/api/libraries";
 import { cancelFingerprintQueue } from "@/lib/api/probe";
 
-function formatMs(ms: number | null | undefined): string {
-  if (ms == null || ms < 0) return "—";
-  const totalSec = Math.floor(ms / 1000);
-  const mins = Math.floor(totalSec / 60);
-  const secs = totalSec % 60;
-  return `${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
-}
+import {
+  type EditDraft,
+  formatRange,
+  msToInputSeconds,
+  parseSecondsInput,
+  phaseLabel,
+  pickDefaultSeason,
+  samplingModeLabel,
+  sourceBadgeLabel,
+  validateEditDraft,
+} from "./marker-control-helpers";
 
-function formatRange(startMs: number | null | undefined, endMs: number | null | undefined): string {
-  if (startMs == null || endMs == null) return "";
-  return `${formatMs(startMs)}–${formatMs(endMs)}`;
-}
-
-function sourceBadgeLabel(source: string | undefined, locked: boolean | undefined): string {
-  if (locked || source === "manual") return "人工锁定";
-  if (source === "theintrodb") return "TheIntroDB";
-  if (source === "fingerprint") return "声纹";
-  if (source === "chapter") return "内嵌章节";
-  return source || "未知";
-}
-
-function parseSecondsInput(raw: string): number | null {
-  const trimmed = raw.trim();
-  if (!trimmed) return null;
-  if (trimmed.includes(":")) {
-    const parts = trimmed.split(":").map((p) => Number(p.trim()));
-    if (parts.some((n) => !Number.isFinite(n) || n < 0)) return null;
-    if (parts.length === 2) return Math.round((parts[0] * 60 + parts[1]) * 1000);
-    if (parts.length === 3) {
-      return Math.round((parts[0] * 3600 + parts[1] * 60 + parts[2]) * 1000);
-    }
-    return null;
-  }
-  const secs = Number(trimmed);
-  if (!Number.isFinite(secs) || secs < 0) return null;
-  return Math.round(secs * 1000);
-}
-
-function msToInputSeconds(ms: number | null | undefined): string {
-  if (ms == null) return "";
-  return String(Math.round(ms / 100) / 10);
-}
-
-interface EditDraft {
-  fileId: string;
-  season: number;
-  episode: number;
-  introStart: string;
-  introEnd: string;
-  outroStart: string;
-  outroEnd: string;
-}
+export { msToInputSeconds, parseSecondsInput };
 
 export function MarkerControlPanel({
   libraryId,
   mediaItemId,
   seasons,
+  isTv = true,
   selectedSeason,
   selectedEpisode,
   selectedFileId,
@@ -78,41 +40,74 @@ export function MarkerControlPanel({
   libraryId: string;
   mediaItemId: string;
   seasons: number[];
+  isTv?: boolean;
   selectedSeason?: number;
   selectedEpisode?: number;
   selectedFileId?: string | null;
   onChanged?: () => void;
 }) {
-  const initialSeason = selectedSeason ?? seasons[0] ?? 1;
-  const [season, setSeason] = useState<number>(initialSeason);
-  const [mode, setMode] = useState<MarkerDetectMode>("reuse_valid");
+  const [season, setSeason] = useState<number>(() => pickDefaultSeason(seasons, selectedSeason));
+  const [mode, setMode] = useState<MarkerDetectMode>(() =>
+    isTv ? "reuse_valid" : "theintrodb_only",
+  );
   const [diag, setDiag] = useState<SeasonMarkersDiagnostics | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [editing, setEditing] = useState<EditDraft | null>(null);
+
   const activeRef = useRef(true);
+  const prevActiveRef = useRef(false);
+  const loadSeqRef = useRef(0);
+  const loadAbortRef = useRef<AbortController | null>(null);
+  const onChangedRef = useRef(onChanged);
+  onChangedRef.current = onChanged;
+
+  const effectiveMode: MarkerDetectMode = isTv ? mode : "theintrodb_only";
+  const canDetectSingleEpisode = isTv && selectedSeason === season && selectedEpisode != null;
 
   useEffect(() => {
-    if (selectedSeason != null) setSeason(selectedSeason);
-  }, [selectedSeason]);
+    if (!isTv) return;
+    if (selectedSeason != null) {
+      setSeason(selectedSeason);
+      return;
+    }
+    if (seasons.length > 0 && !seasons.includes(season)) {
+      setSeason(pickDefaultSeason(seasons));
+    }
+  }, [isTv, mediaItemId, seasons, selectedSeason, season]);
+
+  useEffect(() => {
+    setEditing(null);
+  }, [mediaItemId, season, isTv]);
 
   const load = useCallback(async () => {
+    loadAbortRef.current?.abort();
+    const controller = new AbortController();
+    loadAbortRef.current = controller;
+    const reqId = ++loadSeqRef.current;
+    const targetSeason = isTv ? season : null;
     try {
-      const next = await fetchSeasonMarkers(libraryId, mediaItemId, season);
-      if (activeRef.current) setDiag(next);
+      const next = await fetchSeasonMarkers(libraryId, mediaItemId, targetSeason, controller.signal);
+      if (!activeRef.current || controller.signal.aborted || reqId !== loadSeqRef.current) return;
+      const finishedActive = prevActiveRef.current && !next.active;
+      prevActiveRef.current = next.active;
+      setDiag(next);
+      setError(null);
+      if (finishedActive) onChangedRef.current?.();
     } catch (cause) {
-      if (activeRef.current) {
-        setError(`读取片头片尾诊断失败：${(cause as Error).message}`);
-      }
+      if (!activeRef.current || controller.signal.aborted || reqId !== loadSeqRef.current) return;
+      setError(`读取片头片尾诊断失败：${(cause as Error).message}`);
     }
-  }, [libraryId, mediaItemId, season]);
+  }, [isTv, libraryId, mediaItemId, season]);
 
   useEffect(() => {
     activeRef.current = true;
+    prevActiveRef.current = false;
     void load();
     return () => {
       activeRef.current = false;
+      loadAbortRef.current?.abort();
     };
   }, [load]);
 
@@ -125,42 +120,52 @@ export function MarkerControlPanel({
   }, [diag?.active, load]);
 
   const runDetect = async (singleEpisode: boolean) => {
-    if (busy) return;
+    if (busy || (singleEpisode && !canDetectSingleEpisode)) return;
     setBusy(singleEpisode ? "episode" : "season");
     setError(null);
     setMessage(null);
     try {
-      const payload = singleEpisode && selectedEpisode != null
-        ? {
-            season,
-            episode: selectedEpisode,
-            ...(selectedFileId ? { file_id: selectedFileId } : {}),
-            mode,
-          }
-        : { season, mode };
+      const payload = !isTv
+        ? { mode: "theintrodb_only" as const }
+        : singleEpisode && selectedEpisode != null
+          ? {
+              season,
+              episode: selectedEpisode,
+              ...(selectedFileId ? { file_id: selectedFileId } : {}),
+              mode: effectiveMode,
+            }
+          : { season, mode: effectiveMode };
       const receipt = await detectItemMarkers(libraryId, mediaItemId, payload);
       if (!activeRef.current) return;
-      if (receipt.already_running) {
-        setMessage("该季已有片头片尾任务正在运行。");
+      const skipNote =
+        receipt.skipped_multi_unit > 0
+          ? `（已自动跳过 ${receipt.skipped_multi_unit} 个合并集文件）`
+          : "";
+      if (effectiveMode === "theintrodb_only") {
+        const count = receipt.updated_episodes ?? 0;
+        setMessage(
+          count > 0
+            ? `TheIntroDB 云端同步完成，已更新 ${count} 项标记${skipNote}。`
+            : `TheIntroDB 云端同步完成，未发现可更新标记${skipNote}。`,
+        );
+        await load();
+        onChangedRef.current?.();
       } else {
-        const skipNote =
-          receipt.skipped_multi_unit > 0
-            ? `（已自动跳过 ${receipt.skipped_multi_unit} 个合并集文件）`
-            : "";
-        setMessage(`已提交片头片尾检测任务${skipNote}。`);
+        setMessage(
+          receipt.already_running
+            ? "该季已有片头片尾任务正在运行。"
+            : `已提交片头片尾检测任务${skipNote}。`,
+        );
+        await load();
       }
-      await load();
-      onChanged?.();
     } catch (cause) {
-      if (activeRef.current) {
-        setError(`提交检测失败：${(cause as Error).message}`);
-      }
+      if (activeRef.current) setError(`提交检测失败：${(cause as Error).message}`);
     } finally {
       if (activeRef.current) setBusy(null);
     }
   };
 
-  const handleCancel = async () => {
+  const handleCancel = async (targetFileId?: string) => {
     if (busy) return;
     setBusy("cancel");
     setError(null);
@@ -168,19 +173,17 @@ export function MarkerControlPanel({
     try {
       const receipt = await cancelFingerprintQueue({
         media_id: mediaItemId,
-        season,
+        ...(isTv ? { season } : {}),
+        ...(targetFileId ? { file_id: targetFileId } : {}),
         include_running: true,
       });
       if (!activeRef.current) return;
       setMessage(
-        `已停止当前季检测（取消 ${receipt.cancelled_units} 项，中断 ${receipt.aborted_running} 项在途读取）。`,
+        `已停止检测（取消 ${receipt.cancelled_units} 项，中断 ${receipt.aborted_running} 项在途读取）。`,
       );
       await load();
-      onChanged?.();
     } catch (cause) {
-      if (activeRef.current) {
-        setError(`取消检测失败：${(cause as Error).message}`);
-      }
+      if (activeRef.current) setError(`取消检测失败：${(cause as Error).message}`);
     } finally {
       if (activeRef.current) setBusy(null);
     }
@@ -191,26 +194,21 @@ export function MarkerControlPanel({
       fileId: row.file_id,
       season: row.season,
       episode: row.episode,
+      durationMs: row.duration_ms,
       introStart: msToInputSeconds(row.marker?.intro_start_ms),
       introEnd: msToInputSeconds(row.marker?.intro_end_ms),
       outroStart: msToInputSeconds(row.marker?.outro_start_ms),
       outroEnd: msToInputSeconds(row.marker?.outro_end_ms),
+      locked: true,
     });
     setError(null);
   };
 
   const submitManualEdit = async () => {
     if (!editing || busy) return;
-    const introStartMs = parseSecondsInput(editing.introStart);
-    const introEndMs = parseSecondsInput(editing.introEnd);
-    const outroStartMs = parseSecondsInput(editing.outroStart);
-    const outroEndMs = parseSecondsInput(editing.outroEnd);
-    if ((introStartMs == null) !== (introEndMs == null)) {
-      setError("片头起止时间需要同时填写或同时留空");
-      return;
-    }
-    if ((outroStartMs == null) !== (outroEndMs == null)) {
-      setError("片尾起止时间需要同时填写或同时留空");
+    const validated = validateEditDraft(editing);
+    if ("error" in validated) {
+      setError(validated.error);
       return;
     }
     setBusy("manual");
@@ -218,23 +216,25 @@ export function MarkerControlPanel({
     try {
       await saveManualMarker(libraryId, mediaItemId, {
         file_id: editing.fileId,
-        season: editing.season,
-        episode: editing.episode,
-        intro_start_ms: introStartMs,
-        intro_end_ms: introEndMs,
-        outro_start_ms: outroStartMs,
-        outro_end_ms: outroEndMs,
-        locked: true,
+        ...(isTv && editing.season != null && editing.episode != null
+          ? { season: editing.season, episode: editing.episode }
+          : {}),
+        intro_start_ms: validated.introStartMs,
+        intro_end_ms: validated.introEndMs,
+        outro_start_ms: validated.outroStartMs,
+        outro_end_ms: validated.outroEndMs,
+        locked: editing.locked,
       });
       if (!activeRef.current) return;
+      const targetLabel =
+        isTv && editing.episode != null ? `第 ${editing.episode} 集` : "正片";
+      const lockAction = editing.locked ? "保存并锁定" : "保存并解锁";
       setEditing(null);
-      setMessage(`已保存并锁定第 ${editing.episode} 集片头片尾时间。`);
+      setMessage(`已${lockAction}${targetLabel}片头片尾时间。`);
       await load();
-      onChanged?.();
+      onChangedRef.current?.();
     } catch (cause) {
-      if (activeRef.current) {
-        setError(`保存人工标记失败：${(cause as Error).message}`);
-      }
+      if (activeRef.current) setError(`保存人工标记失败：${(cause as Error).message}`);
     } finally {
       if (activeRef.current) setBusy(null);
     }
@@ -247,27 +247,38 @@ export function MarkerControlPanel({
     try {
       await deleteManualMarker(libraryId, mediaItemId, {
         file_id: row.file_id,
-        season: row.season,
-        episode: row.episode,
+        ...(isTv && row.season != null && row.episode != null
+          ? { season: row.season, episode: row.episode }
+          : {}),
       });
       if (!activeRef.current) return;
-      setMessage(`已清除第 ${row.episode} 集片头片尾标记。`);
-      await load();
-      onChanged?.();
-    } catch (cause) {
-      if (activeRef.current) {
-        setError(`清除标记失败：${(cause as Error).message}`);
+      if (
+        editing &&
+        editing.fileId === row.file_id &&
+        editing.season === row.season &&
+        editing.episode === row.episode
+      ) {
+        setEditing(null);
       }
+      const targetLabel = isTv && row.episode != null ? `第 ${row.episode} 集` : "正片";
+      setMessage(`已清除${targetLabel}片头片尾标记。`);
+      await load();
+      onChangedRef.current?.();
+    } catch (cause) {
+      if (activeRef.current) setError(`清除标记失败：${(cause as Error).message}`);
     } finally {
       if (activeRef.current) setBusy(null);
     }
   };
 
+  const activePhase = diag?.active ? phaseLabel(diag.job?.phase) : null;
+  const localizedSampling = samplingModeLabel(diag?.job?.sampling_mode);
+
   return (
     <div className="mt-3 rounded-2xl border border-white/[0.08] bg-white/[0.03] p-4">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex flex-wrap items-center gap-2 text-caption">
-          {seasons.length > 1 && (
+          {isTv && seasons.length > 0 && (
             <select
               aria-label="检测季选择"
               value={season}
@@ -276,19 +287,19 @@ export function MarkerControlPanel({
             >
               {seasons.map((s) => (
                 <option key={s} value={s}>
-                  第 {s} 季
+                  {s === 0 ? "特别篇" : `第 ${s} 季`}
                 </option>
               ))}
             </select>
           )}
           <select
             aria-label="片头片尾检测策略"
-            value={mode}
+            value={effectiveMode}
             onChange={(e) => setMode(e.target.value as MarkerDetectMode)}
             className="rounded-lg border border-white/10 bg-black/40 px-2.5 py-1 text-white/85"
           >
-            <option value="reuse_valid">复用缓存重算（快速本地比对）</option>
-            <option value="recapture">重新采样声纹（覆盖旧音频缓存）</option>
+            {isTv && <option value="reuse_valid">复用缓存重算（快速本地比对）</option>}
+            {isTv && <option value="recapture">重新采样声纹（覆盖旧音频缓存）</option>}
             <option value="theintrodb_only">仅同步 TheIntroDB 云端</option>
           </select>
         </div>
@@ -300,9 +311,9 @@ export function MarkerControlPanel({
             onClick={() => void runDetect(false)}
             className="rounded-lg bg-sky-500/20 px-3 py-1 font-medium text-sky-200 transition hover:bg-sky-500/30 disabled:opacity-40"
           >
-            检测本季
+            {isTv ? "检测本季" : "同步云端标记"}
           </button>
-          {selectedEpisode != null && (
+          {canDetectSingleEpisode && (
             <button
               type="button"
               disabled={busy != null}
@@ -326,20 +337,33 @@ export function MarkerControlPanel({
             type="button"
             disabled={busy != null}
             onClick={() => void load()}
-            className="rounded-lg border border-white/10 px-2.5 py-1 text-white/60 transition hover:bg-white/[0.06] hover:text-white/90"
+            className="rounded-lg border border-white/10 px-2.5 py-1 text-white/60 transition hover:bg-white/[0.06] hover:text-white/90 disabled:opacity-40"
           >
             刷新诊断
           </button>
         </div>
       </div>
 
+      {diag?.paused && (
+        <p className="mt-2 text-caption text-amber-200/80">
+          后台声纹队列当前处于暂停状态；上方手动触发的检测任务仍可立即执行。
+        </p>
+      )}
+
       {diag?.job && (
         <div className="mt-2.5 flex flex-wrap items-center gap-3 rounded-xl border border-white/[0.06] bg-black/20 px-3 py-2 text-caption text-white/70">
           <span>
-            最近任务：{diag.job.status === "running" || diag.job.status === "queued" ? "进行中" : diag.job.status === "succeeded" ? "已完成" : diag.job.status === "cancelled" ? "已取消" : "失败"}
+            最近任务：
+            {diag.job.status === "running" || diag.job.status === "queued"
+              ? "进行中"
+              : diag.job.status === "succeeded"
+                ? "已完成"
+                : diag.job.status === "cancelled"
+                  ? "已取消"
+                  : "失败"}
           </span>
-          {diag.job.phase && <span>阶段：{diag.job.phase}</span>}
-          {diag.job.sampling_mode && <span>模式：{diag.job.sampling_mode}</span>}
+          {activePhase && <span>阶段：{activePhase}</span>}
+          {localizedSampling && <span>模式：{localizedSampling}</span>}
           <span>
             进度：{diag.job.completed}/{diag.job.total}（成功 {diag.job.succeeded}
             {diag.job.failed > 0 ? `，失败 ${diag.job.failed}` : ""}）
@@ -361,7 +385,9 @@ export function MarkerControlPanel({
       {editing && (
         <div className="mt-3 rounded-xl border border-sky-400/25 bg-sky-500/[0.06] p-3 text-caption">
           <p className="font-medium text-sky-200">
-            手工编辑并锁定第 {editing.episode} 集（支持填秒数如 90 或分:秒如 01:30，留空表示无）
+            手工编辑
+            {isTv && editing.episode != null ? `第 ${editing.episode} 集` : "正片"}
+            （支持填秒数如 90 或分:秒如 01:30，留空表示无）
           </p>
           <div className="mt-2 grid grid-cols-2 gap-2 sm:grid-cols-4">
             <label className="text-white/70">
@@ -370,7 +396,9 @@ export function MarkerControlPanel({
                 type="text"
                 aria-label="片头起点"
                 value={editing.introStart}
-                onChange={(e) => setEditing({ ...editing, introStart: e.target.value })}
+                onChange={(e) =>
+                  setEditing((prev) => (prev ? { ...prev, introStart: e.target.value } : prev))
+                }
                 className="mt-1 block w-full rounded-lg border border-white/15 bg-black/40 px-2 py-1 text-white"
               />
             </label>
@@ -380,7 +408,9 @@ export function MarkerControlPanel({
                 type="text"
                 aria-label="片头终点"
                 value={editing.introEnd}
-                onChange={(e) => setEditing({ ...editing, introEnd: e.target.value })}
+                onChange={(e) =>
+                  setEditing((prev) => (prev ? { ...prev, introEnd: e.target.value } : prev))
+                }
                 className="mt-1 block w-full rounded-lg border border-white/15 bg-black/40 px-2 py-1 text-white"
               />
             </label>
@@ -390,7 +420,9 @@ export function MarkerControlPanel({
                 type="text"
                 aria-label="片尾起点"
                 value={editing.outroStart}
-                onChange={(e) => setEditing({ ...editing, outroStart: e.target.value })}
+                onChange={(e) =>
+                  setEditing((prev) => (prev ? { ...prev, outroStart: e.target.value } : prev))
+                }
                 className="mt-1 block w-full rounded-lg border border-white/15 bg-black/40 px-2 py-1 text-white"
               />
             </label>
@@ -400,24 +432,39 @@ export function MarkerControlPanel({
                 type="text"
                 aria-label="片尾终点"
                 value={editing.outroEnd}
-                onChange={(e) => setEditing({ ...editing, outroEnd: e.target.value })}
+                onChange={(e) =>
+                  setEditing((prev) => (prev ? { ...prev, outroEnd: e.target.value } : prev))
+                }
                 className="mt-1 block w-full rounded-lg border border-white/15 bg-black/40 px-2 py-1 text-white"
               />
             </label>
           </div>
+          <label className="mt-2.5 inline-flex items-center gap-2 text-white/80">
+            <input
+              type="checkbox"
+              aria-label="锁定人工标记"
+              checked={editing.locked}
+              onChange={(e) =>
+                setEditing((prev) => (prev ? { ...prev, locked: e.target.checked } : prev))
+              }
+              className="rounded border-white/20 bg-black/40"
+            />
+            锁定此标记（防止后续自动检测覆盖）
+          </label>
           <div className="mt-2.5 flex items-center gap-2">
             <button
               type="button"
               disabled={busy != null}
               onClick={() => void submitManualEdit()}
-              className="rounded-lg bg-sky-500/25 px-3 py-1 font-medium text-sky-100 hover:bg-sky-500/35"
+              className="rounded-lg bg-sky-500/25 px-3 py-1 font-medium text-sky-100 hover:bg-sky-500/35 disabled:opacity-40"
             >
-              保存锁定
+              {editing.locked ? "保存锁定" : "保存并解锁"}
             </button>
             <button
               type="button"
+              disabled={busy != null}
               onClick={() => setEditing(null)}
-              className="rounded-lg border border-white/15 px-3 py-1 text-white/70 hover:bg-white/10"
+              className="rounded-lg border border-white/15 px-3 py-1 text-white/70 hover:bg-white/10 disabled:opacity-40"
             >
               取消
             </button>
@@ -430,7 +477,7 @@ export function MarkerControlPanel({
           <table className="w-full text-left text-caption text-white/75">
             <thead className="border-b border-white/[0.06] bg-white/[0.02] text-white/50">
               <tr>
-                <th className="px-3 py-1.5">集</th>
+                <th className="px-3 py-1.5">{isTv ? "集" : "单元"}</th>
                 <th className="px-3 py-1.5">片头</th>
                 <th className="px-3 py-1.5">片尾</th>
                 <th className="px-3 py-1.5">来源</th>
@@ -447,10 +494,15 @@ export function MarkerControlPanel({
                   row.marker?.outro_start_ms,
                   row.marker?.outro_end_ms,
                 );
+                const rowActive =
+                  diag.active &&
+                  (row.detection?.status === "queued" || row.detection?.status === "running");
                 return (
-                  <tr key={`${row.file_id}:${row.episode}`}>
+                  <tr key={`${row.file_id}:${row.episode ?? "whole"}`}>
                     <td className="px-3 py-1.5 font-medium text-white/85">
-                      E{String(row.episode).padStart(2, "0")}
+                      {isTv && row.episode != null
+                        ? `E${String(row.episode).padStart(2, "0")}`
+                        : "正片"}
                     </td>
                     <td className="px-3 py-1.5">
                       {introRange || (
@@ -482,18 +534,30 @@ export function MarkerControlPanel({
                     <td className="px-3 py-1.5 text-right">
                       {!row.multi_unit && (
                         <div className="inline-flex items-center gap-1.5">
+                          {rowActive && (
+                            <button
+                              type="button"
+                              disabled={busy != null}
+                              onClick={() => void handleCancel(row.file_id)}
+                              className="text-amber-300 hover:underline disabled:opacity-40"
+                            >
+                              停止
+                            </button>
+                          )}
                           <button
                             type="button"
+                            disabled={busy != null}
                             onClick={() => beginEdit(row)}
-                            className="text-sky-300 hover:underline"
+                            className="text-sky-300 hover:underline disabled:opacity-40"
                           >
                             编辑/锁定
                           </button>
                           {row.marker && (
                             <button
                               type="button"
+                              disabled={busy != null}
                               onClick={() => void handleDeleteMarker(row)}
-                              className="text-white/50 hover:text-red-300"
+                              className="text-white/50 hover:text-red-300 disabled:opacity-40"
                             >
                               清除
                             </button>

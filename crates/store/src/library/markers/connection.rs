@@ -29,6 +29,44 @@ impl crate::LibraryConnection<'_> {
         Ok(())
     }
 
+    pub fn delete_file_marker_checked(
+        &self,
+        file_id: domain::LedgerId,
+        unit: domain::UnitKey,
+        members: &[SourceObservation],
+    ) -> Result<(), StoreError> {
+        let tx = crate::write_tx(self.library)?;
+        for member in members {
+            source_guard::check_observed(&tx, &member.file_id.to_string(), members)?;
+        }
+        let row = self
+            .file_coverage_by_id(file_id)?
+            .ok_or_else(|| StoreError::Invalid("marker_source_changed".into()))?;
+        if row.units.len() != 1 {
+            return Err(StoreError::Invalid("unit_time_mapping_unsupported".into()));
+        }
+        if !row.units.contains(&unit) {
+            return Err(StoreError::Invalid("marker_source_changed".into()));
+        }
+        self.validate_marker_target(&row, Some(members))?;
+        let id = file_id.to_string();
+        tx.execute(
+            "DELETE FROM file_markers
+             WHERE file_id = ?1 AND season = ?2 AND episode = ?3
+               AND file_revision = ?4 AND source_version = ?5",
+            params![
+                id,
+                unit.season,
+                unit.episode,
+                row.file.version.revision,
+                row.file.version.source_version,
+            ],
+        )?;
+        self.ensure_chapter_frames_for_updates(&[(id, Vec::new())])?;
+        tx.commit()?;
+        Ok(())
+    }
+
     #[cfg(any(test, feature = "test-support"))]
     pub fn replace_marker_results(
         &self,
@@ -79,9 +117,6 @@ impl crate::LibraryConnection<'_> {
         if let Some(members) = observed {
             match completed_job_id {
                 Some(job_id) => {
-                    // A job-scoped refresh publishes exactly the members the job covered, so the
-                    // season-wide membership equality does not apply. Each published file must still
-                    // match its out-of-lock observation, and the published set must equal the job's members.
                     source_guard::validate_published_rows(&tx, replacements, members)?;
                     source_guard::validate_job_members(&tx, job_id, replacements, members)?;
                 }

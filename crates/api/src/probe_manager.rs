@@ -540,13 +540,20 @@ impl ProbeManager {
     }
 
     pub(crate) fn resume_background_if_epoch(&self, epoch: u64) -> bool {
-        {
+        let keep_fp_exemptions = {
             let _guard = self.pause_state_lock.lock();
             if self.pause_epoch.load(Ordering::Acquire) != epoch {
                 return false;
             }
             self.background_paused.store(false, Ordering::Release);
-            self.clear_paused_exempt_jobs();
+            let fp_paused = self.fingerprint_is_paused();
+            if !fp_paused {
+                self.clear_paused_exempt_jobs();
+            }
+            fp_paused
+        };
+        if keep_fp_exemptions {
+            self.retain_fingerprint_exemptions_on_background_resume();
         }
         self.finish_resume_after_epoch(epoch)
     }
@@ -557,12 +564,18 @@ impl ProbeManager {
     }
 
     pub fn resume_background(&self) {
-        let epoch = {
+        let (epoch, keep_fp_exemptions) = {
             let _guard = self.pause_state_lock.lock();
             self.background_paused.store(false, Ordering::Release);
-            self.clear_paused_exempt_jobs();
-            self.pause_epoch.load(Ordering::Acquire)
+            let fp_paused = self.fingerprint_is_paused();
+            if !fp_paused {
+                self.clear_paused_exempt_jobs();
+            }
+            (self.pause_epoch.load(Ordering::Acquire), fp_paused)
         };
+        if keep_fp_exemptions {
+            self.retain_fingerprint_exemptions_on_background_resume();
+        }
         let _ = self.finish_resume_after_epoch(epoch);
     }
 

@@ -145,7 +145,7 @@ async fn capture(
             CapturePolicy::Recapture
         },
         templates,
-        cost_summary: load_source_cost_summary(manager, unit.row.file.library_id),
+        cost_summary: load_source_cost_summary(manager, unit.row.file.media_id, season),
     };
     let stage_key = crate::fingerprint_job::key_for_file(
         &manager.store,
@@ -158,39 +158,101 @@ async fn capture(
 
 fn load_source_cost_summary(
     manager: &ProbeManager,
-    library_id: domain::LibraryId,
+    media_id: domain::MediaId,
+    season: u32,
 ) -> marker::adaptive::SourceCostSummary {
     let Ok(attempts) = manager
         .store
-        .list_recent_library_fingerprint_attempts(library_id, 16)
+        .list_season_fingerprint_attempts(media_id, season, 48)
     else {
         return Default::default();
     };
-    let observations = attempts
-        .into_iter()
-        .filter_map(|attempt| {
-            let parsed =
-                serde_json::from_str::<marker::CaptureMetrics>(&attempt.metrics_json).ok()?;
-            if !parsed.measurement_complete || parsed.time_to_first_pcm_ms.is_none() {
-                return None;
-            }
+    observations_to_cost_summary(&attempts)
+}
+
+fn observations_to_cost_summary(
+    attempts: &[store::StoredFingerprintAttempt],
+) -> marker::adaptive::SourceCostSummary {
+    let mut group_order: Vec<(String, String, String)> = Vec::new();
+    let mut groups: std::collections::HashMap<
+        (String, String, String),
+        Vec<&store::StoredFingerprintAttempt>,
+    > = std::collections::HashMap::new();
+    for attempt in attempts {
+        let key = (
+            attempt.job_id.clone(),
+            attempt.ledger_id.clone(),
+            attempt.kind.clone(),
+        );
+        if !groups.contains_key(&key) {
+            group_order.push(key.clone());
+        }
+        groups.entry(key).or_default().push(attempt);
+    }
+    let mut observations = Vec::with_capacity(attempts.len());
+    for key in group_order {
+        let Some(group) = groups.get(&key) else {
+            continue;
+        };
+        let mut saw_fast_window: Option<(i64, i64)> = None;
+        for attempt in group {
+            let window_duration_ms = (attempt.window_end_ms - attempt.window_start_ms).max(0);
+            let parsed = serde_json::from_str::<marker::CaptureMetrics>(&attempt.metrics_json).ok();
             let fallback_elapsed = attempt
                 .finished_at_ms
                 .map(|fin| fin.saturating_sub(attempt.started_at_ms).max(0) as u64)
                 .unwrap_or(0);
-            Some(marker::adaptive::AttemptCostObservation {
-                phase: attempt.phase,
-                succeeded: attempt.status == "succeeded",
-                window_duration_ms: (attempt.window_end_ms - attempt.window_start_ms).max(0),
-                elapsed_ms: if parsed.elapsed_ms > 0 {
-                    parsed.elapsed_ms
+            let succeeded = attempt.status == "succeeded";
+            let is_scheduled_fast = attempt.phase == "fast_verify"
+                || (attempt.phase == "scheduled_capture"
+                    && window_duration_ms > 0
+                    && window_duration_ms < 160_000);
+            let is_followup_after_fast = saw_fast_window.is_some_and(|first_win| {
+                attempt.phase == "scheduled_capture"
+                    && (attempt.window_start_ms, attempt.window_end_ms) != first_win
+            });
+            let phase = if is_followup_after_fast {
+                "fallback_full_window".to_string()
+            } else {
+                if is_scheduled_fast && saw_fast_window.is_none() {
+                    saw_fast_window = Some((attempt.window_start_ms, attempt.window_end_ms));
+                }
+                attempt.phase.clone()
+            };
+            if succeeded {
+                let Some(metrics) =
+                    parsed.filter(|m| m.measurement_complete && m.time_to_first_pcm_ms.is_some())
+                else {
+                    continue;
+                };
+                let raw_elapsed = if metrics.elapsed_ms > 0 {
+                    metrics.elapsed_ms
                 } else {
                     fallback_elapsed
-                },
-                time_to_first_pcm_ms: parsed.time_to_first_pcm_ms,
-            })
-        })
-        .collect::<Vec<_>>();
+                };
+                observations.push(marker::adaptive::AttemptCostObservation {
+                    phase,
+                    succeeded: true,
+                    window_duration_ms,
+                    elapsed_ms: raw_elapsed,
+                    time_to_first_pcm_ms: metrics.time_to_first_pcm_ms,
+                });
+            } else if attempt.status == "failed" {
+                let raw_elapsed = parsed
+                    .as_ref()
+                    .map(|m| m.elapsed_ms)
+                    .filter(|&e| e > 0)
+                    .unwrap_or(fallback_elapsed);
+                observations.push(marker::adaptive::AttemptCostObservation {
+                    phase,
+                    succeeded: false,
+                    window_duration_ms,
+                    elapsed_ms: raw_elapsed,
+                    time_to_first_pcm_ms: None,
+                });
+            }
+        }
+    }
     marker::adaptive::SourceCostSummary::from_observations(&observations)
 }
 
@@ -395,6 +457,15 @@ async fn capture_kind(
         Err(error) if error.contains("budget exhausted") => {
             store::ProbeStageCompletion::NotApplicable
         }
+        Err(error)
+            if crate::fingerprint_job::source::is_file_deleted(error)
+                || error.contains("Library work cancelled")
+                || error.contains("Cancelled:") =>
+        {
+            store::ProbeStageCompletion::Cancelled {
+                reason: error.clone(),
+            }
+        }
         Err(error) => store::ProbeStageCompletion::Failed {
             error_kind: "network".into(),
             error: error.clone(),
@@ -405,8 +476,136 @@ async fn capture_kind(
         .store
         .finish_probe_stage(&key, &job_id, &completion, now)
         .map_err(|e| e.to_string())?;
-    if !finished {
+    if !finished && result.is_ok() {
         return Err("capture stage ownership lost".into());
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::observations_to_cost_summary;
+
+    #[test]
+    fn cost_summary_groups_by_job_ledger_kind_subtracts_first_pcm_and_tracks_fallbacks() {
+        let mk_metrics = |elapsed: u64, first_pcm: Option<u64>, complete: bool| {
+            serde_json::to_string(&marker::CaptureMetrics {
+                elapsed_ms: elapsed,
+                time_to_first_pcm_ms: first_pcm,
+                measurement_complete: complete,
+                ..Default::default()
+            })
+            .unwrap()
+        };
+        // Interleave attempts across episodes so naive chronological order would break pairing!
+        let attempts = vec![
+            store::StoredFingerprintAttempt {
+                attempt_id: "a1".into(),
+                job_id: "j1".into(),
+                ledger_id: "ep1".into(),
+                kind: "intro".into(),
+                window_start_ms: 10_000,
+                window_end_ms: 110_000,
+                phase: "scheduled_capture".into(),
+                started_at_ms: 100,
+                finished_at_ms: Some(2_600),
+                status: "succeeded".into(),
+                error_kind: None,
+                metrics_json: mk_metrics(2_500, Some(500), true),
+            },
+            store::StoredFingerprintAttempt {
+                attempt_id: "a2".into(),
+                job_id: "j1".into(),
+                ledger_id: "ep2".into(),
+                kind: "intro".into(),
+                window_start_ms: 10_000,
+                window_end_ms: 110_000,
+                phase: "scheduled_capture".into(),
+                started_at_ms: 200,
+                finished_at_ms: Some(1_200),
+                status: "failed".into(),
+                error_kind: Some("timeout".into()),
+                metrics_json: mk_metrics(1_000, None, false),
+            },
+            store::StoredFingerprintAttempt {
+                attempt_id: "a3".into(),
+                job_id: "j1".into(),
+                ledger_id: "ep1".into(),
+                kind: "intro".into(),
+                window_start_ms: 0,
+                window_end_ms: 180_000,
+                phase: "scheduled_capture".into(),
+                started_at_ms: 3_000,
+                finished_at_ms: Some(7_100),
+                status: "succeeded".into(),
+                error_kind: None,
+                metrics_json: mk_metrics(4_100, Some(500), true),
+            },
+            store::StoredFingerprintAttempt {
+                attempt_id: "a4".into(),
+                job_id: "j1".into(),
+                ledger_id: "ep3".into(),
+                kind: "intro".into(),
+                window_start_ms: 10_000,
+                window_end_ms: 110_000,
+                phase: "scheduled_capture".into(),
+                started_at_ms: 4_000,
+                finished_at_ms: Some(6_500),
+                status: "succeeded".into(),
+                error_kind: None,
+                metrics_json: mk_metrics(2_500, Some(500), true),
+            },
+        ];
+
+        let summary = observations_to_cost_summary(&attempts);
+        assert_eq!(summary.measured_samples, 3);
+        assert_eq!(summary.median_first_pcm_ms, Some(500));
+        // Decode elapsed after subtracting 500ms first_pcm:
+        // a1: 100_000 / 2_000 = 50.0, a3: 180_000 / 3_600 = 50.0, a4: 100_000 / 2_000 = 50.0
+        let rate = summary.sample_ms_per_wall_ms.expect("rate");
+        assert!((49.9..=50.1).contains(&rate), "expected 50.0, got {rate}");
+        assert_eq!(summary.recent_fast_attempts, 3);
+        assert_eq!(summary.recent_fallbacks, 2);
+    }
+
+    #[test]
+    fn clean_eof_tail_capture_admits_sub_500ms_shortfall_only_at_media_end() {
+        let mut capture = marker::CapturedFingerprint {
+            window: marker::SampleWindow::new(1_320_000, 1_500_000),
+            words: vec![1; 400],
+            pcm_duration_ms: Some(179_680), // 320ms shortfall (< 500ms)
+            metrics: marker::CaptureMetrics {
+                time_mapping_version: 3,
+                pcm_frame_ms: 20,
+                ffmpeg_exit_code: Some(0),
+                audio_stream_index: Some(0),
+                source_facts: Some(marker::CaptureSourceFacts {
+                    audio_stream_index: 0,
+                    format_start_time_us: Some(0),
+                    stream_start_pts: Some(0),
+                    stream_time_base: Some("1/16000".into()),
+                    codec_name: Some("aac".into()),
+                    native_sample_rate: Some(48_000),
+                    audio_channels: Some(2),
+                    provenance: "fixture".into(),
+                }),
+                pcm_timeline: marker::PcmTimeline::Contiguous,
+                contiguous_pcm_start_ms: Some(1_320_000),
+                ..Default::default()
+            },
+        };
+        assert!(
+            super::super::intro_search::complete_or_clean_eof_pcm(&capture, Some(1_500_000)),
+            "clean EOF tail with 320ms shortfall must be admitted"
+        );
+        assert!(
+            !super::super::intro_search::complete_or_clean_eof_pcm(&capture, Some(1_600_000)),
+            "interior window short by 320ms must stay incomplete"
+        );
+        capture.metrics.ffmpeg_exit_code = Some(1);
+        assert!(
+            !super::super::intro_search::complete_or_clean_eof_pcm(&capture, Some(1_500_000)),
+            "non-zero ffmpeg exit code must never qualify as clean EOF"
+        );
+    }
 }

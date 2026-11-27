@@ -162,50 +162,24 @@ fn build_models_for_kind(
 
             ep_intervals
                 .entry(ev1.sample_id.clone())
-                .or_insert_with(|| (ev1, Vec::new()))
-                .1
+                .or_insert_with(|| SampleBounds {
+                    evidence: ev1,
+                    bounds: Vec::new(),
+                })
+                .bounds
                 .push((start1_ms, end1_ms));
             ep_intervals
                 .entry(ev2.sample_id.clone())
-                .or_insert_with(|| (ev2, Vec::new()))
-                .1
+                .or_insert_with(|| SampleBounds {
+                    evidence: ev2,
+                    bounds: Vec::new(),
+                })
+                .bounds
                 .push((start2_ms, end2_ms));
         }
 
-        let mut references: Vec<TemplateReference> = ep_intervals
-            .into_iter()
-            .map(|(sample_id, (ev, mut bounds))| {
-                let mut starts: Vec<i64> = bounds.iter().map(|b| b.0).collect();
-                let mut ends: Vec<i64> = bounds.drain(..).map(|b| b.1).collect();
-                starts.sort_unstable();
-                ends.sort_unstable();
-                let start_ms = starts[starts.len() / 2];
-                let end_ms = ends[ends.len() / 2];
-                let from_end = if kind == SegmentKind::Outro {
-                    ev.duration_ms.map(|d| (d - end_ms, d - start_ms))
-                } else {
-                    None
-                };
-                TemplateReference {
-                    sample_id,
-                    ledger_id: ev.ledger_id.clone(),
-                    episode: ev.episode,
-                    source_version: ev.source_version.clone(),
-                    match_interval_ms: (start_ms, end_ms),
-                    match_from_end_ms: from_end,
-                }
-            })
-            .collect();
-        references.sort_by(|a, b| {
-            a.episode
-                .cmp(&b.episode)
-                .then(a.sample_id.cmp(&b.sample_id))
-        });
-        let unique_episodes = references
-            .iter()
-            .map(|r| r.episode)
-            .collect::<std::collections::HashSet<_>>()
-            .len();
+        let references = deduplicate_cluster_references(ep_intervals, kind);
+        let unique_episodes = references.len();
         if unique_episodes < 2 {
             continue;
         }
@@ -237,6 +211,55 @@ fn build_models_for_kind(
     }
 
     template_models
+}
+
+struct SampleBounds<'a> {
+    evidence: &'a EpisodeEvidence,
+    bounds: Vec<(i64, i64)>,
+}
+
+fn deduplicate_cluster_references(
+    ep_intervals: HashMap<String, SampleBounds<'_>>,
+    kind: SegmentKind,
+) -> Vec<TemplateReference> {
+    let mut scored: Vec<(i64, TemplateReference)> = ep_intervals
+        .into_iter()
+        .map(|(sample_id, mut entry)| {
+            let ev = entry.evidence;
+            let mut starts: Vec<i64> = entry.bounds.iter().map(|b| b.0).collect();
+            let mut ends: Vec<i64> = entry.bounds.drain(..).map(|b| b.1).collect();
+            starts.sort_unstable();
+            ends.sort_unstable();
+            let start_ms = starts[starts.len() / 2];
+            let end_ms = ends[ends.len() / 2];
+            let guard_margin =
+                (start_ms - ev.capture.window.start_ms).min(ev.capture.window.end_ms - end_ms);
+            let from_end = if kind == SegmentKind::Outro {
+                ev.duration_ms.map(|d| (d - end_ms, d - start_ms))
+            } else {
+                None
+            };
+            (
+                guard_margin,
+                TemplateReference {
+                    sample_id,
+                    ledger_id: ev.ledger_id.clone(),
+                    episode: ev.episode,
+                    source_version: ev.source_version.clone(),
+                    match_interval_ms: (start_ms, end_ms),
+                    match_from_end_ms: from_end,
+                },
+            )
+        })
+        .collect();
+    scored.sort_by(|a, b| {
+        a.1.episode
+            .cmp(&b.1.episode)
+            .then_with(|| b.0.cmp(&a.0))
+            .then_with(|| a.1.sample_id.cmp(&b.1.sample_id))
+    });
+    scored.dedup_by_key(|item| item.1.episode);
+    scored.into_iter().map(|(_, reference)| reference).collect()
 }
 
 fn collect_pair_candidates(

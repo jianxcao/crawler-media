@@ -13,6 +13,22 @@ import {
   type FingerprintQueueStatus,
 } from "@/lib/api/probe";
 
+function queueBadge(queue: FingerprintQueueStatus): { label: string; restricted: boolean } {
+  if (queue.paused) {
+    return { label: "声纹队列已暂停", restricted: true };
+  }
+  if (queue.background_paused && queue.remote_reads_paused) {
+    return { label: "受全局探测暂停限制 · 远程读取已暂停", restricted: true };
+  }
+  if (queue.background_paused) {
+    return { label: "受全局探测暂停限制", restricted: true };
+  }
+  if (queue.remote_reads_paused) {
+    return { label: "远程读取已暂停", restricted: true };
+  }
+  return { label: "声纹队列已启用", restricted: false };
+}
+
 export function FingerprintSettingsCard() {
   const [saved, setSaved] = useState<FingerprintProbeSettings | null>(null);
   const [draftWorkers, setDraftWorkers] = useState<number>(1);
@@ -47,6 +63,30 @@ export function FingerprintSettingsCard() {
       activeRef.current = false;
     };
   }, [load]);
+
+  const pendingTotal =
+    (queue?.queued_fingerprint ?? 0) +
+    (queue?.running_fingerprint ?? 0) +
+    (queue?.queued_analysis ?? 0);
+  const shouldPoll = pendingTotal > 0 || (queue?.active_workers ?? 0) > 0;
+
+  useEffect(() => {
+    if (!shouldPoll) return;
+    let inFlight = false;
+    const timer = setInterval(() => {
+      if (inFlight || !activeRef.current) return;
+      inFlight = true;
+      void getFingerprintQueueStatus()
+        .then((status) => {
+          if (activeRef.current) setQueue(status);
+        })
+        .catch(() => undefined)
+        .finally(() => {
+          inFlight = false;
+        });
+    }, 3000);
+    return () => clearInterval(timer);
+  }, [shouldPoll]);
 
   const invalidWorkers =
     !Number.isInteger(draftWorkers) || draftWorkers < 1 || draftWorkers > 8;
@@ -118,10 +158,7 @@ export function FingerprintSettingsCard() {
     }
   };
 
-  const pendingTotal =
-    (queue?.queued_fingerprint ?? 0) +
-    (queue?.running_fingerprint ?? 0) +
-    (queue?.queued_analysis ?? 0);
+  const badge = queue ? queueBadge(queue) : null;
 
   return (
     <section className="rounded-2xl border border-white/[0.08] bg-white/[0.03] p-4">
@@ -134,15 +171,15 @@ export function FingerprintSettingsCard() {
             单独暂停、恢复或终止后台片头片尾声纹提取，不影响常规媒体流信息（ffprobe）探测。
           </p>
         </div>
-        {queue && (
+        {badge && (
           <span
             className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-caption font-medium ${
-              queue.paused
+              badge.restricted
                 ? "border-amber-400/30 bg-amber-500/15 text-amber-200"
                 : "border-emerald-400/30 bg-emerald-500/15 text-emerald-200"
             }`}
           >
-            {queue.paused ? "声纹队列已暂停" : "声纹队列已启用"}
+            {badge.label}
           </span>
         )}
       </div>
@@ -150,8 +187,9 @@ export function FingerprintSettingsCard() {
       {queue && (
         <div className="mt-3 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-white/[0.06] bg-white/[0.02] px-3.5 py-2.5 text-caption text-white/70">
           <span>
-            正在提取 {queue.running_fingerprint} · 排队采集{" "}
-            {queue.queued_fingerprint} · 待整季分析 {queue.queued_analysis}
+            活动 {queue.active_workers}/{queue.workers} · 正在提取{" "}
+            {queue.running_fingerprint} · 排队采集 {queue.queued_fingerprint} · 待整季分析{" "}
+            {queue.queued_analysis}
           </span>
           <div className="flex flex-wrap items-center gap-2">
             <button
@@ -212,9 +250,21 @@ export function FingerprintSettingsCard() {
         </p>
       )}
       {error && (
-        <p role="alert" className="mt-2.5 text-caption text-[var(--danger)]">
-          {error}
-        </p>
+        <div className="mt-2.5 flex flex-wrap items-center gap-2">
+          <p role="alert" className="text-caption text-[var(--danger)]">
+            {error}
+          </p>
+          {saved == null && (
+            <button
+              type="button"
+              disabled={busy != null}
+              onClick={() => void load()}
+              className="rounded-lg border border-white/15 px-2.5 py-1 text-caption text-white/80 hover:bg-white/10 disabled:opacity-40"
+            >
+              重试
+            </button>
+          )}
+        </div>
       )}
     </section>
   );

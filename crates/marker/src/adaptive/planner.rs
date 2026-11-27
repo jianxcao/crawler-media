@@ -31,8 +31,9 @@ pub fn plan_episode_window(
         };
     }
 
-    let late_prediction = has_late_intro_prediction(&models, &full_window);
-    let early_outro_prediction = has_early_outro_prediction(episode, kind, &models, &full_window);
+    let late_prediction = has_late_intro_prediction(&models, &full_window, policy);
+    let early_outro_prediction =
+        has_early_outro_prediction(episode, kind, &models, &full_window, policy);
     // Calculate predicted envelopes for all models
     let mut predicted_ranges = Vec::new();
     let mut used_model_ids = Vec::new();
@@ -121,13 +122,14 @@ pub fn plan_episode_window(
 fn has_late_intro_prediction(
     models: &[&super::types::TemplateModel],
     full_window: &SampleWindow,
+    policy: &SamplingPolicy,
 ) -> bool {
+    let min_guard = policy.boundary.min_guard_ms.max(0);
     models.iter().any(|model| {
         model.kind == SegmentKind::Intro
-            && model
-                .references
-                .iter()
-                .any(|reference| reference.match_interval_ms.1 > full_window.end_ms)
+            && model.references.iter().any(|reference| {
+                reference.match_interval_ms.1.saturating_add(min_guard) > full_window.end_ms
+            })
     })
 }
 
@@ -136,7 +138,9 @@ fn has_early_outro_prediction(
     kind: SegmentKind,
     models: &[&super::types::TemplateModel],
     full_window: &SampleWindow,
+    policy: &SamplingPolicy,
 ) -> bool {
+    let min_guard = policy.boundary.min_guard_ms.max(0);
     kind == SegmentKind::Outro
         && episode.duration_ms > 0
         && models.iter().any(|model| {
@@ -145,7 +149,11 @@ fn has_early_outro_prediction(
                     .match_from_end_ms
                     .map(|(d1, d2)| d1.max(d2))
                     .unwrap_or(reference.match_interval_ms.1 - reference.match_interval_ms.0);
-                episode.duration_ms - from_end < full_window.start_ms
+                from_end > 0
+                    && i128::from(episode.duration_ms)
+                        - i128::from(from_end)
+                        - i128::from(min_guard)
+                        < i128::from(full_window.start_ms)
             })
         })
 }

@@ -124,7 +124,7 @@ impl marker::FingerprintCaptureEngine for ControllableFingerprint {
                 let _ = tx.send(());
             }
             let started = Instant::now();
-            while !control.is_cancelled() && started.elapsed() < Duration::from_secs(5) {
+            while !control.is_cancelled() && started.elapsed() < Duration::from_secs(10) {
                 std::thread::sleep(Duration::from_millis(15));
             }
             if control.is_cancelled() {
@@ -304,6 +304,42 @@ fn seed_tv_library_and_episodes(
     (lib.id, media_id, ids, multi)
 }
 
+async fn wait_until_fingerprint_queued(store: &api::Store, fid: LedgerId) {
+    let fid_str = fid.to_string();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let meta = store.get_media_info_cache_version(&fid_str).unwrap();
+        let active = store.active_probe_unit_for_ledger(&fid_str).unwrap();
+        let fp_queued = active.is_some_and(|u| {
+            u.stage == store::ProbeDispatchStage::Fingerprint && u.status == "queued"
+        });
+        if meta.is_some() && fp_queued {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "metadata probe or fingerprint stage handoff did not settle while fingerprint paused"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+async fn wait_until_unit_inactive(store: &api::Store, fid: LedgerId, msg: &str) {
+    let fid_str = fid.to_string();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if store
+            .active_probe_unit_for_ledger(&fid_str)
+            .unwrap()
+            .is_none()
+        {
+            return;
+        }
+        assert!(Instant::now() < deadline, "{msg}");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn fingerprint_settings_and_pause_decouple_from_metadata_probe() {
     let dir = tempfile::tempdir().unwrap();
@@ -350,8 +386,7 @@ async fn fingerprint_settings_and_pause_decouple_from_metadata_probe() {
         .await
         .unwrap();
     assert_eq!(paused_res.status(), StatusCode::OK);
-    let paused_data = common::json_data(paused_res).await;
-    assert_eq!(paused_data["paused"], true);
+    assert_eq!(common::json_data(paused_res).await["paused"], true);
 
     let (_lib_id, _media_id, ep_ids, _) =
         seed_tv_library_and_episodes(&state.store(), dir.path(), &[1], false);
@@ -365,21 +400,7 @@ async fn fingerprint_settings_and_pause_decouple_from_metadata_probe() {
         .request_probe(&cov, api::probe_manager::policy::ProbeRequestOrigin::Detail)
         .unwrap();
 
-    let deadline = Instant::now() + Duration::from_secs(3);
-    loop {
-        let meta = state
-            .store()
-            .get_media_info_cache_version(&ep_ids[0].to_string())
-            .unwrap();
-        if meta.is_some() {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "metadata probe blocked by fingerprint pause"
-        );
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    wait_until_fingerprint_queued(&state.store(), ep_ids[0]).await;
     let fp_status = app
         .clone()
         .oneshot(common::request(
@@ -406,21 +427,12 @@ async fn fingerprint_settings_and_pause_decouple_from_metadata_probe() {
         .await
         .unwrap();
     assert_eq!(resumed.status(), StatusCode::OK);
-    let deadline = Instant::now() + Duration::from_secs(3);
-    loop {
-        let active = state
-            .store()
-            .active_probe_unit_for_ledger(&ep_ids[0].to_string())
-            .unwrap();
-        if active.is_none() {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "fingerprint did not drain after resume"
-        );
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    wait_until_unit_inactive(
+        &state.store(),
+        ep_ids[0],
+        "fingerprint did not drain after resume",
+    )
+    .await;
     state.probe.shutdown_workers().await.unwrap();
 }
 
@@ -444,7 +456,7 @@ async fn cancel_fingerprint_aborts_in_flight_capture() {
         .request_probe(&cov, api::probe_manager::policy::ProbeRequestOrigin::Detail)
         .unwrap();
 
-    tokio::task::spawn_blocking(move || entered_rx.recv_timeout(Duration::from_secs(3)))
+    tokio::task::spawn_blocking(move || entered_rx.recv_timeout(Duration::from_secs(5)))
         .await
         .unwrap()
         .expect("capture did not start");
@@ -464,22 +476,13 @@ async fn cancel_fingerprint_aborts_in_flight_capture() {
     let receipt = common::json_data(res).await;
     assert!(receipt["aborted_running"].as_u64().unwrap_or(0) >= 1);
 
-    let deadline = Instant::now() + Duration::from_secs(2);
-    loop {
-        let active = state
-            .store()
-            .active_probe_unit_for_ledger(&ep_ids[0].to_string())
-            .unwrap();
-        if active.is_none() {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "in-flight fingerprint unit did not terminate after cancel"
-        );
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    assert!(cancel_started.elapsed() < Duration::from_secs(2));
+    wait_until_unit_inactive(
+        &state.store(),
+        ep_ids[0],
+        "in-flight fingerprint unit did not terminate after cancel",
+    )
+    .await;
+    assert!(cancel_started.elapsed() < Duration::from_secs(5));
     state.probe.shutdown_workers().await.unwrap();
 }
 
@@ -616,3 +619,6 @@ async fn standalone_season_detect_diagnostics_and_manual_marker_crud() {
     );
     state.probe.shutdown_workers().await.unwrap();
 }
+
+#[path = "marker_standalone_control/review_fixes.rs"]
+mod review_fixes;

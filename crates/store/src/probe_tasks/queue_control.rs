@@ -213,12 +213,35 @@ impl crate::LibraryConnection<'_> {
         exempt_job_ids: &HashSet<String>,
         reason: &str,
     ) -> Result<Vec<(String, String)>, StoreError> {
+        self.cancel_dormant_queued_units_for_ledgers_scoped(
+            ledger_ids,
+            exempt_job_ids,
+            true,
+            reason,
+        )
+    }
+
+    /// Like [`Self::cancel_dormant_queued_units_for_ledgers`], but when only the
+    /// standalone fingerprint queue is paused (`include_metadata == false`),
+    /// runnable `stage = 'metadata'` units are preserved rather than cancelled.
+    pub fn cancel_dormant_queued_units_for_ledgers_scoped(
+        &self,
+        ledger_ids: &[String],
+        exempt_job_ids: &HashSet<String>,
+        include_metadata: bool,
+        reason: &str,
+    ) -> Result<Vec<(String, String)>, StoreError> {
         if ledger_ids.is_empty() {
             return Ok(Vec::new());
         }
         let tx = crate::write_tx(self.library)?;
         let ledger_json = serde_json::to_string(ledger_ids)?;
-        let targets = select_non_exempt_queued_for_ledgers(&tx, &ledger_json, exempt_job_ids)?;
+        let targets = select_non_exempt_queued_for_ledgers(
+            &tx,
+            &ledger_json,
+            exempt_job_ids,
+            include_metadata,
+        )?;
         if targets.is_empty() {
             tx.commit()?;
             return Ok(Vec::new());
@@ -239,7 +262,12 @@ impl crate::LibraryConnection<'_> {
         for (job_id, file_id) in analysis_targets {
             crate::probe_analysis::transfer_reconciliation(&tx, &job_id, &file_id)?;
         }
-        let residual = select_non_exempt_queued_for_ledgers(&tx, &ledger_json, exempt_job_ids)?;
+        let residual = select_non_exempt_queued_for_ledgers(
+            &tx,
+            &ledger_json,
+            exempt_job_ids,
+            include_metadata,
+        )?;
         if !residual.is_empty() {
             cancel_selected_targets(
                 &tx,
@@ -452,14 +480,16 @@ fn select_non_exempt_queued_for_ledgers(
     tx: &rusqlite::Connection,
     ledger_json: &str,
     exempt_job_ids: &HashSet<String>,
+    include_metadata: bool,
 ) -> Result<Vec<(String, String, String)>, StoreError> {
     let mut stmt = tx.prepare(
         "SELECT u.job_id, u.file_id, u.stage
          FROM probe_job_units u
          WHERE u.file_id IN (SELECT value FROM json_each(?1))
-           AND u.status = 'queued'",
+           AND u.status = 'queued'
+           AND (?2 != 0 OR u.stage IN ('fingerprint', 'analysis'))",
     )?;
-    let rows = stmt.query_map([ledger_json], |row| {
+    let rows = stmt.query_map(params![ledger_json, i64::from(include_metadata)], |row| {
         Ok((
             row.get::<_, String>(0)?,
             row.get::<_, String>(1)?,

@@ -1,4 +1,5 @@
 //! Standalone fingerprint queue pause/resume, concurrency admission, and in-flight abort.
+use std::collections::HashSet;
 use std::sync::atomic::Ordering;
 
 use crate::scrape_store::ScrapeStoreExt;
@@ -17,7 +18,7 @@ impl ProbeManager {
         self.fingerprint_paused.load(Ordering::Acquire)
     }
 
-    pub(super) fn fingerprint_dispatch_paused(&self) -> bool {
+    pub(crate) fn fingerprint_dispatch_paused(&self) -> bool {
         self.background_is_paused() || self.fingerprint_is_paused()
     }
 
@@ -65,6 +66,7 @@ impl ProbeManager {
     }
 
     pub(super) fn drain_fingerprint_dispatch(&self) {
+        self.wake.notify_waiters();
         let drained = {
             let mut guard = self.fingerprint_rx.lock();
             let mut ids = Vec::new();
@@ -82,6 +84,7 @@ impl ProbeManager {
             }
         }
         self.fingerprint_overflowed.store(false, Ordering::Release);
+        self.wake.notify_waiters();
     }
 
     pub(super) fn register_active_fingerprint(
@@ -111,15 +114,25 @@ impl ProbeManager {
     pub(crate) fn abort_matching_active_fingerprints(
         &self,
         scope: &store::FingerprintCancelScope,
+        cancelled_file_ids: &[String],
     ) -> usize {
+        let extra_files: HashSet<&str> = cancelled_file_ids.iter().map(String::as_str).collect();
         if !scope.include_running {
             return 0;
         }
         let controls: Vec<marker::WorkControl> = {
             let guard = self.active_fingerprint_controls.lock();
             guard
-                .values()
-                .filter(|entry| {
+                .iter()
+                .filter(|((_, ledger_id), entry)| {
+                    if extra_files.contains(ledger_id.as_str()) {
+                        return true;
+                    }
+                    if let Some(fid) = scope.file_id.as_deref()
+                        && ledger_id != fid
+                    {
+                        return false;
+                    }
                     if let Some(lib) = scope.library_id.as_deref()
                         && entry.library_id != lib
                     {
@@ -137,7 +150,7 @@ impl ProbeManager {
                     }
                     true
                 })
-                .map(|entry| entry.control.clone())
+                .map(|(_, entry)| entry.control.clone())
                 .collect()
         };
         for control in &controls {
@@ -155,15 +168,21 @@ impl ProbeManager {
             self.analysis_schedule.lock().clear_unstarted();
             self.drain_fingerprint_dispatch();
         }
+        self.purge_cancelled_seen(&summary.cancelled_file_ids, false);
         for job_id in &summary.cancelled_job_ids {
-            if let Ok(Some(job)) = self.store.get_probe_job(job_id)
-                && !job.is_active()
-            {
-                self.unmark_job_paused_exempt(job_id);
-                super::timings::finalize_terminal_job(&self.store_access(), &self.timings, &job);
+            if let Ok(Some(job)) = self.store.get_probe_job(job_id) {
+                if !job.is_active() {
+                    self.unmark_job_paused_exempt(job_id);
+                    super::timings::finalize_terminal_job(
+                        &self.store_access(),
+                        &self.timings,
+                        &job,
+                    );
+                } else if job.kind == "marker_refresh" {
+                    let _ = self.reconcile_marker_refresh_after_retirement(job_id);
+                }
             }
         }
-        self.purge_cancelled_seen(&summary.cancelled_file_ids, false);
     }
 
     /// Queue an explicit pause-exempt marker detection for a single episode file.
@@ -198,15 +217,50 @@ impl ProbeManager {
             "media_probe"
         };
         let job_id = uuid::Uuid::new_v4().to_string();
+        let Some(cancelled) = self.persist_single_episode_marker_job(
+            &unit,
+            &ledger_id,
+            &job_id,
+            job_kind,
+            reuse_cache,
+        )?
+        else {
+            return Ok((false, None));
+        };
+        self.finish_superseding_cancelled_units(&cancelled);
+        self.mark_job_paused_exempt(job_id.clone());
+        unit.job_id = Some(job_id.clone());
+        self.dispatch_single_episode_marker_job(
+            unit,
+            &ledger_id,
+            &job_id,
+            job_kind,
+            cached_meta.and_then(|v| v.format_duration_ms),
+            actual_version,
+            sample_duration_secs,
+        );
+        Ok((true, Some(job_id)))
+    }
+
+    fn persist_single_episode_marker_job(
+        &self,
+        unit: &ProbeUnit,
+        ledger_id: &str,
+        job_id: &str,
+        job_kind: &str,
+        reuse_cache: bool,
+    ) -> Result<Option<Vec<(String, String)>>, store::StoreError> {
         let paused = self.fingerprint_dispatch_paused();
+        let include_metadata = self.background_is_paused();
+        let lid_owned = ledger_id.to_string();
         let exempt_jobs = if paused {
-            self.paused_exempt_jobs_for_ledgers(std::slice::from_ref(&ledger_id))
+            self.paused_exempt_jobs_for_ledgers(std::slice::from_ref(&lid_owned))
         } else {
-            std::collections::HashSet::new()
+            HashSet::new()
         };
         let scope = format!("ledger:{ledger_id}");
         let spec = store::ProbeJobUnitSpec {
-            ledger_id: &ledger_id,
+            ledger_id,
             kind: unit.kind.as_str(),
             force_fingerprint: true,
             reuse_fingerprint_cache: reuse_cache,
@@ -221,7 +275,7 @@ impl ProbeManager {
             .store
             .library_write_with_error(CreateErr::Store, |store| {
                 if store
-                    .ledger_is_missing(&ledger_id)
+                    .ledger_is_missing(ledger_id)
                     .map_err(CreateErr::Store)?
                 {
                     return Err(CreateErr::Conflict);
@@ -229,9 +283,10 @@ impl ProbeManager {
                 store.with_write_tx(CreateErr::Store, |store| {
                     let cancelled = if paused {
                         store
-                            .cancel_dormant_queued_units_for_ledgers(
-                                std::slice::from_ref(&ledger_id),
+                            .cancel_dormant_queued_units_for_ledgers_scoped(
+                                std::slice::from_ref(&lid_owned),
                                 &exempt_jobs,
+                                include_metadata,
                                 "superseded_by_manual_probe",
                             )
                             .map_err(CreateErr::Store)?
@@ -240,7 +295,7 @@ impl ProbeManager {
                     };
                     let created = store
                         .create_probe_job(
-                            &job_id,
+                            job_id,
                             job_kind,
                             &unit.row.file.media_id.to_string(),
                             single_season_opt(&unit.row),
@@ -254,40 +309,49 @@ impl ProbeManager {
                     Ok(cancelled)
                 })
             });
-        let cancelled = match outcome {
-            Ok(cancelled) => cancelled,
-            Err(CreateErr::Conflict) => return Ok((false, None)),
-            Err(CreateErr::Store(err)) => return Err(err),
-        };
-        self.finish_superseding_cancelled_units(&cancelled);
-        self.mark_job_paused_exempt(job_id.clone());
-        unit.job_id = Some(job_id.clone());
+        match outcome {
+            Ok(cancelled) => Ok(Some(cancelled)),
+            Err(CreateErr::Conflict) => Ok(None),
+            Err(CreateErr::Store(err)) => Err(err),
+        }
+    }
 
-        if !self.should_defer_remote_dispatch(&unit.row.file.path)
-            && self.try_insert_seen(ledger_id.clone(), job_id.clone())
+    #[allow(clippy::too_many_arguments)]
+    fn dispatch_single_episode_marker_job(
+        &self,
+        unit: ProbeUnit,
+        ledger_id: &str,
+        job_id: &str,
+        job_kind: &str,
+        media_duration_ms: Option<i64>,
+        source_version: String,
+        duration_secs: u32,
+    ) {
+        if self.should_defer_remote_dispatch(&unit.row.file.path)
+            || !self.try_insert_seen(ledger_id.to_string(), job_id.to_string())
         {
-            if job_kind == "fingerprint_probe" {
-                let id = store::ProbeDispatchId {
-                    job_id: job_id.clone(),
-                    ledger_id: ledger_id.clone(),
-                    stage: store::ProbeDispatchStage::Fingerprint,
-                };
-                let work = probe::FingerprintWork {
-                    unit,
-                    media_duration_ms: cached_meta.and_then(|v| v.format_duration_ms),
-                    source_version: actual_version,
-                    duration_secs: sample_duration_secs,
-                    start_job: true,
-                };
-                if self.dispatch_fingerprint_work(id, work).is_err() {
-                    self.remove_seen_if_job(&ledger_id, &job_id);
-                    self.wake.notify_waiters();
-                }
-            } else if self.queue_metadata(unit).is_err() {
-                self.remove_seen_if_job(&ledger_id, &job_id);
+            return;
+        }
+        if job_kind == "fingerprint_probe" {
+            let id = store::ProbeDispatchId {
+                job_id: job_id.to_string(),
+                ledger_id: ledger_id.to_string(),
+                stage: store::ProbeDispatchStage::Fingerprint,
+            };
+            let work = probe::FingerprintWork {
+                unit,
+                media_duration_ms,
+                source_version,
+                duration_secs,
+                start_job: true,
+            };
+            if self.dispatch_fingerprint_work(id, work).is_err() {
+                self.remove_seen_if_job(ledger_id, job_id);
                 self.wake.notify_waiters();
             }
+        } else if self.queue_metadata(unit).is_err() {
+            self.remove_seen_if_job(ledger_id, job_id);
+            self.wake.notify_waiters();
         }
-        Ok((true, Some(job_id)))
     }
 }

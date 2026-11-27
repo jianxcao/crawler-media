@@ -113,7 +113,8 @@ pub fn verify_template_window_with_chapters(
             .map(|dur| dur > 0 && target.capture.window.duration_ms() >= dur)
             .unwrap_or(false);
 
-    let is_complete_pcm = crate::boundary::evidence::complete_pcm(&target.capture);
+    let is_complete_pcm =
+        crate::boundary::evidence::complete_eof_pcm(&target.capture, target.duration_ms);
 
     // "Successfully no match" may only be concluded when every applicable template completed
     // its comparison without candidates on a complete PCM full window.
@@ -327,7 +328,9 @@ fn collect_reference_matches(
         };
         // Bounded reference context may support a candidate, but cannot establish
         // definitive absence in a whole window with missing PCM.
-        if segs.is_empty() && !crate::boundary::evidence::complete_pcm(&ref_ev.capture) {
+        if segs.is_empty()
+            && !crate::boundary::evidence::complete_eof_pcm(&ref_ev.capture, ref_ev.duration_ms)
+        {
             unusable_reference = true;
             continue;
         }
@@ -435,10 +438,14 @@ fn build_clusters<'a>(
                 .filter(|k| (mask & (1 << k)) != 0)
                 .map(|k| &candidates[k])
                 .collect();
-            let min_start = subset.iter().map(|c| c.target_start).min().unwrap();
-            let max_start = subset.iter().map(|c| c.target_start).max().unwrap();
-            let min_end = subset.iter().map(|c| c.target_end).min().unwrap();
-            let max_end = subset.iter().map(|c| c.target_end).max().unwrap();
+            let (Some(min_start), Some(max_start), Some(min_end), Some(max_end)) = (
+                subset.iter().map(|c| c.target_start).min(),
+                subset.iter().map(|c| c.target_start).max(),
+                subset.iter().map(|c| c.target_end).min(),
+                subset.iter().map(|c| c.target_end).max(),
+            ) else {
+                continue;
+            };
             if max_start - min_start <= policy.max_reference_boundary_delta_ms
                 && max_end - min_end <= policy.max_reference_boundary_delta_ms
             {
@@ -503,10 +510,14 @@ fn ensure_cluster_consensus_is_unambiguous(
         if (best_avg - average_score(other)).abs() > 1e-6 {
             continue;
         }
-        let start1 = best_cluster.iter().map(|c| c.target_start).min().unwrap();
-        let end1 = best_cluster.iter().map(|c| c.target_end).max().unwrap();
-        let start2 = other.iter().map(|c| c.target_start).min().unwrap();
-        let end2 = other.iter().map(|c| c.target_end).max().unwrap();
+        let (Some(start1), Some(end1), Some(start2), Some(end2)) = (
+            best_cluster.iter().map(|c| c.target_start).min(),
+            best_cluster.iter().map(|c| c.target_end).max(),
+            other.iter().map(|c| c.target_start).min(),
+            other.iter().map(|c| c.target_end).max(),
+        ) else {
+            continue;
+        };
         if (start1 - start2).abs() > policy.max_reference_boundary_delta_ms
             || (end1 - end2).abs() > policy.max_reference_boundary_delta_ms
         {

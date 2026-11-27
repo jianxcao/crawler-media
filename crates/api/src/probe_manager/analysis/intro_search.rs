@@ -44,6 +44,12 @@ pub(super) fn name(kind: SegmentKind) -> &'static str {
         SegmentKind::Outro => "outro",
     }
 }
+pub(in crate::probe_manager) fn complete_or_clean_eof_pcm(
+    capture: &marker::CapturedFingerprint,
+    duration_ms: Option<i64>,
+) -> bool {
+    marker::boundary::evidence::complete_eof_pcm(capture, duration_ms)
+}
 pub(super) fn eligible(evidence: &marker::EpisodeEvidence) -> bool {
     let capture = &evidence.capture;
     matches!(capture.metrics.time_mapping_version, 3 | 4)
@@ -59,7 +65,7 @@ pub(super) fn eligible(evidence: &marker::EpisodeEvidence) -> bool {
                         && start - capture.window.start_ms
                             <= marker::boundary::evidence::MAX_START_PACKET_SKEW_MS
                 })
-                && marker::boundary::evidence::complete_pcm(capture)
+                && complete_or_clean_eof_pcm(capture, evidence.duration_ms)
         } else {
             marker::boundary::evidence::capture_origin_covers_request_start(capture)
                 && capture

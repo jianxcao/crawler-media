@@ -69,12 +69,17 @@ pub fn normalize_capture_interval(
     relative: Interval,
 ) -> Result<Interval, String> {
     if capture.metrics.time_mapping_version != 4 {
-        let skew = capture
-            .metrics
-            .contiguous_pcm_start_ms
-            .map(|start| start.saturating_sub(capture.window.start_ms).max(0))
-            .unwrap_or(0);
-        let shifted = if skew > 0 && skew <= super::evidence::MAX_START_PACKET_SKEW_MS {
+        capture
+            .window
+            .validate()
+            .map_err(|error| error.to_string())?;
+        if relative.start_ms < 0 || relative.end_ms <= relative.start_ms {
+            return Err("relative interval is outside the actual capture window".into());
+        }
+        let origin =
+            super::evidence::valid_v3_origin(capture).ok_or("unproven or skewed capture origin")?;
+        let skew = origin - capture.window.start_ms;
+        let shifted = if skew > 0 {
             Interval {
                 start_ms: relative
                     .start_ms

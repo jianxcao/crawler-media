@@ -3,7 +3,8 @@ use rusty_chromaprint::{Configuration, Segment, match_fingerprints};
 use crate::types::CommonSegment;
 
 const MAX_ADJACENT_SCORE_DELTA: f64 = 4.0;
-const MAX_BRIDGE_GAP_ITEMS: usize = 24;
+const MAX_BRIDGE_WEAK_ITEMS: usize = 16;
+const MAX_RAW_BRIDGE_GAP_ITEMS: usize = 24;
 const MIN_BRIDGE_FLANK_ITEMS: usize = 40;
 const STUDIO_BUMPER_MAX_SECS: f32 = 6.0;
 const FULL_THEME_MIN_QUERY_SECS: f32 = 10.0;
@@ -79,6 +80,10 @@ pub(super) fn compare_fingerprints(
         policy.max_score,
         max_duration_secs,
     );
+    let merged_max_secs = merged
+        .iter()
+        .map(|segment| segment.duration(&config))
+        .fold(raw_max_secs, f32::max);
     let mut candidates = merged
         .into_iter()
         .map(|segment| CommonSegment {
@@ -106,7 +111,9 @@ pub(super) fn compare_fingerprints(
     });
     let candidates = deduplicate_candidates(candidates);
     if candidates.is_empty() {
-        if min_duration_secs >= FULL_THEME_MIN_QUERY_SECS && raw_max_secs < STUDIO_BUMPER_MAX_SECS {
+        if min_duration_secs >= FULL_THEME_MIN_QUERY_SECS
+            && merged_max_secs < STUDIO_BUMPER_MAX_SECS
+        {
             PairFingerprintDecision::NoMatch
         } else {
             PairFingerprintDecision::Uncertain("native_candidates_rejected".into())
@@ -214,6 +221,37 @@ fn same_occurrence(left: (f32, f32), right: (f32, f32)) -> bool {
     overlap / shorter >= 0.9
 }
 
+fn has_sustained_weak_run(slice1: &[u32], slice2: &[u32], max_score: f64, limit: usize) -> bool {
+    let mut consecutive = 0usize;
+    for (a, b) in slice1.iter().zip(slice2) {
+        if (a ^ b).count_ones() as f64 > max_score {
+            consecutive += 1;
+            if consecutive >= limit {
+                return true;
+            }
+        } else {
+            consecutive = 0;
+        }
+    }
+    false
+}
+
+// Chromaprint's gradient peak detector erodes ~3 matching items on each side of a spike,
+// so measure the true non-matching gap span (capped at <= 16 items, ~2.0s).
+fn effective_weak_gap_items(gap1: &[u32], gap2: &[u32], max_score: f64) -> usize {
+    let mut first_weak = None;
+    let mut last_weak = 0usize;
+    for (idx, (a, b)) in gap1.iter().zip(gap2).enumerate() {
+        if (a ^ b).count_ones() as f64 > max_score {
+            if first_weak.is_none() {
+                first_weak = Some(idx);
+            }
+            last_weak = idx;
+        }
+    }
+    first_weak.map_or(0, |start| last_weak - start + 1)
+}
+
 fn merge_adjacent_segments(
     mut segments: Vec<Segment>,
     first: &[u32],
@@ -222,7 +260,13 @@ fn merge_adjacent_segments(
     max_score: f64,
     max_duration_secs: f32,
 ) -> Vec<Segment> {
-    segments.sort_by_key(|segment| (segment.offset1, segment.offset2));
+    segments.sort_by_key(|segment| {
+        (
+            segment.offset2 as isize - segment.offset1 as isize,
+            segment.offset1,
+            segment.offset2,
+        )
+    });
     let mut merged: Vec<Segment> = Vec::with_capacity(segments.len());
 
     for segment in segments {
@@ -252,7 +296,7 @@ fn merge_adjacent_segments(
             continue;
         }
         let can_bridge = gap1 == gap2
-            && gap1 <= MAX_BRIDGE_GAP_ITEMS
+            && gap1 <= MAX_RAW_BRIDGE_GAP_ITEMS
             && previous.items_count >= MIN_BRIDGE_FLANK_ITEMS
             && segment.items_count >= MIN_BRIDGE_FLANK_ITEMS
             && previous.score <= 2.5
@@ -273,17 +317,29 @@ fn merge_adjacent_segments(
             merged.push(segment);
             continue;
         }
-        let (Some(left_flank), Some(right_flank), Some(slice1), Some(slice2)) = (
+        let (
+            Some(left_flank),
+            Some(right_flank),
+            Some(gap_slice1),
+            Some(gap_slice2),
+            Some(slice1),
+            Some(slice2),
+        ) = (
             first.get(previous.offset1..end1),
             first.get(segment.offset1..segment.offset1 + segment.items_count),
+            first.get(end1..segment.offset1),
+            second.get(end2..segment.offset2),
             first.get(previous.offset1..previous.offset1 + new_count),
             second.get(previous.offset2..previous.offset2 + new_count),
-        ) else {
+        )
+        else {
             merged.push(segment);
             continue;
         };
-        if crate::adaptive::model::is_constant_or_silent(left_flank)
+        if effective_weak_gap_items(gap_slice1, gap_slice2, max_score) > MAX_BRIDGE_WEAK_ITEMS
+            || crate::adaptive::model::is_constant_or_silent(left_flank)
             || crate::adaptive::model::is_constant_or_silent(right_flank)
+            || has_sustained_weak_run(slice1, slice2, max_score, MAX_BRIDGE_WEAK_ITEMS)
         {
             merged.push(segment);
             continue;

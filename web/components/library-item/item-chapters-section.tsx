@@ -13,6 +13,7 @@ export function ItemChaptersSection({
   mediaItemId,
   seasons = [],
   isTv,
+  supportsMarkers = true,
   canManageLibraries,
   chapterTarget,
   chapters,
@@ -24,12 +25,14 @@ export function ItemChaptersSection({
   onRefreshChapters,
   onRegenerateChapters,
   onProbeMedia,
+  onMarkersChanged,
   onPlayChapter,
 }: {
   libraryId?: string;
   mediaItemId?: string;
   seasons?: number[];
   isTv: boolean;
+  supportsMarkers?: boolean;
   canManageLibraries: boolean;
   chapterTarget: ChapterTarget | null;
   chapters: ItemChapter[];
@@ -41,6 +44,7 @@ export function ItemChaptersSection({
   onRefreshChapters: () => void;
   onRegenerateChapters: () => void;
   onProbeMedia: () => void;
+  onMarkersChanged?: () => void;
   onPlayChapter: (chapter: { start_ms: number }) => void;
 }) {
   const [markerPanelOpen, setMarkerPanelOpen] = useState(false);
@@ -51,9 +55,10 @@ export function ItemChaptersSection({
         <h3 className="text-sub font-semibold text-white/70">章节与片头片尾</h3>
         {canManageLibraries && (
           <div className="flex flex-wrap items-center gap-1.5 text-micro">
-            {isTv && libraryId && mediaItemId && (
+            {supportsMarkers && libraryId && mediaItemId && (
               <button
                 type="button"
+                aria-expanded={markerPanelOpen}
                 onClick={() => setMarkerPanelOpen((open) => !open)}
                 className="rounded-md border border-sky-400/25 bg-sky-500/10 px-2.5 py-1 text-sky-200 transition hover:bg-sky-500/20"
               >
@@ -127,14 +132,16 @@ export function ItemChaptersSection({
         resumeMs={resumeMs}
         onPlay={onPlayChapter}
       />
-      {canManageLibraries && isTv && markerPanelOpen && libraryId && mediaItemId && (
+      {canManageLibraries && supportsMarkers && markerPanelOpen && libraryId && mediaItemId && (
         <MarkerControlPanel
           libraryId={libraryId}
           mediaItemId={mediaItemId}
           seasons={seasons}
+          isTv={isTv}
           selectedSeason={chapterTarget?.season}
           selectedEpisode={chapterTarget?.episode}
           selectedFileId={chapterTarget?.file_id}
+          onChanged={onMarkersChanged}
         />
       )}
       {chapterError && <p className="mt-2 text-caption text-amber-300/80">{chapterError}</p>}

@@ -71,6 +71,15 @@ impl Store {
         self.with_library_read(|db| db.list_recent_library_fingerprint_attempts(library_id, limit))
     }
 
+    pub fn list_season_fingerprint_attempts(
+        &self,
+        media_id: domain::MediaId,
+        season: u32,
+        limit: usize,
+    ) -> Result<Vec<StoredFingerprintAttempt>, StoreError> {
+        self.with_library_read(|db| db.list_season_fingerprint_attempts(media_id, season, limit))
+    }
+
     pub fn get_fingerprint_attempt(
         &self,
         attempt_id: &str,

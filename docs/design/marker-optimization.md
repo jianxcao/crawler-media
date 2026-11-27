@@ -82,7 +82,7 @@ adaptive Intro 搜索窗口为 `[0,180]`、`[120,420]`、`[300,600]` 秒，并�
 
 ## 缓存与计算复用
 
-远程读取默认并发 1、间隔 500ms，媒体信息默认单 worker，声纹检测默认单 worker 且拥有独立的并发准入（1–8）、暂停开关与单元级子进程取消控制（`probe.fingerprint`）。管理员可以通过[探测设置](../api-contracts/probe-settings.md)分别调整媒体信息并发、声纹并发、远程读取并发和间隔，或在作品详情页按季/单集选择 `reuse_valid`、`recapture`、`theintrodb_only` 模式及人工精修锁定时间戳；保存后对后续任务生效，降低并发不打断活动读取。已知流元数据的远程非零起点声纹采集将输入探测预算收敛至 `2s / 1MB` 以降低 HTTP 预读开销，Adaptive 窗口规划根据近期真实采集耗时与回退率动态计算 `SourceCostSummary`。默认提速依靠复用有效证据、缩小窗口和减少重复分析；真实远程验收沿用默认限速，除非用户明确授权调整。
+远程读取默认并发 1、间隔 500ms，媒体信息默认单 worker，声纹检测默认单 worker 且拥有独立的并发准入（1–8）、暂停开关与按库/条目/季/文件粒度的子进程取消控制（`probe.fingerprint`）。管理员可以通过[探测设置](../api-contracts/probe-settings.md)分别调整媒体信息并发、声纹并发、远程读取并发和间隔，或在作品详情页针对 TV 按季/单集选择 `reuse_valid`、`recapture`、`theintrodb_only` 模式、针对电影（`UnitKey::WHOLE`）执行 `theintrodb_only` 云端同步，以及人工精修、锁定或解锁（`locked: false`）片头片尾时间戳；保存后对后续任务生效，降低并发不打断活动读取。已知流元数据的远程非零起点声纹采集将输入探测预算收敛至 `2s / 2MB`（`-analyzeduration 2000000 -probesize 2000000`）以降低 HTTP 预读开销并兼顾高码率头部解析，Adaptive 窗口规划根据当前季近期真实采集耗时（扣除首包延迟 `time_to_first_pcm_ms` 后计算流式解码速率）与回退率动态计算 `SourceCostSummary`。默认提速依靠复用有效证据、缩小窗口和减少重复分析；真实远程验收沿用默认限速，除非用户明确授权调整。
 
 采样缓存身份包含文件/源、音轨、PCM/算法 profile、精确窗口和时间映射；分析阈值属于独立政策。热缓存重分析应能只做本地工作，手动 refresh 不等于无条件重新远程采集。
 

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState, type MutableRefObject } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type MutableRefObject } from "react";
 
 import {
   fetchChapterFrameStatus,
@@ -214,6 +214,11 @@ export function useItemChaptersAndProbe({
 
   const handleProbeMedia = () => itemProbe.current?.run();
 
+  const reloadChaptersAndFrames = useCallback(() => {
+    setChapterDiscovery((value) => value + 1);
+    void chapterSession.current?.discover();
+  }, []);
+
   return {
     chapterTarget,
     chapters,
@@ -223,6 +228,7 @@ export function useItemChaptersAndProbe({
     probing,
     regenerateChapters,
     forceRefreshChaptersAndMarkers,
+    reloadChaptersAndFrames,
     handleProbeMedia,
   };
 }

@@ -230,6 +230,71 @@ impl crate::LibraryConnection<'_> {
         Ok(rows)
     }
 
+    pub fn list_season_fingerprint_attempts(
+        &self,
+        media_id: domain::MediaId,
+        season: u32,
+        limit: usize,
+    ) -> Result<Vec<StoredFingerprintAttempt>, StoreError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let file_ids: Vec<String> = {
+            let mut stmt = self.library.prepare(
+                "SELECT DISTINCT u.file_id
+                 FROM library_file_units u
+                 WHERE u.media_id = ?1 AND u.season = ?2
+                 ORDER BY u.episode DESC, u.file_id DESC
+                 LIMIT 64",
+            )?;
+            stmt.query_map(params![media_id.to_string(), i64::from(season)], |row| {
+                row.get(0)
+            })?
+            .collect::<Result<Vec<_>, _>>()?
+        };
+        if file_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut all = Vec::new();
+        let mut stmt = self.library.prepare(
+            "SELECT attempt_id, job_id, file_id, kind, window_start_ms,
+                    window_end_ms, phase, started_at_ms, finished_at_ms,
+                    status, error_kind, metrics_json
+             FROM fingerprint_attempts INDEXED BY attempts_file
+             WHERE file_id = ?1 AND status IN ('succeeded', 'failed')",
+        )?;
+        for fid in &file_ids {
+            let rows = stmt.query_map([fid], |row| {
+                Ok(StoredFingerprintAttempt {
+                    attempt_id: row.get(0)?,
+                    job_id: row.get(1)?,
+                    ledger_id: row.get(2)?,
+                    kind: row.get(3)?,
+                    window_start_ms: row.get(4)?,
+                    window_end_ms: row.get(5)?,
+                    phase: row.get(6)?,
+                    started_at_ms: row.get(7)?,
+                    finished_at_ms: row.get(8)?,
+                    status: row.get(9)?,
+                    error_kind: row.get(10)?,
+                    metrics_json: row.get(11)?,
+                })
+            })?;
+            for row in rows {
+                all.push(row?);
+            }
+        }
+        all.sort_by(|a, b| {
+            a.started_at_ms
+                .cmp(&b.started_at_ms)
+                .then_with(|| a.attempt_id.cmp(&b.attempt_id))
+        });
+        if all.len() > limit {
+            all.drain(..all.len() - limit);
+        }
+        Ok(all)
+    }
+
     pub fn get_fingerprint_attempt(
         &self,
         attempt_id: &str,

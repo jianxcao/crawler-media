@@ -46,6 +46,7 @@ export interface FingerprintCancelOptions {
   library_id?: string;
   media_id?: string;
   season?: number;
+  file_id?: string;
   include_running?: boolean;
 }
 

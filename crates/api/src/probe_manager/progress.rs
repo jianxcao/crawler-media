@@ -12,6 +12,7 @@ pub struct MetadataPriorityGate {
     metadata_pending: Arc<AtomicUsize>,
     metadata_idle: Arc<Notify>,
     shutting_down: Arc<std::sync::atomic::AtomicBool>,
+    remote_reads_wait_stopped: Arc<std::sync::atomic::AtomicBool>,
     store: Arc<crate::Store>,
     registry: Option<Arc<crate::library_lifecycle::LibraryWorkRegistry>>,
     kind: crate::library_lifecycle::LibraryWorkKind,
@@ -25,6 +26,7 @@ impl MetadataPriorityGate {
             metadata_pending: manager.metadata_pending.clone(),
             metadata_idle: manager.metadata_idle.clone(),
             shutting_down: manager.shutting_down.clone(),
+            remote_reads_wait_stopped: manager.remote_reads_wait_stopped.clone(),
             store: manager.store.clone(),
             registry: manager.library_work.lock().clone(),
             kind: crate::library_lifecycle::LibraryWorkKind::AutomaticDetection,
@@ -38,6 +40,7 @@ impl MetadataPriorityGate {
             metadata_pending: manager.metadata_pending.clone(),
             metadata_idle: manager.metadata_idle.clone(),
             shutting_down: manager.shutting_down.clone(),
+            remote_reads_wait_stopped: manager.remote_reads_wait_stopped.clone(),
             store: manager.store.clone(),
             registry: manager.library_work.lock().clone(),
             kind: crate::library_lifecycle::LibraryWorkKind::AutomaticDetection,
@@ -217,7 +220,9 @@ impl CaptureGate for MetadataPriorityGate {
         };
         if self.registry.is_none() {
             return attach_abort(
-                marker::WorkControl::default().with_read_stop(self.shutting_down.clone()),
+                marker::WorkControl::default()
+                    .with_read_stop(self.shutting_down.clone())
+                    .with_read_stop(self.remote_reads_wait_stopped.clone()),
             );
         }
         let owner = crate::fingerprint_job::source::ensure_source_recorded(&self.store, row)
@@ -229,7 +234,12 @@ impl CaptureGate for MetadataPriorityGate {
             && let Some((original, control)) = owners.get(&row.file.file_id.to_string())
             && owner.as_ref().is_some_and(|owner| owner == original)
         {
-            return attach_abort(control.clone().with_read_stop(self.shutting_down.clone()));
+            return attach_abort(
+                control
+                    .clone()
+                    .with_read_stop(self.shutting_down.clone())
+                    .with_read_stop(self.remote_reads_wait_stopped.clone()),
+            );
         }
         let cancelled = marker::WorkControl::default();
         cancelled.cancel();

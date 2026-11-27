@@ -14,7 +14,10 @@ pub const MAX_START_PACKET_SKEW_MS: i64 = 50;
 /// Maximum audio-shorter-than-video container tail skew admitted on clean FFmpeg EOF.
 pub const MAX_EOF_AUDIO_SHORTFALL_MS: i64 = 500;
 
-fn valid_v3_origin(capture: &CapturedFingerprint) -> Option<i64> {
+pub(super) fn valid_v3_origin(capture: &CapturedFingerprint) -> Option<i64> {
+    if matches!(capture.metrics.pcm_timeline, crate::PcmTimeline::Invalid(_)) {
+        return None;
+    }
     if capture.metrics.time_mapping_version < 3 {
         match capture.metrics.contiguous_pcm_start_ms {
             Some(start)
@@ -59,6 +62,21 @@ pub fn complete_pcm(capture: &CapturedFingerprint) -> bool {
                 .and_then(|end| end.checked_add(20))
                 .is_some_and(|end| end >= capture.window.end_ms)
     })
+}
+
+pub fn complete_eof_pcm(capture: &CapturedFingerprint, duration_ms: Option<i64>) -> bool {
+    complete_pcm(capture)
+        || (capture.metrics.time_mapping_version != 4
+            && capture.metrics.ffmpeg_exit_code == Some(0)
+            && capture.window.validate().is_ok()
+            && capture.window.duration_ms() >= 10_000
+            && duration_ms.is_some_and(|d| {
+                d > 0
+                    && capture.window.end_ms >= d
+                    && candidate_pcm_coverage(capture).is_some_and(|cov| {
+                        cov.end_ms.saturating_add(MAX_EOF_AUDIO_SHORTFALL_MS) >= d
+                    })
+            }))
 }
 
 /// Coverage on the existing normalized capture timeline. Complete captures retain
@@ -215,26 +233,22 @@ fn audio_boundaries(
     if frame_ms <= 0 || frame_ms != policy.pcm_frame_ms || policy.transition_window_ms <= 0 {
         return None;
     }
+    let origin = if capture.metrics.time_mapping_version == 4 {
+        let (min, max) = super::mapping::quantized_origin(capture)?;
+        i64::try_from((min + max).div_euclid(2000)).ok()?
+    } else {
+        valid_v3_origin(capture)?
+    };
     let frames = &capture.metrics.pcm_rms_dbfs_milli;
     let transitions = transition_points(frames, frame_ms, policy);
-    let start = unique_boundary(
-        &transitions,
-        candidate.start_ms,
-        capture.window.start_ms,
-        policy,
-    );
-    let end = unique_boundary(
-        &transitions,
-        candidate.end_ms,
-        capture.window.start_ms,
-        policy,
-    );
+    let start = unique_boundary(&transitions, candidate.start_ms, origin, policy);
+    let end = unique_boundary(&transitions, candidate.end_ms, origin, policy);
     start.zip(end).and_then(|(start_ms, end_ms)| {
         super::normalize_capture_interval(
             capture,
             Interval {
-                start_ms: start_ms - capture.window.start_ms,
-                end_ms: end_ms - capture.window.start_ms,
+                start_ms: start_ms.checked_sub(origin)?,
+                end_ms: end_ms.checked_sub(origin)?,
             },
         )
         .ok()

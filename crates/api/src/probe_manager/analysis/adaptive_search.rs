@@ -428,7 +428,7 @@ fn full_tail_no_match(
                             SegmentKind::Outro,
                             policy,
                         )
-                    && marker::boundary::evidence::complete_pcm(&evidence.capture)
+                    && intro_search::complete_or_clean_eof_pcm(&evidence.capture, Some(duration))
             })
     })
 }

@@ -44,20 +44,20 @@ pub(super) fn prepare(bytes: &[u8], source: &CaptureSourceFacts) -> Result<Proof
     if !(3..=16_384).contains(&packets.len()) {
         return Err("packet proof outside bounded capacity".into());
     }
-    validate_frames(&packets, &frames, source, stream)?;
+    let (resolved_skip, resolved_discard) = resolve_padding(&packets, stream)?;
+    validate_frames(&packets, &frames, source, rate, resolved_skip)?;
     let mut proof = Proof {
         rate,
         adts: Vec::new(),
         packets: packets.len() as u64,
         anchors: 0,
-        skip: 0,
-        discard: 0,
+        skip: resolved_skip,
+        discard: resolved_discard,
         phase_min: i128::MIN,
         phase_max: i128::MAX,
         payload_sha256: String::new(),
     };
     let mut last_pos = None;
-    let mut leading_priming = true;
     let mut hash = Sha256::new();
     for (index, packet) in packets.iter().enumerate() {
         let pos = number(packet, "pos")?;
@@ -78,23 +78,6 @@ pub(super) fn prepare(bytes: &[u8], source: &CaptureSourceFacts) -> Result<Proof
             proof.anchors += 1;
             last_pos = Some(pos);
         }
-        let (skip, discard) = padding(packet)?;
-        let valid_skip = if skip == 0 {
-            leading_priming = false;
-            true
-        } else if leading_priming && index < 4 && skip <= 1024 && proof.skip + skip <= 4096 {
-            if skip < 1024 {
-                leading_priming = false;
-            }
-            true
-        } else {
-            false
-        };
-        if !valid_skip || (discard > 0 && index + 1 != packets.len()) || discard >= 1024 {
-            return Err("unsupported interior padding".into());
-        }
-        proof.skip += skip;
-        proof.discard += discard;
         let payload = hex(packet["data"].as_str().ok_or("missing encoded payload")?)?;
         if payload.len() != number(packet, "size")? as usize
             || payload.is_empty()
@@ -167,7 +150,7 @@ fn validate_stream(
             && asc.starts_with(&config)
             && asc[2] == 0x56
             && asc[3] == 0xe5
-            && (asc[4] & 0x80) == 0
+            && asc[4] == 0
             && asc[5..].iter().all(|&b| b == 0));
     if !valid_asc {
         return Err("unsupported AudioSpecificConfig".into());
@@ -175,12 +158,50 @@ fn validate_stream(
     Ok(rate)
 }
 
+fn resolve_padding(packets: &[&Value], stream: &Value) -> Result<(u64, u64), String> {
+    let mut skip_total = 0u64;
+    let mut discard_total = 0u64;
+    let mut leading_priming = true;
+    for (index, packet) in packets.iter().enumerate() {
+        let (skip, discard) = padding(packet)?;
+        let valid_skip = if skip == 0 {
+            leading_priming = false;
+            true
+        } else if index == 0 && skip <= 4096 {
+            if skip != 1024 {
+                leading_priming = false;
+            }
+            true
+        } else if leading_priming && index < 4 && skip <= 1024 && skip_total + skip <= 4096 {
+            if skip < 1024 {
+                leading_priming = false;
+            }
+            true
+        } else {
+            false
+        };
+        if !valid_skip || (discard > 0 && index + 1 != packets.len()) || discard >= 1024 {
+            return Err("unsupported interior padding".into());
+        }
+        skip_total += skip;
+        discard_total += discard;
+    }
+    let init_pad = stream["initial_padding"].as_u64().unwrap_or(0);
+    if skip_total == 0 && init_pad > 0 && init_pad <= 4096 {
+        skip_total = init_pad;
+    }
+    Ok((skip_total, discard_total))
+}
+
 fn validate_frames(
     packets: &[&Value],
     frames: &[(&Value, usize)],
     source: &CaptureSourceFacts,
-    stream: &Value,
+    rate: u32,
+    total_skip: u64,
 ) -> Result<(), String> {
+    let primed_packets = (total_skip / 1024) as usize;
+    let first_frame_trim = total_skip % 1024;
     let mut next = 0;
     for (frame, seen) in frames {
         if frame["stream_index"].as_u64() != Some(u64::from(source.audio_stream_index)) {
@@ -196,22 +217,26 @@ fn validate_frames(
             return Err("ambiguous packet/frame association".into());
         }
         let index = matches[0];
-        if index != next {
-            let init_pad = stream["initial_padding"].as_u64().unwrap_or(0);
-            let all_primed = next == 0
-                && index <= 4
-                && (0..index).all(|p| {
-                    padding(packets[p]).is_ok_and(|(s, _)| s == 1024)
-                        || init_pad >= ((p as u64 + 1) * 1024)
-                });
-            if !all_primed {
-                return Err("unobserved decoded access unit".into());
-            }
+        let expected_index = if next == 0 { primed_packets } else { next };
+        if index != expected_index {
+            return Err("unobserved decoded access unit".into());
         }
-        let (skip, discard) = padding(packets[index])?;
-        if frame["nb_samples"].as_u64() != 1024u64.checked_sub(skip + discard)
-            || number(frame, "pts")? != number(packets[index], "pts")?
-        {
+        let (_, discard) = padding(packets[index])?;
+        let trim = if index == primed_packets {
+            first_frame_trim
+        } else {
+            0
+        };
+        let pkt_pts = number(packets[index], "pts")?;
+        let frame_pts = number(frame, "pts")?;
+        let min_adv = ((trim * 1000) / u64::from(rate)) as i64;
+        let max_adv = ((trim * 1000 + u64::from(rate) - 1) / u64::from(rate)) as i64;
+        let valid_pts = frame_pts == pkt_pts
+            || (trim > 0
+                && frame_pts
+                    .checked_sub(pkt_pts)
+                    .is_some_and(|adv| adv >= min_adv && adv <= max_adv));
+        if frame["nb_samples"].as_u64() != 1024u64.checked_sub(trim + discard) || !valid_pts {
             return Err("AAC native sample observation mismatch".into());
         }
         next = index + 1;

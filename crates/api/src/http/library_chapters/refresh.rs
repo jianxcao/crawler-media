@@ -191,7 +191,7 @@ fn enqueue_season_refresh(
     season: u32,
     capture_policy: crate::fingerprint_job::CapturePolicy,
 ) -> (bool, usize, bool) {
-    let season_probe_was_active = !state.probe.background_is_paused()
+    let season_probe_was_active = !state.probe.fingerprint_dispatch_paused()
         && fingerprint_rows
             .iter()
             .any(|candidate| state.probe.is_queued(&candidate.file.file_id.to_string()));

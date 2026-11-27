@@ -268,6 +268,7 @@ export function LibraryItemDetailView({
           mediaItemId={detail.media_item_id}
           seasons={detail.seasons}
           isTv={detail.kind === "tv"}
+          supportsMarkers={detail.kind === "tv" || detail.kind === "movie"}
           canManageLibraries={c.canManageLibraries}
           chapterTarget={c.chapterTarget}
           chapters={c.chapters}
@@ -279,6 +280,7 @@ export function LibraryItemDetailView({
           onRefreshChapters={() => void c.forceRefreshChaptersAndMarkers("reuse_valid")}
           onRegenerateChapters={() => void c.regenerateChapters()}
           onProbeMedia={() => void c.handleProbeMedia()}
+          onMarkersChanged={c.reloadChaptersAndFrames}
           onPlayChapter={(chapter) => {
             rememberPlayerReturnPath(window.location.pathname + window.location.search);
             c.navigate(

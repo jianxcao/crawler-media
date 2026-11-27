@@ -9,11 +9,11 @@ struct Segment {
 }
 
 #[derive(Debug, Deserialize)]
-struct EpisodeSegments {
+struct MediaSegments {
     #[serde(rename = "type")]
     media_type: String,
-    season: u32,
-    episode: u32,
+    season: Option<u32>,
+    episode: Option<u32>,
     group_duration_ms: Option<i64>,
     #[serde(default)]
     intro: Vec<Segment>,
@@ -133,11 +133,28 @@ impl TheIntroDbClient {
         episode: u32,
         duration_ms: Option<i64>,
     ) -> Result<Option<MarkerResult>, LookupError> {
+        self.get_markers_inner(tmdb_id, Some((season, episode)), duration_ms)
+    }
+
+    pub fn get_movie_markers(
+        &self,
+        tmdb_id: &str,
+        duration_ms: Option<i64>,
+    ) -> Result<Option<MarkerResult>, LookupError> {
+        self.get_markers_inner(tmdb_id, None, duration_ms)
+    }
+
+    fn get_markers_inner(
+        &self,
+        tmdb_id: &str,
+        episode_coords: Option<(u32, u32)>,
+        duration_ms: Option<i64>,
+    ) -> Result<Option<MarkerResult>, LookupError> {
         let url = format!("{}/media", self.base_url.trim_end_matches('/'));
         tracing::info!(
             tmdb_id,
-            season,
-            episode,
+            season = episode_coords.map(|(s, _)| s),
+            episode = episode_coords.map(|(_, e)| e),
             duration_ms,
             "【片头片尾】查询 TheIntroDB v4 云端时间戳"
         );
@@ -148,11 +165,14 @@ impl TheIntroDbClient {
                 .http_status_as_error(false)
                 .build()
                 .query("tmdb_id", tmdb_id)
-                .query("season", season.to_string())
-                .query("episode", episode.to_string())
                 .query("details", "true")
                 .query("merge_unknown", "false")
                 .header("Accept", "application/json");
+            if let Some((season, episode)) = episode_coords {
+                request = request
+                    .query("season", season.to_string())
+                    .query("episode", episode.to_string());
+            }
             if let Some(duration) = duration_ms.filter(|duration| *duration > 0) {
                 request = request.query("duration_ms", duration.to_string());
             }
@@ -185,10 +205,10 @@ impl TheIntroDbClient {
                     Some("no_submissions") => {
                         tracing::info!(
                             tmdb_id,
-                            season,
-                            episode,
+                            season = episode_coords.map(|(s, _)| s),
+                            episode = episode_coords.map(|(_, e)| e),
                             code = "no_submissions",
-                            "【片头片尾】TheIntroDB 尚无该集提交"
+                            "【片头片尾】TheIntroDB 尚无该条目提交"
                         );
                         return Ok(None);
                     }
@@ -200,8 +220,20 @@ impl TheIntroDbClient {
             return Err(LookupError::Http(status));
         }
         let body = resp.into_body().read_to_vec()?;
-        let response: EpisodeSegments = serde_json::from_slice(&body)?;
-        if response.media_type != "tv" || response.season != season || response.episode != episode {
+        let response: MediaSegments = serde_json::from_slice(&body)?;
+        let coords_valid = match episode_coords {
+            Some((season, episode)) => {
+                response.media_type == "tv"
+                    && response.season == Some(season)
+                    && response.episode == Some(episode)
+            }
+            None => {
+                response.media_type == "movie"
+                    && response.season.is_none()
+                    && response.episode.is_none()
+            }
+        };
+        if !coords_valid {
             return Err(LookupError::Coordinates);
         }
         let intro = single_range(&response.intro, false)?;

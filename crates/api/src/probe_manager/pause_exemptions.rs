@@ -221,6 +221,51 @@ impl ProbeManager {
         self.promoted_units.lock().clear();
     }
 
+    pub(super) fn retain_fingerprint_exemptions_on_background_resume(&self) {
+        let checked = self.paused_exempt_job_ids();
+        let mut drop_jobs = Vec::new();
+        for job_id in checked {
+            match self.store.get_probe_job(&job_id) {
+                Ok(Some(job)) if job.is_active() => {
+                    let keep = matches!(job.kind.as_str(), "fingerprint_probe" | "marker_refresh")
+                        || self
+                            .store
+                            .probe_job_units(&job_id)
+                            .map(|units| units.iter().any(|u| u.force_fingerprint))
+                            .unwrap_or(true);
+                    if !keep {
+                        drop_jobs.push(job_id);
+                    }
+                }
+                Ok(_) => drop_jobs.push(job_id),
+                Err(_) => {}
+            }
+        }
+        if !drop_jobs.is_empty() {
+            let mut guard = self
+                .paused_exempt_jobs
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            for job_id in &drop_jobs {
+                guard.remove(job_id);
+            }
+        }
+        let unit_pairs = self.paused_exempt_unit_pairs();
+        for (job_id, lid) in unit_pairs {
+            let keep = match self.store.active_probe_unit_for_ledger(&lid) {
+                Ok(Some(u)) if u.job_id == job_id => {
+                    u.force_fingerprint || u.stage != store::ProbeDispatchStage::Metadata
+                }
+                Ok(_) => false,
+                Err(_) => true,
+            };
+            if !keep {
+                self.unmark_unit_paused_exempt(&job_id, &lid);
+                self.unmark_unit_promoted(&job_id, &lid);
+            }
+        }
+    }
+
     pub(super) fn finish_superseding_cancelled_units(&self, cancelled: &[(String, String)]) {
         if cancelled.is_empty() {
             return;

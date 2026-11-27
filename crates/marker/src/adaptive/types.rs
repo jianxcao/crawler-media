@@ -178,7 +178,11 @@ impl SourceCostSummary {
                 if let Some(first_pcm) = obs.time_to_first_pcm_ms {
                     first_pcms.push(first_pcm);
                 }
-                let rate = (obs.window_duration_ms as f64 / obs.elapsed_ms as f64).max(0.01);
+                let decode_ms = obs
+                    .elapsed_ms
+                    .saturating_sub(obs.time_to_first_pcm_ms.unwrap_or(0))
+                    .max(1);
+                let rate = (obs.window_duration_ms as f64 / decode_ms as f64).max(0.01);
                 if rate.is_finite() {
                     rates.push(rate);
                 }

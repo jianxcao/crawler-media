@@ -47,13 +47,12 @@ async fn save_and_apply(
     let raw = serde_json::to_string(&settings).map_err(|e| store_error(e.into()))?;
     let probe = state.probe.clone();
     super::store_wait::store_write(state, move |store| {
-        let saved = store.writers().with_app(|app| {
-            app.put_setting(crate::settings_keys::PROBE_FINGERPRINT, &raw)?;
-            probe.apply_fingerprint_settings(settings);
-            Ok(())
-        });
+        let saved = store
+            .writers()
+            .with_app(|app| app.put_setting(crate::settings_keys::PROBE_FINGERPRINT, &raw));
         match saved {
             Ok(()) => {
+                probe.apply_fingerprint_settings(settings);
                 tracing::info!(?settings, "片头片尾声纹队列设置已保存并生效");
                 ok(json!(settings)).into_response()
             }
@@ -66,23 +65,28 @@ async fn save_and_apply(
 async fn update_paused(state: &ApiState, paused: bool) -> Result<(), Response> {
     let probe = state.probe.clone();
     super::store_wait::store_write(state, move |store| {
-        let current = FingerprintProbeSettings::load(store).unwrap_or_default();
-        let next = FingerprintProbeSettings {
-            workers: current.workers,
-            paused,
-        };
-        let raw = match serde_json::to_string(&next) {
-            Ok(raw) => raw,
-            Err(error) => return Err(store_error(error.into())),
-        };
-        store
+        let next = store
             .writers()
             .with_app(|app| {
+                let current = match app.get_setting(crate::settings_keys::PROBE_FINGERPRINT)? {
+                    Some(raw) => {
+                        let parsed = serde_json::from_str::<FingerprintProbeSettings>(&raw)?;
+                        parsed.validate().map_err(store::StoreError::Invalid)?;
+                        parsed
+                    }
+                    None => FingerprintProbeSettings::default(),
+                };
+                let next = FingerprintProbeSettings {
+                    workers: current.workers,
+                    paused,
+                };
+                let raw = serde_json::to_string(&next)?;
                 app.put_setting(crate::settings_keys::PROBE_FINGERPRINT, &raw)?;
-                probe.apply_fingerprint_settings(next);
-                Ok(())
+                Ok(next)
             })
-            .map_err(store_error)
+            .map_err(store_error)?;
+        probe.apply_fingerprint_settings(next);
+        Ok(())
     })
     .await?
 }
@@ -144,6 +148,7 @@ struct CancelFingerprintRequest {
     library_id: Option<String>,
     media_id: Option<String>,
     season: Option<u32>,
+    file_id: Option<String>,
     include_running: Option<bool>,
 }
 
@@ -170,11 +175,13 @@ pub(crate) async fn cancel(State(state): State<ApiState>, body: Bytes) -> Respon
         library_id: clean(parsed.library_id),
         media_id: clean(parsed.media_id),
         season: parsed.season,
+        file_id: clean(parsed.file_id),
         include_running: parsed.include_running.unwrap_or(true),
     };
-    let global_cancel =
-        scope.library_id.is_none() && scope.media_id.is_none() && scope.season.is_none();
-    let aborted_running = state.probe.abort_matching_active_fingerprints(&scope);
+    let global_cancel = scope.library_id.is_none()
+        && scope.media_id.is_none()
+        && scope.season.is_none()
+        && scope.file_id.is_none();
     let worker = state.clone();
     let result = state
         .http_work
@@ -182,16 +189,20 @@ pub(crate) async fn cancel(State(state): State<ApiState>, body: Bytes) -> Respon
             let outcome = super::store_wait::with_foreground_store(&worker, |store| {
                 store.library_write(|db| db.cancel_fingerprint_probe_work(&scope, "manual_cancel"))
             });
+            let mut aborted_running = 0;
             if let Ok(Ok(summary)) = &outcome {
+                aborted_running = worker
+                    .probe
+                    .abort_matching_active_fingerprints(&scope, &summary.cancelled_file_ids);
                 worker
                     .probe
                     .purge_cancelled_fingerprint(summary, global_cancel);
             }
-            outcome
+            (outcome, aborted_running)
         })
         .await;
     match result {
-        Ok(Ok(Ok(summary))) => {
+        Ok((Ok(Ok(summary)), aborted_running)) => {
             tracing::info!(
                 cancelled_units = summary.cancelled_units,
                 aborted_running,
@@ -204,8 +215,8 @@ pub(crate) async fn cancel(State(state): State<ApiState>, body: Bytes) -> Respon
             }))
             .into_response()
         }
-        Ok(Ok(Err(error))) => store_error(error),
-        Ok(Err(response)) => response,
+        Ok((Ok(Err(error)), _)) => store_error(error),
+        Ok((Err(response), _)) => response,
         Err(crate::blocking_budget::BlockingError::Busy) => super::store_wait::busy_response(),
         Err(error) => super::store_wait::StoreCallError::Worker(error.to_string()).response(),
     }

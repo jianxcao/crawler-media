@@ -20,7 +20,7 @@ use marker::{FingerprintEngine, PairFingerprintDecision, ProbeTarget, WorkContro
 fn remote_known_stream_seek_uses_compact_probe_budget_while_unknown_keeps_10mb() {
     let remote = ProbeTarget::Remote("https://storage.example/series/s01e01.mkv".into());
 
-    // Known stream interior/tail seek (start_ms > 0) uses 2s / 1MB probe budget instead of 10s / 10MB.
+    // Known stream interior/tail seek (start_ms > 0) uses 2s / 2MB probe budget instead of 10s / 10MB.
     let mut seek_cmd = Command::new("ffmpeg");
     seek_cmd.env("HTTP_PROXY", "http://127.0.0.1:7890");
     remote.apply_ffmpeg_input_known_stream_seek_ms(&mut seek_cmd, 1_320_000);
@@ -44,7 +44,7 @@ fn remote_known_stream_seek_uses_compact_probe_budget_while_unknown_keeps_10mb()
         .expect("-http_proxy present");
 
     assert_eq!(args[analyze_idx + 1], "2000000");
-    assert_eq!(args[probesize_idx + 1], "1000000");
+    assert_eq!(args[probesize_idx + 1], "2000000");
     assert_eq!(args[ss_idx + 1], "1320");
     assert_eq!(args[proxy_idx + 1], "");
     assert!(
@@ -251,7 +251,11 @@ fn source_cost_summary_derives_medians_and_disables_unstable_fast_path() {
     assert_eq!(summary.measured_samples, 7);
     assert_eq!(summary.median_first_pcm_ms, Some(400));
     let rate = summary.sample_ms_per_wall_ms.expect("rate computed");
-    assert!((19.9..=20.1).contains(&rate), "median rate got {rate}");
+    // Median streaming decode rate subtracts time_to_first_pcm_ms: 100_000 / (5_000 - 380) ≈ 21.645
+    assert!(
+        (21.6..=21.7).contains(&rate),
+        "median streaming rate must subtract startup latency h, got {rate}"
+    );
     assert_eq!(summary.recent_fast_attempts, 5);
     assert_eq!(summary.recent_fallbacks, 3);
 
@@ -292,5 +296,21 @@ fn source_cost_summary_derives_medians_and_disables_unstable_fast_path() {
     assert!(
         matches!(decision, WindowDecision::Full { ref reason, .. } if reason == "fast_path_disabled_unstable"),
         "expected fast_path_disabled_unstable, got {decision:?}"
+    );
+}
+
+#[test]
+fn source_cost_summary_subtracts_first_pcm_latency_from_streaming_rate() {
+    let remote_startup = SourceCostSummary::from_observations(&[AttemptCostObservation {
+        phase: "full_window".into(),
+        succeeded: true,
+        window_duration_ms: 100_000,
+        elapsed_ms: 5_000,
+        time_to_first_pcm_ms: Some(4_000),
+    }]);
+    let startup_rate = remote_startup.sample_ms_per_wall_ms.unwrap();
+    assert!(
+        (99.9..=100.1).contains(&startup_rate),
+        "expected 100_000 / (5_000 - 4_000) = 100.0, got {startup_rate}"
     );
 }

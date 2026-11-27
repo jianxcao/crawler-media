@@ -1,15 +1,33 @@
 //! Shared cancellation signal for media child processes; no API dependencies.
 use std::sync::{
-    Arc,
+    Arc, Mutex,
     atomic::{AtomicBool, Ordering},
 };
 
-#[derive(Clone, Default, Debug)]
+#[derive(Clone, Debug)]
 pub struct WorkControl {
     cancelled: Arc<AtomicBool>,
     ancestors: Vec<Arc<AtomicBool>>,
-    publication: Arc<std::sync::Mutex<()>>,
-    read_stop: Option<Arc<AtomicBool>>,
+    publications: Arc<[Arc<Mutex<()>>]>,
+    read_stops: Arc<[Arc<AtomicBool>]>,
+}
+
+impl Default for WorkControl {
+    fn default() -> Self {
+        Self {
+            cancelled: Arc::new(AtomicBool::new(false)),
+            ancestors: Vec::new(),
+            publications: Arc::from([Arc::new(Mutex::new(()))]),
+            read_stops: Arc::from([]),
+        }
+    }
+}
+
+fn merge_sorted_arcs<T>(first: &[Arc<T>], second: &[Arc<T>]) -> Arc<[Arc<T>]> {
+    let mut merged: Vec<Arc<T>> = first.iter().chain(second.iter()).cloned().collect();
+    merged.sort_by_key(|item| Arc::as_ptr(item) as usize);
+    merged.dedup_by(|a, b| Arc::ptr_eq(a, b));
+    Arc::from(merged)
 }
 
 impl WorkControl {
@@ -18,51 +36,80 @@ impl WorkControl {
     pub fn linked_child(&self) -> Self {
         let mut ancestors = Vec::with_capacity(self.ancestors.len() + 1);
         ancestors.extend(self.ancestors.iter().cloned());
-        ancestors.push(self.cancelled.clone());
+        if !ancestors
+            .iter()
+            .any(|flag| Arc::ptr_eq(flag, &self.cancelled))
+        {
+            ancestors.push(self.cancelled.clone());
+        }
         Self {
             cancelled: Arc::new(AtomicBool::new(false)),
             ancestors,
-            publication: self.publication.clone(),
-            read_stop: self.read_stop.clone(),
+            publications: self.publications.clone(),
+            read_stops: self.read_stops.clone(),
         }
     }
 
     /// Combine another cancellation signal so cancelling either aborts this child.
     pub fn with_linked_abort(&self, other: &Self) -> Self {
         let mut child = self.linked_child();
-        child.ancestors.extend(other.ancestors.iter().cloned());
-        child.ancestors.push(other.cancelled.clone());
+        for flag in other
+            .ancestors
+            .iter()
+            .chain(std::iter::once(&other.cancelled))
+        {
+            if !child
+                .ancestors
+                .iter()
+                .any(|existing| Arc::ptr_eq(existing, flag))
+            {
+                child.ancestors.push(flag.clone());
+            }
+        }
+        child.publications = merge_sorted_arcs(&self.publications, &other.publications);
+        child.read_stops = merge_sorted_arcs(&self.read_stops, &other.read_stops);
         child
     }
 
     /// Stop waiting for admission without interrupting an admitted read.
     pub fn with_read_stop(mut self, stop: Arc<AtomicBool>) -> Self {
-        self.read_stop = Some(stop);
+        self.read_stops = merge_sorted_arcs(&self.read_stops, &[stop]);
         self
     }
 
+    pub fn should_stop_read_wait(&self) -> bool {
+        self.is_cancelled() || self.read_wait_stopped()
+    }
+
     pub(crate) fn read_wait_stopped(&self) -> bool {
-        self.read_stop
-            .as_ref()
-            .is_some_and(|stop| stop.load(Ordering::Acquire))
+        self.read_stops
+            .iter()
+            .any(|stop| stop.load(Ordering::Acquire))
     }
 
     pub fn cancel(&self) {
-        let _guard = self
-            .publication
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
+        let _guards: Vec<_> = self
+            .publications
+            .iter()
+            .map(|gate| gate.lock().unwrap_or_else(|poison| poison.into_inner()))
+            .collect();
         self.cancelled.store(true, Ordering::Release);
     }
+
     pub fn publish<T>(&self, publish: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
-        let _guard = self
-            .publication
-            .lock()
-            .map_err(|_| "publication gate poisoned".to_string())?;
+        let mut guards = Vec::with_capacity(self.publications.len());
+        for gate in self.publications.iter() {
+            guards.push(
+                gate.lock()
+                    .map_err(|_| "publication gate poisoned".to_string())?,
+            );
+        }
         if self.is_cancelled() {
             return Err("Library work cancelled".into());
         }
-        publish()
+        let result = publish();
+        drop(guards);
+        result
     }
     pub fn is_cancelled(&self) -> bool {
         self.cancelled.load(Ordering::Acquire)

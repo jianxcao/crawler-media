@@ -126,6 +126,7 @@ impl ProbeManager {
             Store(crate::store::StoreError),
         }
         let paused = self.fingerprint_dispatch_paused();
+        let include_metadata = self.background_is_paused();
         let exempt_jobs = if paused {
             self.paused_exempt_jobs_for_ledgers(ledger_ids)
         } else {
@@ -137,9 +138,10 @@ impl ProbeManager {
                 store.with_write_tx(RefreshPersistErr::Store, |store| {
                     let cancelled = if paused {
                         store
-                            .cancel_dormant_queued_units_for_ledgers(
+                            .cancel_dormant_queued_units_for_ledgers_scoped(
                                 ledger_ids,
                                 &exempt_jobs,
+                                include_metadata,
                                 "superseded_by_manual_probe",
                             )
                             .map_err(RefreshPersistErr::Store)?
@@ -280,6 +282,7 @@ impl ProbeManager {
         admitted: impl FnOnce() -> Result<(), ProbeEnqueueError>,
     ) -> Result<(), ProbeEnqueueError> {
         let paused = self.fingerprint_dispatch_paused();
+        let include_metadata = self.background_is_paused();
         let target_ids: Vec<String> = batches
             .iter()
             .flat_map(|batch| {
@@ -309,9 +312,10 @@ impl ProbeManager {
                 store.with_write_tx(map_store_err, |store| {
                     let cancelled = if paused {
                         store
-                            .cancel_dormant_queued_units_for_ledgers(
+                            .cancel_dormant_queued_units_for_ledgers_scoped(
                                 &target_ids,
                                 &exempt_jobs,
+                                include_metadata,
                                 "superseded_by_manual_probe",
                             )
                             .map_err(map_store_err)?

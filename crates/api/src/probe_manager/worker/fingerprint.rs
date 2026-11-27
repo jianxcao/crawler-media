@@ -29,21 +29,42 @@ impl Drop for ActiveFingerprintGuard {
     }
 }
 
-async fn fingerprint_permit(manager: &Arc<ProbeManager>) -> Option<FingerprintPermit> {
+enum PermitOutcome {
+    Acquired(FingerprintPermit),
+    Skipped,
+    Shutdown,
+}
+
+async fn fingerprint_permit(
+    manager: &Arc<ProbeManager>,
+    id: &store::ProbeDispatchId,
+) -> PermitOutcome {
     loop {
+        if manager.fingerprint_dispatch_paused()
+            && !manager.is_dispatch_paused_exempt(&id.job_id, &id.ledger_id)
+        {
+            return PermitOutcome::Skipped;
+        }
+        if !manager.has_seen(&id.ledger_id) {
+            return PermitOutcome::Skipped;
+        }
         let available = manager.fingerprint_capacity.notified();
         tokio::pin!(available);
         available.as_mut().enable();
+        let woken = manager.wake.notified();
+        tokio::pin!(woken);
+        woken.as_mut().enable();
         {
             let mut admission = manager.fingerprint_admission.lock();
             if admission.active < admission.limit {
                 admission.active += 1;
-                return Some(FingerprintPermit(manager.clone()));
+                return PermitOutcome::Acquired(FingerprintPermit(manager.clone()));
             }
         }
         tokio::select! {
-            _ = wait_for_shutdown(manager) => return None,
+            _ = wait_for_shutdown(manager) => return PermitOutcome::Shutdown,
             _ = available => {}
+            _ = woken => {}
         }
     }
 }
@@ -60,6 +81,9 @@ async fn next_fingerprint_work(
             _ = wait_for_shutdown(manager) => return None,
             guard = manager.fingerprint_receiver.lock() => guard,
         };
+        let woken = manager.wake.notified();
+        tokio::pin!(woken);
+        woken.as_mut().enable();
         let message = {
             let mut rx = manager.fingerprint_rx.lock().take();
             let message = match rx.as_mut() {
@@ -67,12 +91,14 @@ async fn next_fingerprint_work(
                     let received = tokio::select! {
                         _ = wait_for_shutdown(manager) => Some(None),
                         message = receiver.recv() => Some(message),
+                        _ = &mut woken => None,
                         _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => None,
                     };
                     match received {
                         Some(message) => message,
                         None => {
                             *manager.fingerprint_rx.lock() = rx;
+                            tokio::task::yield_now().await;
                             continue;
                         }
                     }
@@ -91,7 +117,14 @@ async fn next_fingerprint_work(
             manager.remove_seen_if_job(&id.ledger_id, &id.job_id);
             continue;
         }
-        let permit = fingerprint_permit(manager).await?;
+        let permit = match fingerprint_permit(manager, &id).await {
+            PermitOutcome::Acquired(permit) => permit,
+            PermitOutcome::Skipped => {
+                manager.remove_seen_if_job(&id.ledger_id, &id.job_id);
+                continue;
+            }
+            PermitOutcome::Shutdown => return None,
+        };
         if manager.fingerprint_dispatch_paused()
             && !manager.is_dispatch_paused_exempt(&id.job_id, &id.ledger_id)
         {
@@ -133,32 +166,6 @@ async fn process_fingerprint(
 ) -> Option<bool> {
     let owns_running = work.start_job;
     let unit = work.unit.clone();
-    let ready = step(manager, {
-        let unit = unit.clone();
-        move |manager| {
-            let ledger_id = unit.row.file.file_id.to_string();
-            if let Some(job_id) = unit.job_id.as_deref()
-                && manager.fingerprint_dispatch_paused()
-                && !manager.is_dispatch_paused_exempt(job_id, &ledger_id)
-            {
-                manager.remove_seen_if_job(&ledger_id, job_id);
-                return Err(());
-            }
-            Ok(source_ready(manager, &unit)
-                && (!work.start_job
-                    || start_persisted_unit(
-                        manager,
-                        &unit,
-                        store::ProbeDispatchStage::Fingerprint,
-                    )))
-        }
-    })
-    .await;
-    match ready {
-        Ok(Ok(true)) => {}
-        Ok(Err(())) => return None,
-        Ok(Ok(false)) | Err(_) => return Some(false),
-    }
     let leased = step(manager, {
         let unit = unit.clone();
         move |manager| {
@@ -180,9 +187,9 @@ async fn process_fingerprint(
                 })
                 .await;
             }
-            return Some(owns_running);
+            return Some(false);
         }
-        Err(_) => return Some(owns_running),
+        Err(_) => return Some(false),
     };
     let owner = unit.row.file.library_id.to_string();
     let base_control = _refresh_leases
@@ -207,6 +214,38 @@ async fn process_fingerprint(
             ledger_id,
         }
     });
+    let ready = step(manager, {
+        let unit = unit.clone();
+        move |manager| {
+            let ledger_id = unit.row.file.file_id.to_string();
+            if let Some(job_id) = unit.job_id.as_deref()
+                && manager.fingerprint_dispatch_paused()
+                && !manager.is_dispatch_paused_exempt(job_id, &ledger_id)
+            {
+                manager.remove_seen_if_job(&ledger_id, job_id);
+                return Err(());
+            }
+            Ok(source_ready(manager, &unit)
+                && (!work.start_job
+                    || start_persisted_unit(
+                        manager,
+                        &unit,
+                        store::ProbeDispatchStage::Fingerprint,
+                    )))
+        }
+    })
+    .await;
+    match ready {
+        Ok(Ok(true)) => {}
+        Ok(Err(())) => {
+            drop(active_guard);
+            return None;
+        }
+        Ok(Ok(false)) | Err(_) => {
+            drop(active_guard);
+            return Some(false);
+        }
+    }
     let runtime = tokio::runtime::Handle::current();
     let outcome = match step(manager, move |manager| {
         runtime.block_on(probe::probe_fingerprint_detailed(manager, &work, &control))

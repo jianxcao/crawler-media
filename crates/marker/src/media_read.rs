@@ -103,9 +103,12 @@ impl MediaReadGate {
                 tracing::debug!(path = %path.display(), "Remote media read cancelled while waiting");
                 return Err("Library work cancelled".into());
             }
-            if state.shutting_down || state.paused || control.read_wait_stopped() {
+            if state.shutting_down || state.paused || control.should_stop_read_wait() {
                 state.waiting.retain(|waiting| *waiting != ticket);
                 self.changed.notify_all();
+                if control.is_cancelled() {
+                    return Err("Library work cancelled".into());
+                }
                 return Err(READ_WAIT_STOPPED.into());
             }
             let now = Instant::now();

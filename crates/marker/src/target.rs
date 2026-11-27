@@ -108,7 +108,7 @@ impl ProbeTarget {
                 disable_proxy_environment(cmd);
                 let ua = active_probe_ua();
                 let (analyze_us, probe_bytes) = if known_stream && start_ms > 0 {
-                    ("2000000", "1000000")
+                    ("2000000", "2000000")
                 } else {
                     ("10000000", "10000000")
                 };

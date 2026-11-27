@@ -483,4 +483,252 @@ fn adaptive_model_clusters_across_distinct_windows_using_absolute_coordinates() 
         models[0].is_stable,
         "cluster spanning ep1+ep2+ep3 across w1/w2 must be stable (3 unique episodes)"
     );
+    assert_eq!(
+        models[0].references.len(),
+        3,
+        "TemplateModel.references must deduplicate per episode: {:?}",
+        models[0].references
+    );
+    assert_eq!(
+        models[0].references[0].sample_id, "ep1-w1",
+        "episode 1 must keep ep1-w1 (min guard 20s) over ep1-w2 (min guard 10s)"
+    );
+}
+
+#[test]
+fn normalized_origin_rejects_sub_ms_sample_drift_and_exact_origin_non_ms_pts() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let run_case = |origin_us: i64, first_pts: i64| -> Option<i64> {
+        let prog = dir.path().join(format!("dec_{origin_us}_{first_pts}"));
+        let stderr_line = format!(
+            "[ashowinfo@cm_timeline @ 0x1] n:0 pts:{first_pts} pts_time:0 fmt:s16 channels:1 chlayout:mono rate:16000 nb_samples:160000 checksum:1\\n"
+        );
+        let script = format!(
+            "#!/usr/bin/env python3\nimport sys\nsys.stderr.write(\"{stderr_line}\")\nsys.stdout.buffer.write(bytes(range(256))*1250)\n"
+        );
+        std::fs::write(&prog, script).unwrap();
+        std::fs::set_permissions(&prog, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let facts = CaptureSourceFacts {
+            audio_stream_index: 0,
+            format_start_time_us: Some(origin_us),
+            stream_start_pts: Some(0),
+            stream_time_base: Some("1/16000".into()),
+            codec_name: None,
+            native_sample_rate: None,
+            audio_channels: None,
+            provenance: "fixture".into(),
+        };
+        marker::fingerprint::capture::capture_from_source(
+            &CaptureRequest {
+                path: dir.path().join("src"),
+                window: SampleWindow::new(0, 10_000),
+                audio_stream_index: Some(0),
+                process_deadline_ms: 30_000,
+            },
+            &facts,
+            &WorkControl::default(),
+            prog.as_os_str(),
+        )
+        .unwrap()
+        .metrics
+        .contiguous_pcm_start_ms
+    };
+
+    assert_eq!(run_case(0, 0), Some(0));
+    assert_eq!(
+        run_case(0, 1),
+        None,
+        "exact ms origin must have 0 sample tolerance"
+    );
+    assert_eq!(
+        run_case(21_333, 341),
+        Some(0),
+        "floor 16kHz sample must pass"
+    );
+    assert_eq!(
+        run_case(21_333, 342),
+        Some(0),
+        "ceil 16kHz sample must pass"
+    );
+    assert_eq!(
+        run_case(21_333, 346),
+        None,
+        "5-sample drift (312.5us) on sub-ms origin must be rejected"
+    );
+}
+
+fn build_2112_probe_variant(mka: &Path, out_path: &Path, mode: &str) {
+    let probe_out = Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-threads",
+            "1",
+            "-select_streams",
+            "0",
+            "-read_intervals",
+            "%6.000000",
+            "-show_packets",
+            "-show_frames",
+            "-show_streams",
+            "-show_format",
+            "-show_data",
+            "-show_entries",
+            "packet=stream_index,pts,pos,size,data:packet_side_data=side_data_type,skip_samples,discard_padding:frame=stream_index,pts,pkt_pos,pkt_size,nb_samples:stream=index,codec_name,profile,sample_rate,channels,time_base,extradata,initial_padding:format=format_name,start_time",
+            "-of",
+            "json",
+        ])
+        .arg(mka)
+        .output()
+        .unwrap();
+    assert!(probe_out.status.success());
+    let mut json: serde_json::Value = serde_json::from_slice(&probe_out.stdout).unwrap();
+    json["streams"][0]["initial_padding"] = serde_json::json!(2112);
+    json["streams"][0]["extradata"] = serde_json::json!(if mode == "bad_asc" {
+        "00000000: 1190 56e5 4000 00                        ..V.@..\n"
+    } else {
+        "00000000: 1190 56e5 0000 00                        ..V....\n"
+    });
+    let items = json["packets_and_frames"].as_array_mut().unwrap();
+    let pkt_indices = items
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, item)| (item["type"].as_str() == Some("packet")).then_some(idx))
+        .collect::<Vec<_>>();
+    let pkt0_pos = items[pkt_indices[0]]["pos"].clone();
+    let pkt1_pos = items[pkt_indices[1]]["pos"].clone();
+    let pkt2_pos = items[pkt_indices[2]]["pos"].clone();
+    let pkt2_pts = items[pkt_indices[2]]["pts"].as_i64().unwrap();
+    for &idx in &pkt_indices {
+        items[idx].as_object_mut().unwrap().remove("side_data_list");
+    }
+    if mode != "init_pad_only" {
+        items[pkt_indices[0]]["side_data_list"] = serde_json::json!([{
+            "side_data_type": "Skip Samples",
+            "skip_samples": 2112,
+            "discard_padding": 0
+        }]);
+    }
+    items.retain(|item| {
+        item["type"] != "frame" || (item["pkt_pos"] != pkt0_pos && item["pkt_pos"] != pkt1_pos)
+    });
+    for item in items.iter_mut() {
+        if item["type"] == "frame" && item["pkt_pos"] == pkt2_pos {
+            item["nb_samples"] = serde_json::json!(960);
+            item["pts"] = serde_json::json!(pkt2_pts + 1);
+        }
+    }
+    std::fs::write(out_path, serde_json::to_vec(&json).unwrap()).unwrap();
+}
+
+#[test]
+fn quantized_aac_accepts_single_packet_2112_shifted_pts_and_init_padding_only() {
+    if let Ok(mode) = std::env::var("CM_STEP2_2112_MODE") {
+        let target_mka = std::path::PathBuf::from(std::env::var("CM_STEP2_MKA").unwrap());
+        let source = CaptureSourceFacts {
+            audio_stream_index: 0,
+            format_start_time_us: Some(0),
+            stream_start_pts: Some(0),
+            stream_time_base: Some("1/1000".into()),
+            codec_name: Some("aac".into()),
+            native_sample_rate: Some(48_000),
+            audio_channels: Some(2),
+            provenance: "fixture".into(),
+        };
+        let res = marker::fingerprint::capture::capture_from_source(
+            &CaptureRequest {
+                path: target_mka,
+                window: SampleWindow::new(0, 5_000),
+                audio_stream_index: Some(0),
+                process_deadline_ms: 30_000,
+            },
+            &source,
+            &WorkControl::default(),
+            std::ffi::OsStr::new("ffmpeg"),
+        );
+        if mode == "bad_asc" {
+            let err = res.expect_err("non-zero asc[4] bits must be rejected");
+            assert!(
+                err.message.contains("unsupported AudioSpecificConfig"),
+                "{err}"
+            );
+        } else {
+            let cap = res.unwrap_or_else(|e| panic!("{mode} failed: {e}"));
+            println!("PCM_SHA256={}", cap.metrics.pcm_sha256.unwrap());
+        }
+        return;
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let mka = dir.path().join("primed2112.mka");
+    ff(
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            "anoisesrc=seed=23:sample_rate=48000:duration=8",
+            "-ac",
+            "2",
+            "-c:a",
+            "aac",
+        ],
+        &mka,
+    );
+    let run_child = |mode: &str| -> String {
+        let proof_path = dir.path().join(format!("{mode}.json"));
+        build_2112_probe_variant(&mka, &proof_path, mode);
+        let fake = dir.path().join("ffprobe");
+        std::fs::write(
+            &fake,
+            format!("#!/bin/sh\ncat '{}'\n", proof_path.display()),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let out = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "quantized_aac_accepts_single_packet_2112_shifted_pts_and_init_padding_only",
+                "--nocapture",
+            ])
+            .env("CM_STEP2_2112_MODE", mode)
+            .env("CM_STEP2_MKA", &mka)
+            .env(
+                "PATH",
+                format!(
+                    "{}:{}",
+                    dir.path().display(),
+                    std::env::var("PATH").unwrap()
+                ),
+            )
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{mode} failed: {}\n{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+
+    let out_single = run_child("single_pkt");
+    let out_init = run_child("init_pad_only");
+    let _ = run_child("bad_asc");
+    let sha_single = out_single
+        .lines()
+        .find_map(|l| l.strip_prefix("PCM_SHA256="))
+        .unwrap();
+    let sha_init = out_init
+        .lines()
+        .find_map(|l| l.strip_prefix("PCM_SHA256="))
+        .unwrap();
+    assert_eq!(
+        sha_single, sha_init,
+        "initial_padding fallback must skip the exact same 2112 priming samples in pcm.rs"
+    );
 }

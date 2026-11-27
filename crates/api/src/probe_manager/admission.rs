@@ -234,7 +234,7 @@ impl ProbeManager {
         let ledger_id = unit.row.file.file_id.to_string();
         let job_id = uuid::Uuid::new_v4().to_string();
         self.last_failure.lock().remove(&ledger_id);
-        let paused = self.background_is_paused();
+        let paused = self.fingerprint_dispatch_paused();
         // Same hot-path rule as `enqueue`: never hold `seen` across the Store write.
         if !paused {
             if !self.try_insert_seen(ledger_id.clone(), job_id.clone()) {
@@ -407,7 +407,7 @@ impl ProbeManager {
                 tracing::info!(ledger_id, "源文件已标记缺失，拒绝创建探测任务");
                 return Ok((false, Vec::new()));
             }
-            let paused = supersede_when_paused && self.background_is_paused();
+            let paused = supersede_when_paused && self.fingerprint_dispatch_paused();
             if !paused {
                 let created = store.create_probe_job(
                     job_id,
@@ -419,6 +419,7 @@ impl ProbeManager {
                 )?;
                 return Ok((created, Vec::new()));
             }
+            let include_metadata = self.background_is_paused();
             let exempt_jobs = self.paused_exempt_jobs_for_ledgers(std::slice::from_ref(&ledger_id));
             enum SingleTxErr {
                 Conflict,
@@ -426,9 +427,10 @@ impl ProbeManager {
             }
             match store.with_write_tx(SingleTxErr::Store, |store| {
                 let cancelled = store
-                    .cancel_dormant_queued_units_for_ledgers(
+                    .cancel_dormant_queued_units_for_ledgers_scoped(
                         std::slice::from_ref(&ledger_id),
                         &exempt_jobs,
+                        include_metadata,
                         "superseded_by_manual_probe",
                     )
                     .map_err(SingleTxErr::Store)?;

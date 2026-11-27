@@ -81,10 +81,12 @@ export interface EpisodeMarkerDetection {
   outro: KindDetectionStatus | null;
 }
 
+export type MarkerJobSummary = ProbeJobStatus;
+
 export interface SeasonEpisodeMarkerRow {
   file_id: string;
-  season: number;
-  episode: number;
+  season: number | null;
+  episode: number | null;
   duration_ms: number | null;
   multi_unit: boolean;
   marker: StoredEpisodeMarker | null;
@@ -92,14 +94,16 @@ export interface SeasonEpisodeMarkerRow {
 }
 
 export interface SeasonMarkersDiagnostics {
-  season: number;
+  media_id: string;
+  season: number | null;
   active: boolean;
-  job: ProbeJobStatus | null;
+  paused: boolean;
+  job: MarkerJobSummary | null;
   episodes: SeasonEpisodeMarkerRow[];
 }
 
 export interface DetectItemMarkersInput {
-  season: number;
+  season?: number;
   episode?: number;
   file_id?: string;
   mode: MarkerDetectMode;
@@ -107,19 +111,20 @@ export interface DetectItemMarkersInput {
 
 export interface DetectItemMarkersReceipt {
   queued: boolean;
-  already_running?: boolean;
+  already_running: boolean;
   skipped_multi_unit: number;
-  job?: ProbeJobStatus | null;
+  updated_episodes?: number;
+  job: MarkerJobSummary | null;
 }
 
 export interface ManualMarkerInput {
   file_id: string;
-  season: number;
-  episode: number;
-  intro_start_ms: number | null;
-  intro_end_ms: number | null;
-  outro_start_ms: number | null;
-  outro_end_ms: number | null;
+  season?: number | null;
+  episode?: number | null;
+  intro_start_ms?: number | null;
+  intro_end_ms?: number | null;
+  outro_start_ms?: number | null;
+  outro_end_ms?: number | null;
   locked: boolean;
 }
 
@@ -239,10 +244,11 @@ export async function fetchItemSimilar(
 export async function fetchSeasonMarkers(
   libraryId: string,
   mediaItemId: string,
-  season: number,
+  season?: number | null,
   signal?: AbortSignal,
 ): Promise<SeasonMarkersDiagnostics> {
-  const path = `/libraries/${libraryId}/items/${mediaItemId}/markers?${new URLSearchParams({ season: String(season) })}`;
+  const query = season != null ? `?${new URLSearchParams({ season: String(season) })}` : "";
+  const path = `/libraries/${libraryId}/items/${mediaItemId}/markers${query}`;
   return unwrap(request<ApiEnvelope<SeasonMarkersDiagnostics>>(path, { signal }));
 }
 
@@ -277,16 +283,16 @@ export async function saveManualMarker(
 export async function deleteManualMarker(
   libraryId: string,
   mediaItemId: string,
-  target: { file_id: string; season: number; episode: number },
+  target: { file_id: string; season?: number | null; episode?: number | null },
   signal?: AbortSignal,
-): Promise<void> {
-  const query = new URLSearchParams({
-    file_id: target.file_id,
-    season: String(target.season),
-    episode: String(target.episode),
-  });
-  await request<ApiEnvelope<unknown>>(
-    `/libraries/${libraryId}/items/${mediaItemId}/markers?${query}`,
-    { method: "DELETE", signal },
+): Promise<{ deleted: boolean }> {
+  const query = new URLSearchParams({ file_id: target.file_id });
+  if (target.season != null) query.set("season", String(target.season));
+  if (target.episode != null) query.set("episode", String(target.episode));
+  return unwrap(
+    request<ApiEnvelope<{ deleted: boolean }>>(
+      `/libraries/${libraryId}/items/${mediaItemId}/markers?${query}`,
+      { method: "DELETE", signal },
+    ),
   );
 }
