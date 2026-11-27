@@ -1,0 +1,127 @@
+package crawler:plugin@1.0.0;
+
+interface runtime {
+  use types.{context};
+  current-context: func() -> context;
+  cancelled: func() -> bool;
+}
+interface clock { now: func() -> u64; }
+interface config {
+  use types.{api-error, config-view};
+  get: func() -> result<config-view, api-error>;
+}
+interface log {
+  use types.{api-error};
+  enum level { debug, info, warn, error }
+  write: func(level: level, message: string, fields: list<tuple<string, string>>)
+    -> result<_, api-error>;
+}
+interface kv {
+  use types.{api-error, entry, entry-page, page-request};
+  get: func(key: string) -> result<option<entry>, api-error>;
+  %list: func(prefix: string, page: page-request) -> result<entry-page, api-error>;
+  put: func(key: string, value: list<u8>, if-match: option<string>) -> result<string, api-error>;
+  delete: func(key: string, if-match: option<string>) -> result<_, api-error>;
+}
+interface blob {
+  use types.{api-error, entry, entry-page, page-request};
+  get: func(key: string) -> result<entry, api-error>;
+  %list: func(prefix: string, page: page-request) -> result<entry-page, api-error>;
+  put: func(key: string, bytes: list<u8>, if-match: option<string>) -> result<string, api-error>;
+  delete: func(key: string, if-match: option<string>) -> result<_, api-error>;
+}
+interface http {
+  use types.{api-error, http-request, http-response};
+  fetch: func(request: http-request) -> result<http-response, api-error>;
+  fetch-many: func(requests: list<http-request>) -> list<result<http-response, api-error>>;
+}
+interface site {
+  use types.{api-error, site-view, site-page, stats-view, page-request};
+  %list: func(page: page-request) -> result<site-page, api-error>;
+  get: func(handle: string) -> result<site-view, api-error>;
+  stats: func(handle: string) -> result<stats-view, api-error>;
+}
+interface subscribe {
+  use types.{api-error, entity-view, entity-page, page-request};
+  %list: func(page: page-request) -> result<entity-page, api-error>;
+  get: func(handle: string) -> result<entity-view, api-error>;
+}
+interface library {
+  use types.{api-error, entity-page, page-request};
+  %list: func(page: page-request) -> result<entity-page, api-error>;
+  media: func(handle: string, page: page-request) -> result<entity-page, api-error>;
+  files: func(handle: string, page: page-request) -> result<entity-page, api-error>;
+}
+interface download {
+  use types.{api-error, entity-view, entity-page, page-request};
+  %list: func(downloader: string, page: page-request) -> result<entity-page, api-error>;
+  get: func(handle: string) -> result<entity-view, api-error>;
+}
+interface boost {
+  use types.{api-error};
+  record disk { available-bytes: option<u64>, observed-at: u64, status: string }
+  record reservation-view {
+    handle: string, operation-id: string, quota-key: string,
+    downloader-id: string, site-id: option<string>, info-hash: option<string>,
+    reserved-bytes: u64, stage: string, expires-at: option<u64>, revision: u64,
+  }
+  record task-fact-view {
+    handle: string, quota-key: string, downloader-id: string,
+    site-id: option<string>, info-hash: string, state: string,
+    task-bytes: u64, retained-bytes: u64, uploaded-bytes: u64,
+    hr-protected: option<bool>, hold-until: option<u64>, free-until: option<u64>,
+    protection-state: string, transfer-active: bool, library-referenced: bool,
+    observed-at: u64, revision: u64,
+  }
+  record snapshot-view {
+    revision: u64, used-bytes: u64, reserved-bytes: u64, retained-file-bytes: u64,
+    reservations: list<reservation-view>, tasks: list<task-fact-view>, disk: disk,
+  }
+  snapshot: func(sites: list<string>, downloaders: list<string>) -> result<snapshot-view, api-error>;
+}
+interface history {
+  use types.{api-error, entity-page, page-request};
+  query: func(kind: string, handles: list<string>, %from: u64, until: u64, page: page-request)
+    -> result<entity-page, api-error>;
+}
+interface catalog {
+  use types.{api-error, media-reference};
+  lookup: func(identity: string) -> result<media-reference, api-error>;
+}
+interface indexer-cache {
+  use types.{api-error, torrent-batch, page-request};
+  cached: func(operation-id: string, page: page-request) -> result<torrent-batch, api-error>;
+}
+interface operations {
+  use types.{api-error, operation-view, operation-page, page-request};
+  get: func(id: string) -> result<operation-view, api-error>;
+  %list: func(page: page-request) -> result<operation-page, api-error>;
+}
+interface commands {
+  use types.{api-error, command-request, accepted};
+  submit: func(request: command-request) -> result<accepted, api-error>;
+}
+interface notify {
+  use types.{api-error};
+  emit-event: func(event-id: string, channel-ids: list<string>) -> result<string, api-error>;
+}
+interface browser {
+  use types.{api-error, http-response};
+  enum purpose { search, maintenance }
+  record element { handle: string, visible-text: string }
+  variant fill-value { text(string), credential-slot(string) }
+  resource session {
+    navigate: func(site-relative-url: string, wait-until: string) -> result<string, api-error>;
+    dom: func(max-bytes: u32) -> result<string, api-error>;
+    query: func(selector: string, limit: u32) -> result<list<element>, api-error>;
+    text: func(element: string, max-bytes: u32) -> result<string, api-error>;
+    attribute: func(element: string, name: string) -> result<option<string>, api-error>;
+    click: func(element: string) -> result<string, api-error>;
+    fill: func(element: string, value: fill-value) -> result<_, api-error>;
+    wait-for: func(selector: option<string>, condition: string, timeout-ms: u64) -> result<string, api-error>;
+    read-response: func(receipt: string, max-bytes: u32) -> result<http-response, api-error>;
+    capture-session: func() -> result<string, api-error>;
+    close: func() -> result<_, api-error>;
+  }
+  open: func(purpose: purpose) -> result<session, api-error>;
+}

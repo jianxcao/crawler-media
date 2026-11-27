@@ -5,6 +5,7 @@ members = [
     "crates/domain",
     "crates/store",
     "crates/indexer",
+    "crates/net-guard",
     "crates/media",
     "crates/downloader",
     "crates/library",
@@ -12,6 +13,7 @@ members = [
     "crates/filter",
     "crates/release",
     "crates/hooks",
+    "crates/plugin-api",
     "crates/jobs",
     "crates/api",
     "crates/playback",
@@ -26,10 +28,15 @@ edition = "2024"
 license = "MIT"
 
 [workspace.dependencies]
+plugin-api = { path = "crates/plugin-api" }
+wasmtime = { version = "=50.0.1", default-features = false, features = ["component-model", "cranelift", "runtime", "std", "wat"] }
+wasm-encoder = "=0.261.0"
+wasmparser = "=0.261.0"
 unicode-normalization = "0.1"
 domain = { path = "crates/domain" }
 store = { path = "crates/store" }
 indexer = { path = "crates/indexer" }
+net-guard = { path = "crates/net-guard" }
 media = { path = "crates/media" }
 downloader = { path = "crates/downloader" }
 library = { path = "crates/library" }
@@ -64,6 +71,7 @@ flate2 = "1.0"
 tar = "0.4"
 tracing = "0.1"
 roxmltree = "0.21"
+encoding_rs = "0.8"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "time"] }
 tracing-appender = "0.2"
 sha2 = "0.10"

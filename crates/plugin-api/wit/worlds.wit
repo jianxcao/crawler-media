@@ -1,0 +1,87 @@
+package crawler:plugin@1.0.0;
+
+interface lifecycle {
+  use types.{api-error};
+  variant health-state { healthy, degraded(string) }
+  validate: func(config-schema: string, state-schema: u32) -> result<_, api-error>;
+  health: func() -> result<health-state, api-error>;
+}
+interface hooks {
+  use types.{api-error, filter-input, patch, gate-input, gate-decision, event};
+  filter: func(input: filter-input) -> result<list<patch>, api-error>;
+  gate: func(input: gate-input) -> result<gate-decision, api-error>;
+  notify: func(event: event) -> result<_, api-error>;
+}
+interface indexer {
+  use types.{api-error, descriptor, search-query, torrent-batch, torrent-raw,
+    http-request, stats-view, category};
+  describe: func() -> list<descriptor>;
+  search: func(query: search-query) -> result<torrent-batch, api-error>;
+  rss: func(cursor: option<string>) -> result<torrent-batch, api-error>;
+  detail: func(torrent-ref: string) -> result<torrent-raw, api-error>;
+  resolve-download: func(download-ref: string) -> result<http-request, api-error>;
+  user-stats: func() -> result<stats-view, api-error>;
+  categories: func() -> result<list<category>, api-error>;
+}
+interface maintenance {
+  use types.{api-error, maintenance-action, maintenance-outcome};
+  run: func(action: maintenance-action, job-id: string) -> result<maintenance-outcome, api-error>;
+}
+interface tasks {
+  use types.{api-error, task-input, task-outcome};
+  run: func(input: task-input) -> result<task-outcome, api-error>;
+}
+interface endpoints {
+  use types.{api-error, endpoint-request, endpoint-response};
+  handle: func(request: endpoint-request) -> result<endpoint-response, api-error>;
+}
+interface lists {
+  use types.{api-error, config-view, media-reference-batch};
+  fetch: func(list-id: string, cursor: option<string>, config: config-view)
+    -> result<media-reference-batch, api-error>;
+}
+interface channels {
+  use types.{api-error, message, delivery-outcome};
+  deliver: func(delivery-id: string, message: message) -> result<delivery-outcome, api-error>;
+}
+interface ui {
+  use types.{api-error, status-item};
+  status: func() -> result<list<status-item>, api-error>;
+}
+world base {
+  import runtime; import clock; import config; import log;
+}
+world reads {
+  import kv; import blob; import site; import subscribe; import library;
+  import download; import history; import catalog; import operations;
+}
+world hook-plugin {
+  include base; include reads; import http; import notify;
+  export lifecycle; export hooks;
+}
+world indexer-plugin {
+  include base; include reads; import http; import browser;
+  export lifecycle; export indexer;
+}
+world maintenance-plugin {
+  include base; include reads; import http; import browser;
+  export lifecycle; export maintenance;
+}
+world task-plugin {
+  include base; include reads; import http; import commands;
+  import boost; import indexer-cache;
+  export lifecycle; export tasks;
+}
+world endpoint-plugin {
+  include base; include reads; import http; import commands;
+  import boost; import indexer-cache;
+  export lifecycle; export endpoints;
+}
+world list-plugin {
+  include base; include reads; import http;
+  export lifecycle; export lists;
+}
+world channel-plugin {
+  include base; include reads; import http;
+  export lifecycle; export channels;
+}

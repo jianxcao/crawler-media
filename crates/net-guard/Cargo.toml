@@ -1,0 +1,15 @@
+[package]
+name = "net-guard"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+idna = "1"
+thiserror.workspace = true
+tracing.workspace = true
+ureq = { version = "3.4.1", default-features = false, features = ["rustls", "gzip"] }
+url.workspace = true
+
+[dev-dependencies]
+flate2.workspace = true

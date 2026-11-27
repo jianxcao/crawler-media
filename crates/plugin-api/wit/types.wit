@@ -1,0 +1,235 @@
+package crawler:plugin@1.0.0;
+
+interface types {
+  enum error-code {
+    permission-denied, wrong-context, not-found, invalid-argument,
+    stale-handle, stale-generation, conflict, quota-exceeded, busy,
+    deadline-exceeded, cancelled, unsupported, upstream, unknown-outcome,
+  }
+  enum upstream-kind { auth-expired, rate-limited, challenge, network, parse }
+  variant error-detail {
+    upstream(upstream-kind), blocked-address, body-too-large,
+    browser-isolation-unavailable, unsupported-route,
+  }
+  record api-error {
+    code: error-code, message: string, detail: option<error-detail>,
+    retry-after-ms: option<u64>, operation-id: option<string>,
+  }
+  record context {
+    invocation-id: string, cause-id: string, plugin-id: string,
+    generation: u64, config-revision: u64, subject: string,
+    site-id: option<string>, subscribe-id: option<string>,
+    library-id: option<string>, deadline-ms: u64, cancelled: bool,
+  }
+  record torrent-view {
+    handle: string, site-id: string, title: string, size: option<u64>,
+    seeders: option<u32>, leechers: option<u32>, published-at: option<u64>,
+    free: option<bool>, hr: option<bool>, release: option<string>,
+    score: option<s32>, labels: list<string>, revision: u64,
+  }
+  record site-failure { site-id: string, error: api-error }
+  record search-after {
+    candidates: list<torrent-view>, site-failures: list<site-failure>,
+  }
+  record search-before { query: search-query, site-ids: list<string> }
+  record search-site-after {
+    site-id: string, query: search-query, candidates: list<torrent-view>,
+  }
+  record filter-after {
+    candidates: list<torrent-view>, admitted-handles: list<string>,
+  }
+  record subscribe-score {
+    subscribe-id: string, media-id: string, candidates: list<torrent-view>,
+  }
+  record subscribe-select {
+    subscribe-id: string, media-id: string, candidates: list<torrent-view>,
+    admitted-handles: list<string>,
+  }
+  record download-plan-view {
+    downloader-id: string, relative-directory: option<string>, category: option<string>,
+    tags: list<string>, paused: bool, upload-limit: option<u64>,
+    download-limit: option<u64>, sequential: bool, first-last-piece: bool,
+  }
+  record download-before {
+    candidate: torrent-view, purpose: string, plan: download-plan-view,
+  }
+  record transfer-rename {
+    media-id: string, library-id: string, source-path: string,
+    proposed-relative-path: string, is-movie: bool,
+  }
+  variant filter-payload {
+    search-before(search-before),
+    search-site-after(search-site-after),
+    search-after(search-after),
+    filter-after(filter-after),
+    subscribe-score(subscribe-score),
+    subscribe-select(subscribe-select),
+    download-before(download-before),
+    transfer-rename(transfer-rename),
+  }
+  record filter-input {
+    schema-version: u32, context: context, payload: filter-payload,
+  }
+  record rescore-patch { handle: string, delta: s32, reason: string }
+  record search-query-patch {
+    keyword: option<string>, site-ids: option<list<string>>, categories: option<list<string>>,
+  }
+  record download-plan-patch {
+    downloader-id: option<string>, relative-directory: option<string>,
+    category: option<string>, add-tags: list<string>, remove-tags: list<string>,
+    paused: option<bool>, upload-limit: option<u64>, download-limit: option<u64>,
+    sequential: option<bool>, first-last-piece: option<bool>,
+  }
+  variant patch {
+    drop(string),
+    set-order(list<string>),
+    rescore(rescore-patch),
+    search-query(search-query-patch),
+    select-handles(list<string>),
+    download-plan(download-plan-patch),
+    rename-path(string),
+  }
+  variant gate-payload {
+    none,
+    search-before(search-before),
+    subscribe-select(subscribe-select),
+    download-before(download-before),
+  }
+  record gate-input {
+    schema-version: u32, context: context, hook-id: string,
+    handles: list<string>, revision: u64, payload: gate-payload,
+  }
+  variant gate-decision {
+    allow, abstain, reject(string), defer(tuple<u64, string>),
+  }
+  record download-after-event {
+    operation-id: string, downloader-id: option<string>, info-hash: option<string>,
+    outcome: string, verified-total-bytes: option<u64>,
+  }
+  record transfer-completed-event {
+    media-id: string, library-id: string, relative-path: string,
+    file-count: u32, total-bytes: u64,
+  }
+  record site-checkin-after-event {
+    site-id: string, action: string, state: string, window-key: string,
+  }
+  variant event-payload {
+    none,
+    download-after(download-after-event),
+    transfer-completed(transfer-completed-event),
+    site-checkin-after(site-checkin-after-event),
+  }
+  record event {
+    schema-version: u32, context: context, id: string, kind: string,
+    occurred-at: u64, handles: list<string>, revision: u64, payload: event-payload,
+  }
+  record page-request { cursor: option<string>, limit: u32 }
+  record config-view { revision: u64, validated-json: string }
+  record entry { key: string, value: list<u8>, etag: string }
+  record entry-page { items: list<entry>, next-cursor: option<string> }
+  record entity-view {
+    handle: string, revision: u64, observed-at: u64,
+  }
+  record entity-page { items: list<entity-view>, next-cursor: option<string> }
+  record site-view {
+    handle: string, id: string, name: string, enabled: bool,
+    profile-ref: string, capabilities: list<string>, maintenance-policy: string,
+  }
+  record site-page { items: list<site-view>, next-cursor: option<string> }
+  record stats-view { uploaded: option<u64>, downloaded: option<u64> }
+  record category { id: string, name: string }
+  record header { name: string, value: string }
+  record site-target { path: string, query: list<header>, auth-slot: option<string> }
+  variant http-target { public-url(string), site-relative(site-target) }
+  record http-request {
+    method: string, target: http-target, headers: list<header>,
+    body: option<list<u8>>, max-bytes: u64,
+  }
+  record http-response {
+    status: u16, headers: list<header>, body: list<u8>,
+    truncated: bool, receipt: option<string>,
+  }
+  record torrent-raw {
+    provider-local-id: string, title: string, size: u64, download-ref: string,
+    seeders: option<u32>, leechers: option<u32>, published-at: option<u64>,
+    category: option<string>, free: option<bool>, hr: option<bool>,
+  }
+  record torrent-batch {
+    items: list<torrent-raw>, next-cursor: option<string>, has-more: bool,
+  }
+  record descriptor { id: string, name: string, kind: string, capabilities: list<string> }
+  record search-query { keyword: string, page: u32, categories: list<string> }
+  enum maintenance-action { verify-session, check-in }
+  enum maintenance-state { completed, already-completed, auth-expired, challenge, unknown }
+  record maintenance-outcome {
+    state: maintenance-state, evidence: string, session-capture: option<string>,
+  }
+  enum operation-state {
+    queued, running, waiting, blocked, succeeded, rejected, deferred, failed,
+    cancelled, unknown,
+  }
+  record operation-view {
+    id: string, state: operation-state, revision: u64, next-run-at: option<u64>,
+  }
+  record operation-page { items: list<operation-view>, next-cursor: option<string> }
+  record site-draft {
+    url: string, provider: string, enabled: bool, config: list<tuple<string, string>>,
+  }
+  record owned-revision { handle: string, revision: u64 }
+  record download-options {
+    relative-directory: option<string>, category: option<string>,
+    tags: list<string>, paused: bool, upload-limit: option<u64>,
+    download-limit: option<u64>, sequential: bool, first-last-piece: bool,
+  }
+  variant task-control {
+    pause, resume, tags(list<string>), category(string),
+    limits(tuple<option<u64>, option<u64>>),
+  }
+  record subscribe-draft {
+    media: string, range: list<tuple<u32, u32>>, filter: string,
+    sites: list<string>, library: string,
+  }
+  variant command {
+    indexer-search(tuple<list<string>, search-query>),
+    indexer-rss(tuple<list<string>, option<string>>),
+    site-maintenance(tuple<string, maintenance-action>),
+    site-create(site-draft),
+    site-update(tuple<owned-revision, site-draft>),
+    site-delete(tuple<owned-revision, string>),
+    downloader-add(tuple<string, string, download-options>),
+    downloader-control(tuple<owned-revision, task-control>),
+    downloader-delete-task(tuple<string, u64, string>),
+    downloader-prepare-cleanup(tuple<list<owned-revision>, string>),
+    downloader-delete-files(tuple<owned-revision, string>),
+    subscribe-create(subscribe-draft),
+    subscribe-update(tuple<owned-revision, subscribe-draft>),
+    subscribe-delete(tuple<owned-revision, string>),
+    subscribe-complete(tuple<owned-revision, string>),
+    library-refresh(tuple<string, list<string>>),
+    transfer-request(tuple<string, string>),
+    scrape-request(tuple<string, string>),
+    notify-send(tuple<message, list<string>>),
+    schedule-set(tuple<string, u32, bool, u64>),
+    schedule-disable(owned-revision),
+  }
+  record command-request {
+    action: command, idempotency-key: string, expected-revision: option<u64>,
+  }
+  record accepted { operation-id: string }
+  record task-input { task-id: string, validated-input: string, job-id: string, attempt: u32 }
+  record task-outcome { partial: bool, progress: u32, operation-ids: list<string>, summary: string }
+  record endpoint-request {
+    method: string, path: string, query: list<header>, body: list<u8>,
+  }
+  record endpoint-response { status: u16, headers: list<header>, body: list<u8> }
+  record media-reference {
+    kind: string, aliases: list<string>, year: option<u32>, external-id: option<string>,
+  }
+  record media-reference-batch { items: list<media-reference>, next-cursor: option<string> }
+  record message { title: string, body: string, level: string, link: option<string> }
+  variant delivery-outcome { delivered, deferred(u64), unknown }
+  variant status-item {
+    stat(tuple<string, string>), table(list<list<string>>),
+    items(list<string>), progress(tuple<u64, u64>), chart(list<tuple<string, s64>>),
+  }
+}
