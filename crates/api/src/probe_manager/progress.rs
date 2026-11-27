@@ -16,6 +16,7 @@ pub struct MetadataPriorityGate {
     registry: Option<Arc<crate::library_lifecycle::LibraryWorkRegistry>>,
     kind: crate::library_lifecycle::LibraryWorkKind,
     owners: Option<Arc<std::collections::HashMap<String, (String, marker::WorkControl)>>>,
+    unit_abort: Option<(String, marker::WorkControl)>,
 }
 
 impl MetadataPriorityGate {
@@ -28,6 +29,7 @@ impl MetadataPriorityGate {
             registry: manager.library_work.lock().clone(),
             kind: crate::library_lifecycle::LibraryWorkKind::AutomaticDetection,
             owners: None,
+            unit_abort: None,
         }
     }
 
@@ -40,7 +42,17 @@ impl MetadataPriorityGate {
             registry: manager.library_work.lock().clone(),
             kind: crate::library_lifecycle::LibraryWorkKind::AutomaticDetection,
             owners: None,
+            unit_abort: None,
         }
+    }
+
+    pub(super) fn with_unit_control(
+        mut self,
+        file_id: String,
+        control: marker::WorkControl,
+    ) -> Self {
+        self.unit_abort = Some((file_id, control));
+        self
     }
 
     /// Retain one lease per original strict owner for the entire expanded pipeline.
@@ -194,8 +206,19 @@ mod tests {
 
 impl CaptureGate for MetadataPriorityGate {
     fn work_control(&self, row: &domain::FileCoverage) -> marker::WorkControl {
+        let attach_abort = |base: marker::WorkControl| {
+            if let Some((target_id, abort)) = &self.unit_abort
+                && row.file.file_id.to_string() == *target_id
+            {
+                base.with_linked_abort(abort)
+            } else {
+                base
+            }
+        };
         if self.registry.is_none() {
-            return marker::WorkControl::default().with_read_stop(self.shutting_down.clone());
+            return attach_abort(
+                marker::WorkControl::default().with_read_stop(self.shutting_down.clone()),
+            );
         }
         let owner = crate::fingerprint_job::source::ensure_source_recorded(&self.store, row)
             .ok()
@@ -206,13 +229,16 @@ impl CaptureGate for MetadataPriorityGate {
             && let Some((original, control)) = owners.get(&row.file.file_id.to_string())
             && owner.as_ref().is_some_and(|owner| owner == original)
         {
-            return control.clone().with_read_stop(self.shutting_down.clone());
+            return attach_abort(control.clone().with_read_stop(self.shutting_down.clone()));
         }
         let cancelled = marker::WorkControl::default();
         cancelled.cancel();
         cancelled
     }
     fn wait_before_capture(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        if self.kind == crate::library_lifecycle::LibraryWorkKind::ExplicitDetection {
+            return Box::pin(async {});
+        }
         Box::pin(async move {
             loop {
                 let notified = self.metadata_idle.notified();

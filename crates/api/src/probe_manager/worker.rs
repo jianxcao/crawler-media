@@ -10,7 +10,7 @@ use crate::library_lifecycle::BoundedLeaseError;
 use super::{ProbeManager, ProbeUnit, probe};
 
 pub(super) struct MetadataAdmission {
-    active: usize,
+    pub(super) active: usize,
     pub(super) limit: usize,
 }
 
@@ -112,7 +112,8 @@ pub(super) fn try_start_observed(
         return true;
     }
     let settings_revision = manager.settings_revision();
-    let (persisted_settings, persisted_remote_reads) = read_persisted_admission_settings(manager);
+    let (persisted_settings, persisted_fp, persisted_remote_reads) =
+        read_persisted_admission_settings(manager);
     after_settings_loaded();
     let mut workers = manager.workers.lock();
     if manager.shutting_down.load(Ordering::SeqCst) {
@@ -133,10 +134,11 @@ pub(super) fn try_start_observed(
     manager.shutdown_signal.send_replace(false);
     // Discard the persisted snapshot if an HTTP save was published while it loaded.
     // Both `remote_reads_paused` and `remote_reads_wait_stopped` are published
-    // atomically inside `apply_startup_settings_if_unchanged`.
-    manager.apply_startup_settings_if_unchanged(
+    // atomically inside `apply_startup_all_settings_if_unchanged`.
+    manager.apply_startup_all_settings_if_unchanged(
         settings_revision,
         persisted_settings,
+        persisted_fp,
         persisted_remote_reads,
     );
     let bootstrap = manager.clone();
@@ -178,6 +180,7 @@ fn read_persisted_admission_settings(
     manager: &ProbeManager,
 ) -> (
     Option<crate::probe_settings::ProbeSettings>,
+    Option<crate::probe_settings::FingerprintProbeSettings>,
     Option<crate::probe_settings::RemoteReadsSettings>,
 ) {
     let settings = crate::probe_settings::ProbeSettings::load(&manager.store)
@@ -185,12 +188,17 @@ fn read_persisted_admission_settings(
             |error| tracing::error!(%error, "启动探测 worker 时读取媒体信息设置失败，沿用内存设置"),
         )
         .ok();
+    let fp = crate::probe_settings::FingerprintProbeSettings::load(&manager.store)
+        .map_err(
+            |error| tracing::error!(%error, "启动探测 worker 时读取声纹设置失败，沿用内存设置"),
+        )
+        .ok();
     let remote_reads = crate::probe_settings::RemoteReadsSettings::load(&manager.store)
         .map_err(|error| {
             tracing::error!(%error, "启动探测 worker 时读取远程读取设置失败，先暂停远程读取")
         })
         .ok();
-    (settings, remote_reads)
+    (settings, fp, remote_reads)
 }
 
 fn start_workers(manager: &Arc<ProbeManager>) {
@@ -198,7 +206,9 @@ fn start_workers(manager: &Arc<ProbeManager>) {
     if manager.shutting_down.load(Ordering::SeqCst) {
         return;
     }
-    workers.push(tokio::spawn(run_fingerprint_worker(manager.clone())));
+    for _ in 0..crate::probe_settings::MAX_FINGERPRINT_WORKERS {
+        workers.push(tokio::spawn(run_fingerprint_worker(manager.clone())));
+    }
     workers.push(tokio::spawn(super::analysis::run(manager.clone())));
     workers.push(tokio::spawn(run_window_dispatcher(manager.clone())));
     for _ in 0..crate::probe_settings::MAX_METADATA_WORKERS {
@@ -209,7 +219,7 @@ fn start_workers(manager: &Arc<ProbeManager>) {
     manager.wake.notify_waiters();
     tracing::info!(
         metadata_workers = manager.probe_settings.lock().metadata_workers,
-        fingerprint_workers = 1,
+        fingerprint_workers = manager.fingerprint_settings.lock().workers,
         "【媒体探测】高优先级媒体信息队列与低优先级声纹队列已启动"
     );
 }

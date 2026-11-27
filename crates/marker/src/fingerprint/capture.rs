@@ -254,7 +254,7 @@ fn build_capture_ffmpeg_command(
         "-accurate_seek",
     ]);
 
-    target.apply_ffmpeg_input_with_seek_ms(&mut command, request.window.start_ms);
+    target.apply_ffmpeg_input_known_stream_seek_ms(&mut command, request.window.start_ms);
 
     command.args(["-map", &format!("0:{}", source.audio_stream_index)]);
     let trim = match source.format_start_time_us {
@@ -599,12 +599,15 @@ fn normalized_origin(timings: &ExtractionTimings) -> Option<i64> {
         return None;
     }
     let origin_us = timings.source_facts.as_ref()?.format_start_time_us?;
-    // Exact sample clock and exact microsecond header clock: do not round sub-ms alignment.
+    // 16kHz PCM sample clock vs microsecond container start_time: sub-millisecond
+    // start_time (e.g. 21333us AAC frame or 41708us 23.976fps) quantizes first_pts
+    // to the nearest 1/16000s sample, so round within +-0.5ms (8_000_000 scaled units).
     let normalized = i128::from(timings.timeline.first_pts?)
         .checked_mul(1_000_000)?
         .checked_sub(i128::from(origin_us).checked_mul(16_000)?)?;
-    (normalized % 16_000_000 == 0)
-        .then(|| i64::try_from(normalized / 16_000_000).ok())
+    let rounded_ms = (normalized + 8_000_000).div_euclid(16_000_000);
+    ((normalized - rounded_ms * 16_000_000).abs() <= 8_000_000)
+        .then(|| i64::try_from(rounded_ms).ok())
         .flatten()
 }
 

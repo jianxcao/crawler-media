@@ -148,6 +148,15 @@ pub enum VerificationOutcome {
     SamplingLimit { reason: String },
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttemptCostObservation {
+    pub phase: String,
+    pub succeeded: bool,
+    pub window_duration_ms: i64,
+    pub elapsed_ms: u64,
+    pub time_to_first_pcm_ms: Option<u64>,
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct SourceCostSummary {
     pub median_first_pcm_ms: Option<u64>,
@@ -155,4 +164,71 @@ pub struct SourceCostSummary {
     pub measured_samples: u32,
     pub recent_fast_attempts: u8,
     pub recent_fallbacks: u8,
+}
+
+impl SourceCostSummary {
+    pub fn from_observations(observations: &[AttemptCostObservation]) -> Self {
+        let mut first_pcms = Vec::new();
+        let mut rates = Vec::new();
+        let mut measured_samples = 0u32;
+
+        for obs in observations {
+            if obs.succeeded && obs.elapsed_ms > 0 && obs.window_duration_ms > 0 {
+                measured_samples = measured_samples.saturating_add(1);
+                if let Some(first_pcm) = obs.time_to_first_pcm_ms {
+                    first_pcms.push(first_pcm);
+                }
+                let rate = (obs.window_duration_ms as f64 / obs.elapsed_ms as f64).max(0.01);
+                if rate.is_finite() {
+                    rates.push(rate);
+                }
+            }
+        }
+
+        first_pcms.sort_unstable();
+        rates.sort_by(|a, b| a.total_cmp(b));
+
+        let median_first_pcm_ms = if first_pcms.is_empty() {
+            None
+        } else {
+            Some(first_pcms[first_pcms.len() / 2])
+        };
+        let sample_ms_per_wall_ms = if rates.is_empty() {
+            None
+        } else {
+            Some(rates[rates.len() / 2])
+        };
+
+        let mut fast_outcomes = Vec::new();
+        for (idx, obs) in observations.iter().enumerate() {
+            let is_fast = obs.phase == "fast_verify"
+                || (obs.phase == "scheduled_capture"
+                    && obs.window_duration_ms > 0
+                    && obs.window_duration_ms < 160_000);
+            if !is_fast {
+                continue;
+            }
+            let fell_back = !obs.succeeded
+                || observations
+                    .get(idx + 1)
+                    .is_some_and(|next| next.phase == "fallback_full_window");
+            fast_outcomes.push(fell_back);
+        }
+
+        let recent_slice = if fast_outcomes.len() > 5 {
+            &fast_outcomes[fast_outcomes.len() - 5..]
+        } else {
+            &fast_outcomes[..]
+        };
+        let recent_fast_attempts = recent_slice.len() as u8;
+        let recent_fallbacks = recent_slice.iter().filter(|&&fb| fb).count() as u8;
+
+        Self {
+            median_first_pcm_ms,
+            sample_ms_per_wall_ms,
+            measured_samples,
+            recent_fast_attempts,
+            recent_fallbacks,
+        }
+    }
 }

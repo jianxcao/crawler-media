@@ -172,7 +172,8 @@ impl ProbeManager {
             ledger_id: ledger_id.clone(),
             stage: ProbeDispatchStage::Fingerprint,
         };
-        if (self.background_is_paused() && !self.is_dispatch_paused_exempt(&job_id, &ledger_id))
+        if (self.fingerprint_dispatch_paused()
+            && !self.is_dispatch_paused_exempt(&job_id, &ledger_id))
             || self.should_defer_remote_dispatch(&work.unit.row.file.path)
         {
             tracing::info!(
@@ -409,11 +410,21 @@ impl ProbeManager {
 
     /// Fill both windows from durable pending ids. Seen stays at window + active.
     pub(super) fn fill_dispatch_windows(&self) {
-        if self.shutting_down.load(Ordering::SeqCst) || self.background_is_paused() {
+        if self.shutting_down.load(Ordering::SeqCst) {
             return;
         }
-        self.fill_metadata();
-        self.fill_fingerprint();
+        if !self.background_is_paused() {
+            self.fill_metadata();
+        }
+        if !self.fingerprint_dispatch_paused() {
+            self.fill_fingerprint();
+        }
+    }
+
+    pub(super) fn fill_fingerprint_window_now(&self) {
+        if !self.shutting_down.load(Ordering::SeqCst) && !self.fingerprint_dispatch_paused() {
+            self.fill_fingerprint();
+        }
     }
 
     /// Top up a window once emptied or at half-drain when durable backlog overflowed.
@@ -422,25 +433,28 @@ impl ProbeManager {
         if self.shutting_down.load(Ordering::SeqCst) {
             return;
         }
-        let paused = self.background_is_paused();
-        if paused && !self.has_paused_exempt_work() {
-            return;
+        let has_exempt = self.has_paused_exempt_work();
+        let meta_paused = self.background_is_paused();
+        if !meta_paused || has_exempt {
+            let metadata_free = self.metadata_tx.capacity();
+            if metadata_free == METADATA_WINDOW
+                || (meta_paused && metadata_free > 0)
+                || (self.metadata_overflowed.load(Ordering::Acquire)
+                    && metadata_free >= METADATA_WINDOW / 2)
+            {
+                self.fill_metadata();
+            }
         }
-        let metadata_free = self.metadata_tx.capacity();
-        if metadata_free == METADATA_WINDOW
-            || (paused && metadata_free > 0)
-            || (self.metadata_overflowed.load(Ordering::Acquire)
-                && metadata_free >= METADATA_WINDOW / 2)
-        {
-            self.fill_metadata();
-        }
-        let fingerprint_free = self.fingerprint_tx.capacity();
-        if fingerprint_free == FINGERPRINT_WINDOW
-            || (paused && fingerprint_free > 0)
-            || (self.fingerprint_overflowed.load(Ordering::Acquire)
-                && fingerprint_free >= FINGERPRINT_WINDOW / 2)
-        {
-            self.fill_fingerprint();
+        let fp_paused = self.fingerprint_dispatch_paused();
+        if !fp_paused || has_exempt {
+            let fingerprint_free = self.fingerprint_tx.capacity();
+            if fingerprint_free == FINGERPRINT_WINDOW
+                || (fp_paused && fingerprint_free > 0)
+                || (self.fingerprint_overflowed.load(Ordering::Acquire)
+                    && fingerprint_free >= FINGERPRINT_WINDOW / 2)
+            {
+                self.fill_fingerprint();
+            }
         }
     }
 
@@ -451,7 +465,13 @@ impl ProbeManager {
     ) -> Option<Vec<ProbeDispatchId>> {
         let store = self.store.as_ref();
         let remote_paused = self.remote_reads_are_paused();
-        if self.background_is_paused() {
+        let stage_paused = match stage {
+            ProbeDispatchStage::Metadata => self.background_is_paused(),
+            ProbeDispatchStage::Fingerprint | ProbeDispatchStage::Analysis => {
+                self.fingerprint_dispatch_paused()
+            }
+        };
+        if stage_paused {
             let exempt_jobs = self.paused_exempt_job_ids();
             let exempt_units = self.paused_exempt_unit_pairs();
             if exempt_jobs.is_empty() && exempt_units.is_empty() {

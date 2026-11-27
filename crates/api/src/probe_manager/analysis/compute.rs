@@ -81,7 +81,7 @@ fn collect_eligible_non_refresh(
     let mut after: Option<(String, String)> = None;
     let mut tried_refresh = std::collections::HashSet::new();
     let mut eligible = Vec::new();
-    let paused = manager.background_is_paused();
+    let paused = manager.fingerprint_dispatch_paused();
     loop {
         let page = manager.store.probe_analysis_participants(
             key.media_id,
@@ -134,7 +134,7 @@ pub(super) fn run(
     reconcile(manager, anchor, &inputs)?;
     let mut participants =
         observed_participants(manager, key, anchor.context(), &inputs, &mut job_kinds)?;
-    if manager.background_is_paused() {
+    if manager.fingerprint_dispatch_paused() {
         participants.retain(|p| {
             manager.is_dispatch_paused_exempt(&p.dispatch().job_id, &p.dispatch().ledger_id)
         });
@@ -174,7 +174,7 @@ fn observed_participants(
 ) -> Result<Vec<ProbeAnalysisParticipant>, store::StoreError> {
     let mut participants = Vec::new();
     let mut after: Option<(String, String)> = None;
-    let paused = manager.background_is_paused();
+    let paused = manager.fingerprint_dispatch_paused();
     while participants.len() < 16 {
         let page = manager.store.probe_analysis_participants(
             key.media_id,
@@ -269,12 +269,12 @@ fn refresh(manager: &ProbeManager, job_id: &str) -> Result<bool, store::StoreErr
         return Ok(true);
     }
     let Some(participants) = manager.store.probe_analysis_job_participants(job_id)? else {
-        if manager.background_is_paused() && !manager.is_job_paused_exempt(job_id) {
+        if manager.fingerprint_dispatch_paused() && !manager.is_job_paused_exempt(job_id) {
             clear_queued_analysis_unit_exemptions(manager, job_id)?;
         }
         return Ok(false);
     };
-    if manager.background_is_paused()
+    if manager.fingerprint_dispatch_paused()
         && !manager.is_job_paused_exempt(job_id)
         && !participants.iter().any(|p| {
             let lid = &p.dispatch().ledger_id;

@@ -203,8 +203,8 @@ pub use probe_state::{
     retry_delay_ms,
 };
 pub use probe_tasks::{
-    ProbeCancelSummary, ProbeJob, ProbeJobUnit, ProbeJobUnitSpec, ProbeLibraryQueueSummary,
-    ProbeQueueSummary,
+    FingerprintCancelScope, FingerprintCancelSummary, ProbeCancelSummary, ProbeJob, ProbeJobUnit,
+    ProbeJobUnitSpec, ProbeLibraryQueueSummary, ProbeQueueSummary,
 };
 pub use read_freshness::{FileReadRevision, ReadFingerprint};
 pub use roots::LibraryRoot;

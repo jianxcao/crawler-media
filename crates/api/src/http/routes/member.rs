@@ -5,10 +5,10 @@ use axum::routing::{delete, get, post, put};
 
 use crate::http::{
     auth, collections, discover, downloaders, jobs, jobs_read, library, library_artwork,
-    library_chapters, library_gallery, library_organize, library_scan, media, notify, playback,
-    playback_activity, playback_logs, playback_stats, playback_views, routing_preview, rule_sets,
-    scrape_settings, search, sites, subscription_depth, subscription_missing, subscriptions,
-    title_ref, transfer_settings,
+    library_chapters, library_gallery, library_organize, library_scan, marker_control, media,
+    notify, playback, playback_activity, playback_logs, playback_stats, playback_views,
+    routing_preview, rule_sets, scrape_settings, search, sites, subscription_depth,
+    subscription_missing, subscriptions, title_ref, transfer_settings,
 };
 use crate::management::ApiState;
 
@@ -171,6 +171,10 @@ pub(super) fn member_library_routes() -> Router<ApiState> {
         .route(
             "/libraries/{id}/items/{item_id}/chapters",
             get(library_chapters::chapters),
+        )
+        .route(
+            "/libraries/{id}/items/{item_id}/markers",
+            get(marker_control::season_markers),
         )
         .route(
             "/libraries/{id}/items/{item_id}/artwork/candidates",

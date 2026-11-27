@@ -7,11 +7,34 @@ use std::sync::{
 #[derive(Clone, Default, Debug)]
 pub struct WorkControl {
     cancelled: Arc<AtomicBool>,
+    ancestors: Vec<Arc<AtomicBool>>,
     publication: Arc<std::sync::Mutex<()>>,
     read_stop: Option<Arc<AtomicBool>>,
 }
 
 impl WorkControl {
+    /// Create a child signal that observes parent cancellation while allowing
+    /// independent child-scoped cancellation without cancelling parent leases.
+    pub fn linked_child(&self) -> Self {
+        let mut ancestors = Vec::with_capacity(self.ancestors.len() + 1);
+        ancestors.extend(self.ancestors.iter().cloned());
+        ancestors.push(self.cancelled.clone());
+        Self {
+            cancelled: Arc::new(AtomicBool::new(false)),
+            ancestors,
+            publication: self.publication.clone(),
+            read_stop: self.read_stop.clone(),
+        }
+    }
+
+    /// Combine another cancellation signal so cancelling either aborts this child.
+    pub fn with_linked_abort(&self, other: &Self) -> Self {
+        let mut child = self.linked_child();
+        child.ancestors.extend(other.ancestors.iter().cloned());
+        child.ancestors.push(other.cancelled.clone());
+        child
+    }
+
     /// Stop waiting for admission without interrupting an admitted read.
     pub fn with_read_stop(mut self, stop: Arc<AtomicBool>) -> Self {
         self.read_stop = Some(stop);
@@ -43,6 +66,10 @@ impl WorkControl {
     }
     pub fn is_cancelled(&self) -> bool {
         self.cancelled.load(Ordering::Acquire)
+            || self
+                .ancestors
+                .iter()
+                .any(|flag| flag.load(Ordering::Acquire))
     }
     pub fn output(
         &self,

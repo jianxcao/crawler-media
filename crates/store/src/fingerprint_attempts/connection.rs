@@ -193,6 +193,43 @@ impl crate::LibraryConnection<'_> {
         Ok(rows)
     }
 
+    pub fn list_recent_library_fingerprint_attempts(
+        &self,
+        library_id: domain::LibraryId,
+        limit: usize,
+    ) -> Result<Vec<StoredFingerprintAttempt>, StoreError> {
+        let mut stmt = self.library.prepare(
+            "SELECT a.attempt_id, a.job_id, a.file_id, a.kind, a.window_start_ms,
+                    a.window_end_ms, a.phase, a.started_at_ms, a.finished_at_ms,
+                    a.status, a.error_kind, a.metrics_json
+             FROM fingerprint_attempts a
+             JOIN library_files f ON f.file_id = a.file_id
+             WHERE f.library_id = ?1 AND a.status IN ('succeeded', 'failed')
+             ORDER BY a.started_at_ms DESC
+             LIMIT ?2",
+        )?;
+        let mut rows = stmt
+            .query_map(params![library_id.to_string(), limit as i64], |row| {
+                Ok(StoredFingerprintAttempt {
+                    attempt_id: row.get(0)?,
+                    job_id: row.get(1)?,
+                    ledger_id: row.get(2)?,
+                    kind: row.get(3)?,
+                    window_start_ms: row.get(4)?,
+                    window_end_ms: row.get(5)?,
+                    phase: row.get(6)?,
+                    started_at_ms: row.get(7)?,
+                    finished_at_ms: row.get(8)?,
+                    status: row.get(9)?,
+                    error_kind: row.get(10)?,
+                    metrics_json: row.get(11)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        rows.reverse();
+        Ok(rows)
+    }
+
     pub fn get_fingerprint_attempt(
         &self,
         attempt_id: &str,

@@ -264,6 +264,9 @@ export function LibraryItemDetailView({
 
       {detail.files.length > 0 && (
         <ItemChaptersSection
+          libraryId={libraryId}
+          mediaItemId={detail.media_item_id}
+          seasons={detail.seasons}
           isTv={detail.kind === "tv"}
           canManageLibraries={c.canManageLibraries}
           chapterTarget={c.chapterTarget}

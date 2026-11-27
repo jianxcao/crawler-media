@@ -9,6 +9,33 @@ pub struct ReferenceSupport {
     pub complete_guards: bool,
 }
 
+/// Maximum leading packet alignment offset admitted for non-quantized stream captures.
+pub const MAX_START_PACKET_SKEW_MS: i64 = 50;
+/// Maximum audio-shorter-than-video container tail skew admitted on clean FFmpeg EOF.
+pub const MAX_EOF_AUDIO_SHORTFALL_MS: i64 = 500;
+
+fn valid_v3_origin(capture: &CapturedFingerprint) -> Option<i64> {
+    if capture.metrics.time_mapping_version < 3 {
+        match capture.metrics.contiguous_pcm_start_ms {
+            Some(start)
+                if start >= capture.window.start_ms
+                    && start - capture.window.start_ms <= MAX_START_PACKET_SKEW_MS =>
+            {
+                Some(start)
+            }
+            None => Some(capture.window.start_ms),
+            _ => None,
+        }
+    } else if capture.metrics.pcm_timeline == crate::PcmTimeline::Contiguous {
+        capture.metrics.contiguous_pcm_start_ms.filter(|&start| {
+            start >= capture.window.start_ms
+                && start - capture.window.start_ms <= MAX_START_PACKET_SKEW_MS
+        })
+    } else {
+        None
+    }
+}
+
 pub fn complete_pcm(capture: &CapturedFingerprint) -> bool {
     if capture.metrics.time_mapping_version == 4 {
         return capture.window.validate().is_ok()
@@ -17,22 +44,21 @@ pub fn complete_pcm(capture: &CapturedFingerprint) -> bool {
                     && coverage.end_ms >= capture.window.end_ms
             });
     }
-    !matches!(capture.metrics.pcm_timeline, crate::PcmTimeline::Invalid(_))
-        && (capture.metrics.time_mapping_version < 3
-            || (capture.metrics.pcm_timeline == crate::PcmTimeline::Contiguous
-                && capture.metrics.contiguous_pcm_start_ms == Some(capture.window.start_ms)))
-        && capture.window.validate().is_ok()
-        && capture
-            .metrics
-            .contiguous_pcm_start_ms
-            .is_none_or(|start| start == capture.window.start_ms)
-        && capture.pcm_duration_ms.is_some_and(|duration| {
-            duration >= 0
-                && capture.window.start_ms.checked_add(duration).is_some()
-                && duration
-                    .checked_add(20)
-                    .is_some_and(|end| end >= capture.window.duration_ms())
-        })
+    if matches!(capture.metrics.pcm_timeline, crate::PcmTimeline::Invalid(_))
+        || capture.window.validate().is_err()
+    {
+        return false;
+    }
+    let Some(start_ms) = valid_v3_origin(capture) else {
+        return false;
+    };
+    capture.pcm_duration_ms.is_some_and(|duration| {
+        duration >= 0
+            && start_ms
+                .checked_add(duration)
+                .and_then(|end| end.checked_add(20))
+                .is_some_and(|end| end >= capture.window.end_ms)
+    })
 }
 
 /// Coverage on the existing normalized capture timeline. Complete captures retain
@@ -48,25 +74,17 @@ pub fn candidate_pcm_coverage(capture: &CapturedFingerprint) -> Option<Interval>
         return None;
     }
     capture.window.validate().ok()?;
-    if capture
-        .metrics
-        .contiguous_pcm_start_ms
-        .is_some_and(|start| start != capture.window.start_ms)
-        || (!complete_pcm(capture)
-            && capture.metrics.contiguous_pcm_start_ms != Some(capture.window.start_ms))
-    {
-        return None;
-    }
+    let start_ms = if capture.metrics.time_mapping_version < 3 && !complete_pcm(capture) {
+        capture.metrics.contiguous_pcm_start_ms.filter(|&start| {
+            start >= capture.window.start_ms
+                && start - capture.window.start_ms <= MAX_START_PACKET_SKEW_MS
+        })?
+    } else {
+        valid_v3_origin(capture)?
+    };
     let duration = capture.pcm_duration_ms.filter(|duration| *duration >= 0)?;
-    let end_ms = capture
-        .window
-        .start_ms
-        .checked_add(duration)?
-        .min(capture.window.end_ms);
-    Some(Interval {
-        start_ms: capture.window.start_ms,
-        end_ms,
-    })
+    let end_ms = start_ms.checked_add(duration)?.min(capture.window.end_ms);
+    (end_ms > start_ms).then_some(Interval { start_ms, end_ms })
 }
 
 /// Whether the measured origin admits the requested first sample, for deciding
@@ -110,11 +128,25 @@ pub fn complete_guards(
         return false;
     };
     let required_start = left.max(0);
-    let required_end = duration_ms.map_or(right, |duration| right.min(duration));
+    let effective_media_end = duration_ms.map(|duration| {
+        if capture.metrics.time_mapping_version != 4
+            && capture.metrics.ffmpeg_exit_code == Some(0)
+            && capture.window.end_ms >= duration
+            && coverage.end_ms.saturating_add(MAX_EOF_AUDIO_SHORTFALL_MS) >= duration
+        {
+            coverage.end_ms.min(duration)
+        } else {
+            duration
+        }
+    });
+    let required_end = effective_media_end.map_or(right, |duration| right.min(duration));
     let left_guard = coverage.start_ms <= required_start
         || (required_start == 0
             && coverage.start_ms <= candidate.start_ms
-            && super::mapping::quantized_head_start(capture) == Some(coverage.start_ms));
+            && (super::mapping::quantized_head_start(capture) == Some(coverage.start_ms)
+                || (capture.metrics.time_mapping_version != 4
+                    && capture.window.start_ms == 0
+                    && coverage.start_ms <= MAX_START_PACKET_SKEW_MS)));
     left_guard
         && capture.window.end_ms >= required_end
         && if capture.metrics.time_mapping_version == 4 {
@@ -137,15 +169,25 @@ pub fn collect_boundary_evidence(
     policy: &BoundaryPolicy,
 ) -> BoundaryEvidence {
     let near = |a: i64, b: i64| policy.context_ms >= 0 && a.abs_diff(b) <= policy.context_ms as u64;
-    let source_chapters_present = !chapters.is_empty();
-    let chapters: Vec<_> = chapters
+    let valid_chapters: Vec<_> = chapters
         .iter()
         .copied()
         .filter(|chapter| {
             chapter.start_ms >= 0
                 && chapter.end_ms > chapter.start_ms
-                && near(chapter.start_ms, candidate.start_ms)
-                && near(chapter.end_ms, candidate.end_ms)
+                && !duration_ms.is_some_and(|dur| {
+                    dur > 300_000
+                        && chapters.len() == 1
+                        && chapter.start_ms <= 1_000
+                        && chapter.end_ms >= dur - 5_000
+                })
+        })
+        .collect();
+    let chapters_present = !valid_chapters.is_empty();
+    let chapters: Vec<_> = valid_chapters
+        .into_iter()
+        .filter(|chapter| {
+            near(chapter.start_ms, candidate.start_ms) && near(chapter.end_ms, candidate.end_ms)
         })
         .collect();
     let audio_transition = audio_boundaries(capture, candidate, policy);
@@ -158,9 +200,9 @@ pub fn collect_boundary_evidence(
         audio_transition,
         references_agree: support.references_agree,
         complete_guards: support.complete_guards && complete_context,
-        // RMS chatter carries no independent semantic contradiction. A source
-        // chapter still needs a unique supported explanation for both bounds.
-        conflicting_evidence: source_chapters_present && chapters.len() != 1,
+        // Ignore single whole-file muxer dummy chapters; otherwise source chapters must
+        // uniquely corroborate the candidate.
+        conflicting_evidence: chapters_present && chapters.len() != 1,
     }
 }
 

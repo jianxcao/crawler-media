@@ -147,7 +147,7 @@ fn build_models_for_kind(
     let mut template_models = Vec::new();
     for (idx, cluster) in clusters.into_iter().enumerate() {
         // Collect references for this cluster
-        let mut ep_refs: HashMap<String, TemplateReference> = HashMap::new();
+        let mut ep_intervals = HashMap::new();
         let mut durations = Vec::new();
 
         for m_idx in &cluster {
@@ -160,41 +160,47 @@ fn build_models_for_kind(
 
             durations.push((m.segment.duration_sec * 1000.0) as i64);
 
-            let from_end1 = if kind == SegmentKind::Outro {
-                ev1.duration_ms.map(|d| (d - end1_ms, d - start1_ms))
-            } else {
-                None
-            };
-            let from_end2 = if kind == SegmentKind::Outro {
-                ev2.duration_ms.map(|d| (d - end2_ms, d - start2_ms))
-            } else {
-                None
-            };
-
-            ep_refs
+            ep_intervals
                 .entry(ev1.sample_id.clone())
-                .or_insert_with(|| TemplateReference {
-                    sample_id: ev1.sample_id.clone(),
-                    ledger_id: ev1.ledger_id.clone(),
-                    episode: ev1.episode,
-                    source_version: ev1.source_version.clone(),
-                    match_interval_ms: (start1_ms, end1_ms),
-                    match_from_end_ms: from_end1,
-                });
-
-            ep_refs
+                .or_insert_with(|| (ev1, Vec::new()))
+                .1
+                .push((start1_ms, end1_ms));
+            ep_intervals
                 .entry(ev2.sample_id.clone())
-                .or_insert_with(|| TemplateReference {
-                    sample_id: ev2.sample_id.clone(),
-                    ledger_id: ev2.ledger_id.clone(),
-                    episode: ev2.episode,
-                    source_version: ev2.source_version.clone(),
-                    match_interval_ms: (start2_ms, end2_ms),
-                    match_from_end_ms: from_end2,
-                });
+                .or_insert_with(|| (ev2, Vec::new()))
+                .1
+                .push((start2_ms, end2_ms));
         }
 
-        let references: Vec<TemplateReference> = ep_refs.into_values().collect();
+        let mut references: Vec<TemplateReference> = ep_intervals
+            .into_iter()
+            .map(|(sample_id, (ev, mut bounds))| {
+                let mut starts: Vec<i64> = bounds.iter().map(|b| b.0).collect();
+                let mut ends: Vec<i64> = bounds.drain(..).map(|b| b.1).collect();
+                starts.sort_unstable();
+                ends.sort_unstable();
+                let start_ms = starts[starts.len() / 2];
+                let end_ms = ends[ends.len() / 2];
+                let from_end = if kind == SegmentKind::Outro {
+                    ev.duration_ms.map(|d| (d - end_ms, d - start_ms))
+                } else {
+                    None
+                };
+                TemplateReference {
+                    sample_id,
+                    ledger_id: ev.ledger_id.clone(),
+                    episode: ev.episode,
+                    source_version: ev.source_version.clone(),
+                    match_interval_ms: (start_ms, end_ms),
+                    match_from_end_ms: from_end,
+                }
+            })
+            .collect();
+        references.sort_by(|a, b| {
+            a.episode
+                .cmp(&b.episode)
+                .then(a.sample_id.cmp(&b.sample_id))
+        });
         let unique_episodes = references
             .iter()
             .map(|r| r.episode)
@@ -333,21 +339,23 @@ fn are_candidates_consistent(
     b: &PairCandidate,
     evidence: &[&EpisodeEvidence],
 ) -> bool {
-    // Check if they share the exact same evidence (ledger/sample) and have overlapping matching intervals
-    for &(ep_a_idx, start_a, end_a) in &[
-        (a.first_idx, a.segment.start1_sec, a.segment.end1_sec),
-        (a.second_idx, a.segment.start2_sec, a.segment.end2_sec),
+    // Compare normalized absolute media intervals so different windows on the same
+    // episode ledger (e.g. [0..180s] vs [120..420s]) cluster together accurately.
+    for &(ep_a_idx, int_a) in &[
+        (a.first_idx, a.first_interval),
+        (a.second_idx, a.second_interval),
     ] {
-        for &(ep_b_idx, start_b, end_b) in &[
-            (b.first_idx, b.segment.start1_sec, b.segment.end1_sec),
-            (b.second_idx, b.segment.start2_sec, b.segment.end2_sec),
+        for &(ep_b_idx, int_b) in &[
+            (b.first_idx, b.first_interval),
+            (b.second_idx, b.second_interval),
         ] {
             if evidence[ep_a_idx].sample_id == evidence[ep_b_idx].sample_id
                 || evidence[ep_a_idx].ledger_id == evidence[ep_b_idx].ledger_id
             {
-                let overlap = (end_a.min(end_b) - start_a.max(start_b)).max(0.0);
-                let shorter = (end_a - start_a).min(end_b - start_b);
-                if shorter > 0.0 && overlap / shorter >= 0.8 {
+                let overlap =
+                    (int_a.end_ms.min(int_b.end_ms) - int_a.start_ms.max(int_b.start_ms)).max(0);
+                let shorter = (int_a.end_ms - int_a.start_ms).min(int_b.end_ms - int_b.start_ms);
+                if shorter > 0 && overlap * 5 >= shorter * 4 {
                     return true;
                 }
             }

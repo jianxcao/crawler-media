@@ -68,10 +68,29 @@ pub fn normalize_capture_interval(
     capture: &CapturedFingerprint,
     relative: Interval,
 ) -> Result<Interval, String> {
-    let exact = super::normalize_interval(&capture.window, relative)?;
     if capture.metrics.time_mapping_version != 4 {
-        return Ok(exact);
+        let skew = capture
+            .metrics
+            .contiguous_pcm_start_ms
+            .map(|start| start.saturating_sub(capture.window.start_ms).max(0))
+            .unwrap_or(0);
+        let shifted = if skew > 0 && skew <= super::evidence::MAX_START_PACKET_SKEW_MS {
+            Interval {
+                start_ms: relative
+                    .start_ms
+                    .checked_add(skew)
+                    .ok_or("mapped start overflow")?,
+                end_ms: relative
+                    .end_ms
+                    .checked_add(skew)
+                    .ok_or("mapped end overflow")?,
+            }
+        } else {
+            relative
+        };
+        return super::normalize_interval(&capture.window, shifted);
     }
+    let _exact = super::normalize_interval(&capture.window, relative)?;
     let (min, max) = quantized_origin(capture).ok_or("missing quantized origin proof")?;
     let start = (max + i128::from(relative.start_ms) * 1000 + 999).div_euclid(1000);
     let end = (min + i128::from(relative.end_ms) * 1000).div_euclid(1000);

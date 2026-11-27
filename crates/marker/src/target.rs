@@ -77,6 +77,16 @@ impl ProbeTarget {
 
     /// Apply this target as an ffmpeg input with decimal seek in milliseconds.
     pub fn apply_ffmpeg_input_with_seek_ms(&self, cmd: &mut Command, start_ms: i64) {
+        self.apply_ffmpeg_input_seek_inner(cmd, start_ms, false);
+    }
+
+    /// Apply this target as an ffmpeg input when stream index/codec/start_time are already
+    /// known from prior metadata probing, reducing remote HTTP pre-read overhead on seeks.
+    pub fn apply_ffmpeg_input_known_stream_seek_ms(&self, cmd: &mut Command, start_ms: i64) {
+        self.apply_ffmpeg_input_seek_inner(cmd, start_ms, true);
+    }
+
+    fn apply_ffmpeg_input_seek_inner(&self, cmd: &mut Command, start_ms: i64, known_stream: bool) {
         let seek_str = if start_ms > 0 {
             if start_ms % 1000 == 0 {
                 format!("{}", start_ms / 1000)
@@ -97,6 +107,11 @@ impl ProbeTarget {
             Self::Remote(url) => {
                 disable_proxy_environment(cmd);
                 let ua = active_probe_ua();
+                let (analyze_us, probe_bytes) = if known_stream && start_ms > 0 {
+                    ("2000000", "1000000")
+                } else {
+                    ("10000000", "10000000")
+                };
                 cmd.args([
                     "-user_agent",
                     &ua,
@@ -121,9 +136,9 @@ impl ProbeTarget {
                     "-reconnect_delay_total_max",
                     "15",
                     "-analyzeduration",
-                    "10000000",
+                    analyze_us,
                     "-probesize",
-                    "10000000",
+                    probe_bytes,
                 ]);
                 if start_ms > 0 {
                     cmd.args(["-ss", &seek_str]);

@@ -26,7 +26,7 @@ impl ProbeManager {
         );
         if allow_when_paused
             && matches!(need.retry, policy::ProbeRequestResult::AlreadyRunning)
-            && self.background_is_paused()
+            && self.fingerprint_dispatch_paused()
         {
             return self.promote_paused_queued_unit(row);
         }
@@ -142,7 +142,7 @@ impl ProbeManager {
             ledger_id: ledger_id.clone(),
             stage: store::ProbeDispatchStage::Fingerprint,
         };
-        if (!allow_when_paused && self.background_is_paused())
+        if (!allow_when_paused && self.fingerprint_dispatch_paused())
             || self.should_defer_remote_dispatch(&unit.row.file.path)
         {
             self.remove_seen_if_job(&ledger_id, &job_id);

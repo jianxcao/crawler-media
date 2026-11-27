@@ -3,6 +3,10 @@ use rusty_chromaprint::{Configuration, Segment, match_fingerprints};
 use crate::types::CommonSegment;
 
 const MAX_ADJACENT_SCORE_DELTA: f64 = 4.0;
+const MAX_BRIDGE_GAP_ITEMS: usize = 24;
+const MIN_BRIDGE_FLANK_ITEMS: usize = 40;
+const STUDIO_BUMPER_MAX_SECS: f32 = 6.0;
+const FULL_THEME_MIN_QUERY_SECS: f32 = 10.0;
 
 pub(super) fn find_common_segment(
     first: &[u32],
@@ -51,6 +55,10 @@ pub(super) fn compare_fingerprints(
     if segments.is_empty() {
         return PairFingerprintDecision::NoMatch;
     }
+    let raw_max_secs = segments
+        .iter()
+        .map(|segment| segment.duration(&config))
+        .fold(0.0f32, f32::max);
     let policy = crate::SamplingPolicy::default();
     let segments = segments
         .into_iter()
@@ -63,7 +71,14 @@ pub(super) fn compare_fingerprints(
             acceptable
         })
         .collect();
-    let merged = merge_adjacent_segments(segments);
+    let merged = merge_adjacent_segments(
+        segments,
+        first,
+        second,
+        &config,
+        policy.max_score,
+        max_duration_secs,
+    );
     let mut candidates = merged
         .into_iter()
         .map(|segment| CommonSegment {
@@ -91,7 +106,11 @@ pub(super) fn compare_fingerprints(
     });
     let candidates = deduplicate_candidates(candidates);
     if candidates.is_empty() {
-        PairFingerprintDecision::Uncertain("native_candidates_rejected".into())
+        if min_duration_secs >= FULL_THEME_MIN_QUERY_SECS && raw_max_secs < STUDIO_BUMPER_MAX_SECS {
+            PairFingerprintDecision::NoMatch
+        } else {
+            PairFingerprintDecision::Uncertain("native_candidates_rejected".into())
+        }
     } else {
         PairFingerprintDecision::Candidates(candidates)
     }
@@ -195,7 +214,14 @@ fn same_occurrence(left: (f32, f32), right: (f32, f32)) -> bool {
     overlap / shorter >= 0.9
 }
 
-fn merge_adjacent_segments(mut segments: Vec<Segment>) -> Vec<Segment> {
+fn merge_adjacent_segments(
+    mut segments: Vec<Segment>,
+    first: &[u32],
+    second: &[u32],
+    config: &Configuration,
+    max_score: f64,
+    max_duration_secs: f32,
+) -> Vec<Segment> {
     segments.sort_by_key(|segment| (segment.offset1, segment.offset2));
     let mut merged: Vec<Segment> = Vec::with_capacity(segments.len());
 
@@ -214,17 +240,65 @@ fn merge_adjacent_segments(mut segments: Vec<Segment>) -> Vec<Segment> {
             merged.push(segment);
             continue;
         };
-        if gap1 > 0
-            || gap1 != gap2
-            || (previous.score - segment.score).abs() >= MAX_ADJACENT_SCORE_DELTA
+        if (previous.score - segment.score).abs() >= MAX_ADJACENT_SCORE_DELTA {
+            merged.push(segment);
+            continue;
+        }
+        if gap1 == 0 && gap2 == 0 {
+            let new_count = segment.offset1 + segment.items_count - previous.offset1;
+            // Preserve the weakest constituent quality instead of diluting it by duration.
+            previous.score = previous.score.max(segment.score);
+            previous.items_count = new_count;
+            continue;
+        }
+        let can_bridge = gap1 == gap2
+            && gap1 <= MAX_BRIDGE_GAP_ITEMS
+            && previous.items_count >= MIN_BRIDGE_FLANK_ITEMS
+            && segment.items_count >= MIN_BRIDGE_FLANK_ITEMS
+            && previous.score <= 2.5
+            && segment.score <= 2.5
+            && (previous.score - segment.score).abs() <= 1.5;
+        if !can_bridge {
+            merged.push(segment);
+            continue;
+        }
+        let new_count = segment.offset1 + segment.items_count - previous.offset1;
+        let candidate_merged = Segment {
+            offset1: previous.offset1,
+            offset2: previous.offset2,
+            items_count: new_count,
+            score: previous.score,
+        };
+        if candidate_merged.duration(config) > max_duration_secs {
+            merged.push(segment);
+            continue;
+        }
+        let (Some(left_flank), Some(right_flank), Some(slice1), Some(slice2)) = (
+            first.get(previous.offset1..end1),
+            first.get(segment.offset1..segment.offset1 + segment.items_count),
+            first.get(previous.offset1..previous.offset1 + new_count),
+            second.get(previous.offset2..previous.offset2 + new_count),
+        ) else {
+            merged.push(segment);
+            continue;
+        };
+        if crate::adaptive::model::is_constant_or_silent(left_flank)
+            || crate::adaptive::model::is_constant_or_silent(right_flank)
         {
             merged.push(segment);
             continue;
         }
-
-        let new_count = segment.offset1 + segment.items_count - previous.offset1;
-        // Preserve the weakest constituent quality instead of diluting it by duration.
-        previous.score = previous.score.max(segment.score);
+        let bridged_score = slice1
+            .iter()
+            .zip(slice2)
+            .map(|(a, b)| (a ^ b).count_ones() as f64)
+            .sum::<f64>()
+            / new_count as f64;
+        if !bridged_score.is_finite() || bridged_score > max_score {
+            merged.push(segment);
+            continue;
+        }
+        previous.score = bridged_score.max(previous.score).max(segment.score);
         previous.items_count = new_count;
     }
     merged

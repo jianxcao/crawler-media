@@ -1,10 +1,17 @@
 "use client";
 
+import { useState } from "react";
+
 import { ChapterStrip } from "@/components/chapter-strip";
 import type { ChapterTarget, ItemChapter } from "@/lib/api/libraries";
 import { shouldPollFrameTask, type FrameTask } from "@/lib/chapter-frame-task";
 
+import { MarkerControlPanel } from "./marker-control-panel";
+
 export function ItemChaptersSection({
+  libraryId,
+  mediaItemId,
+  seasons = [],
   isTv,
   canManageLibraries,
   chapterTarget,
@@ -19,6 +26,9 @@ export function ItemChaptersSection({
   onProbeMedia,
   onPlayChapter,
 }: {
+  libraryId?: string;
+  mediaItemId?: string;
+  seasons?: number[];
   isTv: boolean;
   canManageLibraries: boolean;
   chapterTarget: ChapterTarget | null;
@@ -33,12 +43,23 @@ export function ItemChaptersSection({
   onProbeMedia: () => void;
   onPlayChapter: (chapter: { start_ms: number }) => void;
 }) {
+  const [markerPanelOpen, setMarkerPanelOpen] = useState(false);
+
   return (
     <div className="mt-6 px-12 max-md:px-4">
       <div className="mb-2.5 flex flex-wrap items-center justify-between gap-2">
         <h3 className="text-sub font-semibold text-white/70">章节与片头片尾</h3>
         {canManageLibraries && (
           <div className="flex flex-wrap items-center gap-1.5 text-micro">
+            {isTv && libraryId && mediaItemId && (
+              <button
+                type="button"
+                onClick={() => setMarkerPanelOpen((open) => !open)}
+                className="rounded-md border border-sky-400/25 bg-sky-500/10 px-2.5 py-1 text-sky-200 transition hover:bg-sky-500/20"
+              >
+                {markerPanelOpen ? "收起片头片尾控制" : "片头片尾控制"}
+              </button>
+            )}
             <button
               type="button"
               disabled={chaptersBusy || !chapterTarget}
@@ -106,6 +127,16 @@ export function ItemChaptersSection({
         resumeMs={resumeMs}
         onPlay={onPlayChapter}
       />
+      {canManageLibraries && isTv && markerPanelOpen && libraryId && mediaItemId && (
+        <MarkerControlPanel
+          libraryId={libraryId}
+          mediaItemId={mediaItemId}
+          seasons={seasons}
+          selectedSeason={chapterTarget?.season}
+          selectedEpisode={chapterTarget?.episode}
+          selectedFileId={chapterTarget?.file_id}
+        />
+      )}
       {chapterError && <p className="mt-2 text-caption text-amber-300/80">{chapterError}</p>}
     </div>
   );

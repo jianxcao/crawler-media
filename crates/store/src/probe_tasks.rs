@@ -1,9 +1,12 @@
 mod counters;
+#[path = "probe_tasks/fingerprint_control.rs"]
+mod fingerprint_control;
 mod optional;
 #[path = "probe_tasks/queue_control.rs"]
 mod queue_control;
 
 pub(crate) use counters::reconcile_counts_in_transaction;
+pub use fingerprint_control::{FingerprintCancelScope, FingerprintCancelSummary};
 pub use queue_control::{ProbeCancelSummary, ProbeLibraryQueueSummary, ProbeQueueSummary};
 
 use rusqlite::{OptionalExtension, params};

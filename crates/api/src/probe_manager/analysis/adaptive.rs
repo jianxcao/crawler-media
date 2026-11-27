@@ -46,12 +46,27 @@ pub(super) fn decisions(
         policy,
     );
     let mut bundles = Vec::new();
-    let rebuilt = templates.models.is_empty()
-        || decisions
-            .iter()
-            .any(|d| matches!(d.decision, FingerprintDecision::Uncertain(_)));
-    if rebuilt {
-        (templates, bundles) = rebuild_templates(manager, claim, inputs, &templates, policy)?;
+    let discovery_kinds = if templates.models.is_empty() {
+        vec![marker::SegmentKind::Intro, marker::SegmentKind::Outro]
+    } else {
+        [marker::SegmentKind::Intro, marker::SegmentKind::Outro]
+            .into_iter()
+            .filter(|&kind| {
+                decisions.iter().any(|d| {
+                    d.kind == kind && matches!(d.decision, FingerprintDecision::Uncertain(_))
+                })
+            })
+            .collect::<Vec<_>>()
+    };
+    let rebuilt = !discovery_kinds.is_empty();
+    let mut models_updated = false;
+    if rebuilt
+        && let Some((next_templates, next_bundles)) =
+            rebuild_templates(manager, claim, inputs, &templates, policy, &discovery_kinds)?
+    {
+        templates = next_templates;
+        bundles = next_bundles;
+        models_updated = true;
         decisions = verify(
             manager,
             claim,
@@ -88,7 +103,7 @@ pub(super) fn decisions(
         used.insert(reference.ledger_id.clone());
     }
     let context = claim.participants[0].context();
-    let sets = if rebuilt {
+    let sets = if models_updated {
         vec![store::StoredFingerprintModelSet::new(
             context.media_id,
             context.season,
@@ -107,13 +122,18 @@ fn rebuild_templates(
     inputs: &Inputs,
     templates: &TemplateContext,
     policy: &marker::SamplingPolicy,
-) -> Result<(TemplateContext, Vec<store::StoredFingerprintModelBundle>), store::StoreError> {
+    discovery_kinds: &[marker::SegmentKind],
+) -> Result<Option<(TemplateContext, Vec<store::StoredFingerprintModelBundle>)>, store::StoreError>
+{
     let (models, measurement) = crate::fingerprint_job::measurement::EvidenceMeasurement::new(
         manager.fingerprint_engine.clone(),
         policy,
     )
-    .measure(|engine| model_groups::build(engine, inputs, policy));
+    .measure(|engine| model_groups::build_for_kinds(engine, inputs, policy, discovery_kinds));
     record_measurement(manager, claim, &measurement);
+    if models.is_empty() && !templates.models.is_empty() {
+        return Ok(None);
+    }
     let rebuilt_kinds = models.iter().map(|m| m.kind).collect::<HashSet<_>>();
     let mut combined = models;
     combined.extend(
@@ -163,7 +183,7 @@ fn rebuild_templates(
         templates.models.push(canonical);
         bundles.push(bundle);
     }
-    Ok((templates, bundles))
+    Ok(Some((templates, bundles)))
 }
 
 fn verify(

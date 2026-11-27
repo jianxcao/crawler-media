@@ -125,7 +125,7 @@ impl ProbeManager {
             Conflict,
             Store(crate::store::StoreError),
         }
-        let paused = self.background_is_paused();
+        let paused = self.fingerprint_dispatch_paused();
         let exempt_jobs = if paused {
             self.paused_exempt_jobs_for_ledgers(ledger_ids)
         } else {
@@ -279,7 +279,7 @@ impl ProbeManager {
         batches: &[ItemRefreshBatch],
         admitted: impl FnOnce() -> Result<(), ProbeEnqueueError>,
     ) -> Result<(), ProbeEnqueueError> {
-        let paused = self.background_is_paused();
+        let paused = self.fingerprint_dispatch_paused();
         let target_ids: Vec<String> = batches
             .iter()
             .flat_map(|batch| {

@@ -57,6 +57,7 @@ pub(super) fn prepare(bytes: &[u8], source: &CaptureSourceFacts) -> Result<Proof
         payload_sha256: String::new(),
     };
     let mut last_pos = None;
+    let mut leading_priming = true;
     let mut hash = Sha256::new();
     for (index, packet) in packets.iter().enumerate() {
         let pos = number(packet, "pos")?;
@@ -78,11 +79,18 @@ pub(super) fn prepare(bytes: &[u8], source: &CaptureSourceFacts) -> Result<Proof
             last_pos = Some(pos);
         }
         let (skip, discard) = padding(packet)?;
-        if (skip > 0 && index != 0)
-            || (discard > 0 && index + 1 != packets.len())
-            || skip > 1024
-            || discard >= 1024
-        {
+        let valid_skip = if skip == 0 {
+            leading_priming = false;
+            true
+        } else if leading_priming && index < 4 && skip <= 1024 && proof.skip + skip <= 4096 {
+            if skip < 1024 {
+                leading_priming = false;
+            }
+            true
+        } else {
+            false
+        };
+        if !valid_skip || (discard > 0 && index + 1 != packets.len()) || discard >= 1024 {
             return Err("unsupported interior padding".into());
         }
         proof.skip += skip;
@@ -154,7 +162,14 @@ fn validate_stream(
     } else {
         [0x12, 0x10]
     };
-    if asc != config && asc != [config[0], config[1], 0x56, 0xe5, 0x00] {
+    let valid_asc = asc == config
+        || (asc.len() >= 5
+            && asc.starts_with(&config)
+            && asc[2] == 0x56
+            && asc[3] == 0xe5
+            && (asc[4] & 0x80) == 0
+            && asc[5..].iter().all(|&b| b == 0));
+    if !valid_asc {
         return Err("unsupported AudioSpecificConfig".into());
     }
     Ok(rate)
@@ -182,11 +197,14 @@ fn validate_frames(
         }
         let index = matches[0];
         if index != next {
-            let (skip, _) = padding(packets[0])?;
-            if next != 0
-                || index != 1
-                || (skip != 1024 && stream["initial_padding"].as_u64() != Some(1024))
-            {
+            let init_pad = stream["initial_padding"].as_u64().unwrap_or(0);
+            let all_primed = next == 0
+                && index <= 4
+                && (0..index).all(|p| {
+                    padding(packets[p]).is_ok_and(|(s, _)| s == 1024)
+                        || init_pad >= ((p as u64 + 1) * 1024)
+                });
+            if !all_primed {
                 return Err("unobserved decoded access unit".into());
             }
         }

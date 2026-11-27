@@ -37,6 +37,8 @@ mod maintenance_config;
 mod maintenance_reporting;
 #[path = "maintenance_writer_isolation.rs"]
 mod maintenance_writer_isolation;
+#[path = "marker_standalone_control.rs"]
+mod marker_standalone_control;
 #[path = "metadata_language_operation.rs"]
 mod metadata_language_operation;
 #[path = "playback_history_page.rs"]

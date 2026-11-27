@@ -14,13 +14,14 @@ pub(super) fn geometry(e: &EpisodeEvidence) -> (u8, i64, i64) {
     }
 }
 
-pub(super) fn build(
+pub(super) fn build_for_kinds(
     engine: &dyn marker::FingerprintEngine,
     inputs: &Inputs,
     policy: &marker::SamplingPolicy,
+    kinds: &[SegmentKind],
 ) -> Vec<TemplateModel> {
     let mut models = Vec::new();
-    for kind in [SegmentKind::Intro, SegmentKind::Outro] {
+    for &kind in kinds {
         let samples = bounded_samples(inputs, kind, policy);
         // At most max_seed_count * max_windows_per_kind anchors (default 15).
         // Each view chooses at most one matching sample for each of five episodes.

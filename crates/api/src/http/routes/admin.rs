@@ -5,11 +5,12 @@ use axum::Router;
 use axum::routing::{delete, get, patch, post, put};
 
 use crate::http::{
-    downloaders, file_delete, fs, job_maintenance, jobs, library, library_admin, library_artwork,
-    library_chapters, library_config, library_delete, library_deletion, library_duplicates,
-    library_housekeeping, library_operations, library_organize, library_presence, library_scan,
-    media, media_operations, metadata_language, notify, playback, probe_settings, reidentify,
-    rule_sets, scrape_settings, settings, sites, system_logs, transfer_settings, users,
+    downloaders, file_delete, fingerprint_settings, fs, job_maintenance, jobs, library,
+    library_admin, library_artwork, library_chapters, library_config, library_delete,
+    library_deletion, library_duplicates, library_housekeeping, library_operations,
+    library_organize, library_presence, library_scan, marker_control, media, media_operations,
+    metadata_language, notify, playback, probe_settings, reidentify, rule_sets, scrape_settings,
+    settings, sites, system_logs, transfer_settings, users,
 };
 use crate::management::ApiState;
 
@@ -211,6 +212,14 @@ pub(super) fn admin_metadata_routes() -> Router<ApiState> {
             get(library_chapters::probe_status),
         )
         .route(
+            "/libraries/{id}/items/{item_id}/markers/detect",
+            post(marker_control::detect_markers),
+        )
+        .route(
+            "/libraries/{id}/items/{item_id}/markers",
+            put(marker_control::put_manual_marker).delete(marker_control::delete_manual_marker),
+        )
+        .route(
             "/libraries/{id}/cover",
             post(library_artwork::upload_library_cover)
                 .delete(library_artwork::delete_library_cover),
@@ -292,6 +301,26 @@ pub(super) fn admin_ops_routes() -> Router<ApiState> {
         .route("/probe/pause", post(probe_settings::pause))
         .route("/probe/resume", post(probe_settings::resume))
         .route("/probe/cancel", post(probe_settings::cancel))
+        .route(
+            "/settings/probe/fingerprint",
+            get(fingerprint_settings::get).put(fingerprint_settings::put),
+        )
+        .route(
+            "/probe/fingerprint/status",
+            get(fingerprint_settings::status),
+        )
+        .route(
+            "/probe/fingerprint/pause",
+            post(fingerprint_settings::pause),
+        )
+        .route(
+            "/probe/fingerprint/resume",
+            post(fingerprint_settings::resume),
+        )
+        .route(
+            "/probe/fingerprint/cancel",
+            post(fingerprint_settings::cancel),
+        )
         .route("/notify/config", put(notify::put_config))
         .route("/notify/test", post(notify::test))
         .route(

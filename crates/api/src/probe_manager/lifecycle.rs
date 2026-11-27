@@ -23,7 +23,7 @@ impl ProbeManager {
         let Some(participants) = self.store.probe_analysis_job_participants(job_id)? else {
             return Ok(());
         };
-        if self.background_is_paused() {
+        if self.fingerprint_dispatch_paused() {
             let job_exempt = self.is_job_paused_exempt(job_id);
             let promoted_survivor = participants
                 .iter()

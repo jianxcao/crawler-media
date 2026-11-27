@@ -53,6 +53,76 @@ export interface ItemProbeStatus {
   job: ProbeJobStatus | null;
 }
 
+export type MarkerDetectMode = "reuse_valid" | "recapture" | "theintrodb_only";
+
+export interface StoredEpisodeMarker {
+  intro_start_ms: number | null;
+  intro_end_ms: number | null;
+  outro_start_ms: number | null;
+  outro_end_ms: number | null;
+  source: string;
+  locked: boolean;
+  updated_at: number;
+}
+
+export interface KindDetectionStatus {
+  status: string;
+  decision: string;
+  reason: string | null;
+  reason_label: string;
+}
+
+export interface EpisodeMarkerDetection {
+  job_id: string;
+  stage: string;
+  status: string;
+  error: string | null;
+  intro: KindDetectionStatus | null;
+  outro: KindDetectionStatus | null;
+}
+
+export interface SeasonEpisodeMarkerRow {
+  file_id: string;
+  season: number;
+  episode: number;
+  duration_ms: number | null;
+  multi_unit: boolean;
+  marker: StoredEpisodeMarker | null;
+  detection: EpisodeMarkerDetection | null;
+}
+
+export interface SeasonMarkersDiagnostics {
+  season: number;
+  active: boolean;
+  job: ProbeJobStatus | null;
+  episodes: SeasonEpisodeMarkerRow[];
+}
+
+export interface DetectItemMarkersInput {
+  season: number;
+  episode?: number;
+  file_id?: string;
+  mode: MarkerDetectMode;
+}
+
+export interface DetectItemMarkersReceipt {
+  queued: boolean;
+  already_running?: boolean;
+  skipped_multi_unit: number;
+  job?: ProbeJobStatus | null;
+}
+
+export interface ManualMarkerInput {
+  file_id: string;
+  season: number;
+  episode: number;
+  intro_start_ms: number | null;
+  intro_end_ms: number | null;
+  outro_start_ms: number | null;
+  outro_end_ms: number | null;
+  locked: boolean;
+}
+
 function chapterPath(
   libraryId: string,
   mediaItemId: string,
@@ -164,4 +234,59 @@ export async function fetchItemSimilar(
     return result;
   }
   throw new Error("相似推荐响应格式错误");
+}
+
+export async function fetchSeasonMarkers(
+  libraryId: string,
+  mediaItemId: string,
+  season: number,
+  signal?: AbortSignal,
+): Promise<SeasonMarkersDiagnostics> {
+  const path = `/libraries/${libraryId}/items/${mediaItemId}/markers?${new URLSearchParams({ season: String(season) })}`;
+  return unwrap(request<ApiEnvelope<SeasonMarkersDiagnostics>>(path, { signal }));
+}
+
+export async function detectItemMarkers(
+  libraryId: string,
+  mediaItemId: string,
+  body: DetectItemMarkersInput,
+  signal?: AbortSignal,
+): Promise<DetectItemMarkersReceipt> {
+  return unwrap(
+    request<ApiEnvelope<DetectItemMarkersReceipt>>(
+      `/libraries/${libraryId}/items/${mediaItemId}/markers/detect`,
+      { method: "POST", body: JSON.stringify(body), signal },
+    ),
+  );
+}
+
+export async function saveManualMarker(
+  libraryId: string,
+  mediaItemId: string,
+  body: ManualMarkerInput,
+  signal?: AbortSignal,
+): Promise<StoredEpisodeMarker> {
+  return unwrap(
+    request<ApiEnvelope<StoredEpisodeMarker>>(
+      `/libraries/${libraryId}/items/${mediaItemId}/markers`,
+      { method: "PUT", body: JSON.stringify(body), signal },
+    ),
+  );
+}
+
+export async function deleteManualMarker(
+  libraryId: string,
+  mediaItemId: string,
+  target: { file_id: string; season: number; episode: number },
+  signal?: AbortSignal,
+): Promise<void> {
+  const query = new URLSearchParams({
+    file_id: target.file_id,
+    season: String(target.season),
+    episode: String(target.episode),
+  });
+  await request<ApiEnvelope<unknown>>(
+    `/libraries/${libraryId}/items/${mediaItemId}/markers?${query}`,
+    { method: "DELETE", signal },
+  );
 }

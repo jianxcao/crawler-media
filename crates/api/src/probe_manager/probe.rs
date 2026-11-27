@@ -188,7 +188,7 @@ pub(super) async fn probe_fingerprint_detailed(
     };
 
     if plan.sampling_mode == "adaptive" && unit.kind == MediaKind::Tv {
-        return super::analysis::capture_target(mgr, unit, &plan).await;
+        return super::analysis::capture_target(mgr, unit, &plan, control).await;
     }
 
     let path = PathBuf::from(&unit.row.file.path);
@@ -279,6 +279,11 @@ pub(super) async fn probe_fingerprint_and_store_detailed(
         Ok(outcome) => outcome,
         Err(error) if error == marker::media_read::READ_WAIT_STOPPED => {
             return super::stages::FingerprintRunOutcome::Retry;
+        }
+        Err(error) if error.contains("Library work cancelled") => {
+            return super::stages::FingerprintRunOutcome::Cancelled {
+                reason: "cancelled".into(),
+            };
         }
         Err(error) => {
             tracing::error!(

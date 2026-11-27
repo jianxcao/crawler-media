@@ -51,7 +51,14 @@ pub(super) fn eligible(evidence: &marker::EpisodeEvidence) -> bool {
         && capture.metrics.source_facts.is_some()
         && marker::boundary::evidence::candidate_pcm_coverage(capture).is_some()
         && if capture.metrics.time_mapping_version == 3 {
-            capture.metrics.contiguous_pcm_start_ms == Some(capture.window.start_ms)
+            capture
+                .metrics
+                .contiguous_pcm_start_ms
+                .is_some_and(|start| {
+                    start >= capture.window.start_ms
+                        && start - capture.window.start_ms
+                            <= marker::boundary::evidence::MAX_START_PACKET_SKEW_MS
+                })
                 && marker::boundary::evidence::complete_pcm(capture)
         } else {
             marker::boundary::evidence::capture_origin_covers_request_start(capture)

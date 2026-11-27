@@ -136,7 +136,16 @@ pub(super) fn request_next(
             else {
                 continue;
             };
-            let next = match next_window(search, decision, evidence, inputs, policy, stable_intro) {
+            let next = match next_window(
+                manager,
+                claim,
+                search,
+                decision,
+                evidence,
+                inputs,
+                policy,
+                stable_intro,
+            ) {
                 NextCapture::Stop => continue,
                 NextCapture::Window(window) => Some(window),
                 NextCapture::Exhausted => None,
@@ -187,7 +196,7 @@ fn request_participant_followup(
         ));
     }
     let job_id = &participant.dispatch().job_id;
-    if manager.background_is_paused()
+    if manager.fingerprint_dispatch_paused()
         && !manager.is_job_paused_exempt(job_id)
         && (claim_unit_exempt || manager.job_has_unit_exemption_or_promotion(job_id))
     {
@@ -249,6 +258,8 @@ enum NextCapture {
     Exhausted,
 }
 fn next_window(
+    manager: &ProbeManager,
+    claim: &store::ProbeAnalysisClaim,
     search: &KindSearch,
     decision: &EpisodeFingerprintDecision,
     evidence: &marker::EpisodeEvidence,
@@ -283,7 +294,7 @@ fn next_window(
         }
         search.next(evidence.duration_ms, policy.max_windows_per_kind)
     } else {
-        outro_fallback(search, evidence, policy)
+        outro_fallback(manager, claim, search, evidence, inputs, policy)
     };
     match next {
         Some(window) => NextCapture::Window(window),
@@ -292,11 +303,18 @@ fn next_window(
 }
 
 fn outro_fallback(
+    manager: &ProbeManager,
+    claim: &store::ProbeAnalysisClaim,
     search: &KindSearch,
     evidence: &marker::EpisodeEvidence,
+    inputs: &Inputs,
     policy: &marker::SamplingPolicy,
 ) -> Option<marker::SampleWindow> {
     let duration = evidence.duration_ms?;
+    let limit = policy.max_windows_per_kind.min(2);
+    if search.windows.len() >= limit {
+        return None;
+    }
     let descriptor = marker::EpisodeDescriptor {
         ledger_id: evidence.ledger_id.clone(),
         episode: evidence.episode,
@@ -314,8 +332,69 @@ fn outro_fallback(
         marker::WindowDecision::Full { window, .. }
         | marker::WindowDecision::Verify { window, .. } => window,
     };
-    (search.windows.len() < policy.max_windows_per_kind && !search.windows.contains(&window))
-        .then_some(window)
+    if !search.windows.contains(&window) {
+        return Some(window);
+    }
+    let extended = marker::SampleWindow::new((duration - 300_000).max(0), duration);
+    if extended.start_ms < window.start_ms && !search.windows.contains(&extended) {
+        let (clipped, measurement) = crate::fingerprint_job::measurement::EvidenceMeasurement::new(
+            manager.fingerprint_engine.clone(),
+            policy,
+        )
+        .measure(|engine| has_left_clipped_outro_candidate(engine, evidence, inputs, policy));
+        record_measurement(manager, claim, &measurement);
+        if clipped {
+            return Some(extended);
+        }
+    }
+    None
+}
+
+fn has_left_clipped_outro_candidate(
+    engine: &dyn marker::FingerprintEngine,
+    evidence: &marker::EpisodeEvidence,
+    inputs: &Inputs,
+    policy: &marker::SamplingPolicy,
+) -> bool {
+    let eligible_peers = inputs
+        .evidence
+        .iter()
+        .filter(|e| e.kind == SegmentKind::Outro && intro_search::eligible(e))
+        .collect::<Vec<_>>();
+    let independent = eligible_peers
+        .iter()
+        .map(|e| e.episode)
+        .collect::<HashSet<_>>()
+        .len();
+    if independent < policy.seed_count {
+        return false;
+    }
+    let min_secs = policy.min_match_duration_ms as f32 / 1000.0;
+    let max_secs = policy.max_match_duration_ms as f32 / 1000.0;
+    eligible_peers.into_iter().any(|peer| {
+        if peer.episode == evidence.episode {
+            return false;
+        }
+        let marker::PairFingerprintDecision::Candidates(segments) =
+            engine.compare_evidence(evidence, peer, min_secs, max_secs)
+        else {
+            return false;
+        };
+        segments.iter().any(|seg| {
+            let rel_start_ms = (seg.start1_sec * 1000.0).round() as i64;
+            let rel_end_ms = (seg.end1_sec * 1000.0).round() as i64;
+            marker::boundary::normalize_capture_interval(
+                &evidence.capture,
+                marker::boundary::Interval {
+                    start_ms: rel_start_ms,
+                    end_ms: rel_end_ms,
+                },
+            )
+            .is_ok_and(|interval| {
+                interval.start_ms - evidence.capture.window.start_ms < policy.boundary.min_guard_ms
+            })
+        })
+    })
 }
 
 // Only native strict absence in the actual default tail may replace a narrow

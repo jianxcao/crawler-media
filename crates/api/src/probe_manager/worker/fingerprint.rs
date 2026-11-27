@@ -5,15 +5,67 @@ use super::{
 };
 use crate::probe_manager::{ProbeManager, probe, stages};
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
-pub(super) async fn run_fingerprint_worker(manager: Arc<ProbeManager>) {
+struct FingerprintPermit(Arc<ProbeManager>);
+
+impl Drop for FingerprintPermit {
+    fn drop(&mut self) {
+        self.0.fingerprint_admission.lock().active -= 1;
+        self.0.fingerprint_capacity.notify_waiters();
+    }
+}
+
+struct ActiveFingerprintGuard {
+    manager: Arc<ProbeManager>,
+    job_id: String,
+    ledger_id: String,
+}
+
+impl Drop for ActiveFingerprintGuard {
+    fn drop(&mut self) {
+        self.manager
+            .unregister_active_fingerprint(&self.job_id, &self.ledger_id);
+    }
+}
+
+async fn fingerprint_permit(manager: &Arc<ProbeManager>) -> Option<FingerprintPermit> {
     loop {
+        let available = manager.fingerprint_capacity.notified();
+        tokio::pin!(available);
+        available.as_mut().enable();
+        {
+            let mut admission = manager.fingerprint_admission.lock();
+            if admission.active < admission.limit {
+                admission.active += 1;
+                return Some(FingerprintPermit(manager.clone()));
+            }
+        }
+        tokio::select! {
+            _ = wait_for_shutdown(manager) => return None,
+            _ = available => {}
+        }
+    }
+}
+
+async fn next_fingerprint_work(
+    manager: &Arc<ProbeManager>,
+) -> Option<(
+    store::ProbeDispatchId,
+    probe::FingerprintWork,
+    FingerprintPermit,
+)> {
+    loop {
+        let _receiver = tokio::select! {
+            _ = wait_for_shutdown(manager) => return None,
+            guard = manager.fingerprint_receiver.lock() => guard,
+        };
         let message = {
             let mut rx = manager.fingerprint_rx.lock().take();
             let message = match rx.as_mut() {
                 Some(receiver) => {
                     let received = tokio::select! {
-                        _ = wait_for_shutdown(&manager) => Some(None),
+                        _ = wait_for_shutdown(manager) => Some(None),
                         message = receiver.recv() => Some(message),
                         _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => None,
                     };
@@ -32,22 +84,43 @@ pub(super) async fn run_fingerprint_worker(manager: Arc<ProbeManager>) {
             }
             message
         };
-        let Some((id, work)) = message else { break };
-        let _window = FingerprintWindowGuard(manager.clone());
-        if manager
-            .shutting_down
-            .load(std::sync::atomic::Ordering::SeqCst)
-        {
-            manager.remove_seen_if_job(&id.ledger_id, &id.job_id);
-            continue;
-        }
-        if manager.background_is_paused()
+        let (id, work) = message?;
+        if manager.fingerprint_dispatch_paused()
             && !manager.is_dispatch_paused_exempt(&id.job_id, &id.ledger_id)
         {
             manager.remove_seen_if_job(&id.ledger_id, &id.job_id);
             continue;
         }
-        let Some(owns_running) = process_fingerprint(&manager, work).await else {
+        let permit = fingerprint_permit(manager).await?;
+        if manager.fingerprint_dispatch_paused()
+            && !manager.is_dispatch_paused_exempt(&id.job_id, &id.ledger_id)
+        {
+            manager.remove_seen_if_job(&id.ledger_id, &id.job_id);
+            continue;
+        }
+        return Some((id, work, permit));
+    }
+}
+
+pub(super) async fn run_fingerprint_worker(manager: Arc<ProbeManager>) {
+    loop {
+        let Some((id, work, permit)) = next_fingerprint_work(&manager).await else {
+            break;
+        };
+        let _window = FingerprintWindowGuard(manager.clone());
+        if manager.shutting_down.load(Ordering::SeqCst) {
+            manager.remove_seen_if_job(&id.ledger_id, &id.job_id);
+            continue;
+        }
+        if manager.fingerprint_dispatch_paused()
+            && !manager.is_dispatch_paused_exempt(&id.job_id, &id.ledger_id)
+        {
+            manager.remove_seen_if_job(&id.ledger_id, &id.job_id);
+            continue;
+        }
+        let owns_running = process_fingerprint(&manager, work).await;
+        drop(permit);
+        let Some(owns_running) = owns_running else {
             continue;
         };
         retry_dispatch(&manager, &id, owns_running).await;
@@ -60,12 +133,12 @@ async fn process_fingerprint(
 ) -> Option<bool> {
     let owns_running = work.start_job;
     let unit = work.unit.clone();
-    let ready = step(&manager, {
+    let ready = step(manager, {
         let unit = unit.clone();
         move |manager| {
             let ledger_id = unit.row.file.file_id.to_string();
             if let Some(job_id) = unit.job_id.as_deref()
-                && manager.background_is_paused()
+                && manager.fingerprint_dispatch_paused()
                 && !manager.is_dispatch_paused_exempt(job_id, &ledger_id)
             {
                 manager.remove_seen_if_job(&ledger_id, job_id);
@@ -86,7 +159,7 @@ async fn process_fingerprint(
         Ok(Err(())) => return None,
         Ok(Ok(false)) | Err(_) => return Some(false),
     }
-    let leased = step(&manager, {
+    let leased = step(manager, {
         let unit = unit.clone();
         move |manager| {
             if unit.marker_refresh_id.is_some() {
@@ -112,7 +185,7 @@ async fn process_fingerprint(
         Err(_) => return Some(owns_running),
     };
     let owner = unit.row.file.library_id.to_string();
-    let control = _refresh_leases
+    let base_control = _refresh_leases
         .iter()
         .find(|lease| lease.library_id() == owner)
         .map(|lease| lease.control().signal().clone())
@@ -124,9 +197,16 @@ async fn process_fingerprint(
             control
         })
         .with_read_stop(manager.remote_reads_wait_stopped.clone());
-    // The full-window and adaptive pipelines include synchronous source reads
-    // and SQL between awaits. Drive the whole future on one bounded worker;
-    // the permit stays with it until its final publication has really finished.
+    let control = base_control.linked_child();
+    let active_guard = unit.job_id.as_ref().map(|job_id| {
+        let ledger_id = unit.row.file.file_id.to_string();
+        manager.register_active_fingerprint(job_id, &ledger_id, &unit, control.clone());
+        ActiveFingerprintGuard {
+            manager: manager.clone(),
+            job_id: job_id.clone(),
+            ledger_id,
+        }
+    });
     let runtime = tokio::runtime::Handle::current();
     let outcome = match step(manager, move |manager| {
         runtime.block_on(probe::probe_fingerprint_detailed(manager, &work, &control))
@@ -135,14 +215,14 @@ async fn process_fingerprint(
     {
         Ok(outcome) => outcome,
         Err(error) => {
+            drop(active_guard);
             tracing::error!(%error, "声纹流水线 worker 失败，保留持久单元供重试");
             return Some(owns_running);
         }
     };
-    let _ = step(&manager, move |manager| {
-        if manager
-            .shutting_down
-            .load(std::sync::atomic::Ordering::Acquire)
+    drop(active_guard);
+    let _ = step(manager, move |manager| {
+        if manager.shutting_down.load(Ordering::Acquire)
             || marker::media_read::remote_reads_stopping()
         {
             return;

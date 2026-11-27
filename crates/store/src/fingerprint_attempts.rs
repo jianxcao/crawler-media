@@ -63,6 +63,14 @@ impl Store {
         self.with_library_read(|db| db.list_fingerprint_attempts_for_job(job_id))
     }
 
+    pub fn list_recent_library_fingerprint_attempts(
+        &self,
+        library_id: domain::LibraryId,
+        limit: usize,
+    ) -> Result<Vec<StoredFingerprintAttempt>, StoreError> {
+        self.with_library_read(|db| db.list_recent_library_fingerprint_attempts(library_id, limit))
+    }
+
     pub fn get_fingerprint_attempt(
         &self,
         attempt_id: &str,

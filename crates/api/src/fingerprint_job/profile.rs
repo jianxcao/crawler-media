@@ -63,6 +63,13 @@ pub(crate) fn reusable_capture(
                             && i128::from(mapping.origin_max_us) >= requested_us
                     })
         } else {
-            capture.metrics.contiguous_pcm_start_ms == Some(capture.window.start_ms)
+            capture
+                .metrics
+                .contiguous_pcm_start_ms
+                .is_some_and(|start| {
+                    start >= capture.window.start_ms
+                        && start - capture.window.start_ms
+                            <= marker::boundary::evidence::MAX_START_PACKET_SKEW_MS
+                })
         }
 }

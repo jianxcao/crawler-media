@@ -123,7 +123,7 @@ pub(super) fn handoff(manager: &ProbeManager, unit: &ProbeUnit) -> Result<(), st
         ));
     }
     manager.remove_seen_if_job(&id, job);
-    if manager.background_is_paused()
+    if manager.fingerprint_dispatch_paused()
         && !manager.is_job_paused_exempt(job)
         && manager.is_unit_paused_exempt(job, &id)
         && manager
@@ -137,7 +137,7 @@ pub(super) fn handoff(manager: &ProbeManager, unit: &ProbeUnit) -> Result<(), st
     {
         manager.unmark_unit_paused_exempt(job, &id);
     }
-    if !manager.background_is_paused() || manager.is_dispatch_paused_exempt(job, &id) {
+    if !manager.fingerprint_dispatch_paused() || manager.is_dispatch_paused_exempt(job, &id) {
         observe_dirty(
             manager,
             SeasonKey {
@@ -249,7 +249,7 @@ fn scan_analysis_keys(
     manager: &ProbeManager,
     after: Option<(domain::MediaId, u32)>,
 ) -> Result<(Option<(domain::MediaId, u32)>, Vec<(SeasonKey, String)>), store::StoreError> {
-    let paused = manager.background_is_paused();
+    let paused = manager.fingerprint_dispatch_paused();
     if paused && !manager.has_paused_exempt_analysis_work() {
         return Ok((None, Vec::new()));
     }
@@ -276,10 +276,17 @@ async fn execute_due_ticket(
     manager: &Arc<ProbeManager>,
     ticket: super::season_schedule::AnalysisTicket,
 ) {
-    super::worker::wait_for_metadata_idle(manager).await;
     let key = ticket.key;
+    let is_exempt = super::worker::step(manager, move |manager| {
+        season_has_paused_exempt_analysis(manager, key.media_id, key.season).unwrap_or(false)
+    })
+    .await
+    .unwrap_or(false);
+    if !is_exempt {
+        super::worker::wait_for_metadata_idle(manager).await;
+    }
     let result = super::worker::step(manager, move |manager| {
-        if manager.background_is_paused()
+        if manager.fingerprint_dispatch_paused()
             && !season_has_paused_exempt_analysis(manager, key.media_id, key.season)?
         {
             return Ok(None);
@@ -317,7 +324,7 @@ pub(super) async fn run(manager: Arc<ProbeManager>) {
         if manager.shutting_down.load(Ordering::SeqCst) {
             break;
         }
-        if manager.background_is_paused() && !manager.has_paused_exempt_analysis_work() {
+        if manager.fingerprint_dispatch_paused() && !manager.has_paused_exempt_analysis_work() {
             after = None;
             tokio::select! {
                 _ = super::worker::wait_for_shutdown(&manager) => break,

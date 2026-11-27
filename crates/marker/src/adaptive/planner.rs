@@ -31,13 +31,8 @@ pub fn plan_episode_window(
         };
     }
 
-    let late_prediction = kind == SegmentKind::Intro
-        && models.iter().any(|model| {
-            model
-                .references
-                .iter()
-                .any(|reference| reference.match_interval_ms.1 > full_window.end_ms)
-        });
+    let late_prediction = has_late_intro_prediction(&models, &full_window);
+    let early_outro_prediction = has_early_outro_prediction(episode, kind, &models, &full_window);
     // Calculate predicted envelopes for all models
     let mut predicted_ranges = Vec::new();
     let mut used_model_ids = Vec::new();
@@ -71,8 +66,12 @@ pub fn plan_episode_window(
         max_end = max_end.max(e);
     }
 
-    // Clamp within default search range
-    let clamped_start = min_start.max(full_window.start_ms);
+    // Clamp within bounded kind search range
+    let clamped_start = if early_outro_prediction {
+        min_start.max((episode.duration_ms - 300_000).max(0))
+    } else {
+        min_start.max(full_window.start_ms)
+    };
     let clamped_end = if late_prediction {
         max_end
     } else {
@@ -97,8 +96,10 @@ pub fn plan_episode_window(
             reason: "prediction_exceeds_capture_bound".into(),
         };
     }
-    // The initial window cannot discover a late prediction, so its cost is irrelevant.
-    if late_prediction && verify_window.end_ms > full_window.end_ms {
+    // The initial window cannot discover a late intro or early outro, so its cost is irrelevant.
+    if (late_prediction && verify_window.end_ms > full_window.end_ms)
+        || (early_outro_prediction && verify_window.start_ms < full_window.start_ms)
+    {
         return WindowDecision::Verify {
             window: verify_window,
             model_ids: used_model_ids,
@@ -115,6 +116,38 @@ pub fn plan_episode_window(
         window: verify_window,
         model_ids: used_model_ids,
     }
+}
+
+fn has_late_intro_prediction(
+    models: &[&super::types::TemplateModel],
+    full_window: &SampleWindow,
+) -> bool {
+    models.iter().any(|model| {
+        model.kind == SegmentKind::Intro
+            && model
+                .references
+                .iter()
+                .any(|reference| reference.match_interval_ms.1 > full_window.end_ms)
+    })
+}
+
+fn has_early_outro_prediction(
+    episode: &EpisodeDescriptor,
+    kind: SegmentKind,
+    models: &[&super::types::TemplateModel],
+    full_window: &SampleWindow,
+) -> bool {
+    kind == SegmentKind::Outro
+        && episode.duration_ms > 0
+        && models.iter().any(|model| {
+            model.references.iter().any(|reference| {
+                let from_end = reference
+                    .match_from_end_ms
+                    .map(|(d1, d2)| d1.max(d2))
+                    .unwrap_or(reference.match_interval_ms.1 - reference.match_interval_ms.0);
+                episode.duration_ms - from_end < full_window.start_ms
+            })
+        })
 }
 
 fn prediction_models<'a>(

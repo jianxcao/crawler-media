@@ -28,7 +28,16 @@
 
 启动时加载持久化配置。保存成功后无需重启：后续媒体信息任务和远程读取按新设置准入；更改读取间隔也会让正在排队的读取重新计算等待时间。
 
-活动读取不会被中断。降低并发时，必须等现有活动数降到新上限以下才进入后续任务；不会在已有两个任务运行时因其中一个结束就违反新上限 1。同优先级媒体信息文件按派发顺序等待准入，后加入的文件不能越过队首等待文件。声纹仍使用独立的单 worker 队列，`metadata_workers` 不改变它。
+活动读取不会被中断。降低并发时，必须等现有活动数降到新上限以下才进入后续任务；不会在已有两个任务运行时因其中一个结束就违反新上限 1。同优先级媒体信息文件按派发顺序等待准入，后加入的文件不能越过队首等待文件。声纹检测使用独立的并发准入与暂停状态（见下节），`metadata_workers` 不改变声纹并发。
+
+## 声纹片头片尾独立控制
+
+管理员可在同一刮削设置页或作品详情页独立配置和控制声纹片头片尾检测，与 `ffprobe` 媒体流信息探测完全解耦：
+
+- `GET /api/v1/settings/probe/fingerprint` / `PUT /api/v1/settings/probe/fingerprint`：持久化于 `app.db` `settings` 表（键为 `probe.fingerprint`），完整形状为 `{ "workers": 1..=8, "paused": boolean }`（默认 `workers: 1, paused: false`）。未知字段、越界或类型错误返回 `400 probe.invalid`。修改 `workers` 立即更新声纹信号量准入，降低并发不打断已运行子进程，后续任务等活动数低于新上限后再进入。
+- `GET /api/v1/probe/fingerprint/status`：返回 `{workers, paused, remote_reads_paused, queued_capture, running_capture, queued_analysis}`。
+- `POST /api/v1/probe/fingerprint/pause` / `POST /api/v1/probe/fingerprint/resume`：仅暂停或恢复声纹采集与分析派发（同步持久化 `paused`），不影响媒体信息 `ffprobe` 队列。
+- `POST /api/v1/probe/fingerprint/cancel`：接受空请求体或严格 JSON `{"library_id"?: string, "media_id"?: string, "season"?: number, "file_id"?: string}`，立即取消匹配范围内的排队/分析声纹单元，并对活动中的声纹 `ffmpeg` 子进程触发单元级取消令牌终止，不影响同一 Library 的其他任务。
 
 ## STRM 后台读取暂停
 
@@ -48,5 +57,6 @@
 
 - `crates/api/tests/probe_settings_runtime.rs`：默认读取行为、HTTP 保存/读回/参数错误/权限、重建实例后持久化、媒体信息并发热升降、后加入文件不越过旧等待文件、共享远程并发热修改及启动读取间隔。
 - `crates/api/tests/probe_queue_control_and_restart_pause.rs`、`crates/api/tests/probe_paused_manual_and_cancel.rs`：生产启动默认暂停、`/probe/{status,pause,resume,cancel}` 权限与队列统计、单条目探测豁免及仅取消排队项语义。
+- `crates/api/tests/marker_standalone_control.rs`、`web/test/marker-standalone-control.test.mjs`：声纹独立并发/暂停/取消（含运行中子进程中断且不影响 `ffprobe`）、按季/单集三种模式检测、逐集诊断状态及人工标记编辑/锁定/清除。
 - `crates/marker/tests/media_read.rs`：共享准入、读取间隔、取消、本地读取不被远程阻塞、运行时缩短间隔。
 - `web/test/probe-settings.test.mjs`：真实组件加载、范围校验、保存和失败后重试。

@@ -28,6 +28,7 @@ mod admission;
 mod analysis;
 pub mod clock;
 mod dispatch;
+mod fingerprint_control;
 mod lifecycle;
 mod markers;
 mod media_info;
@@ -115,6 +116,7 @@ pub struct ProbeManager {
     metadata_receiver: tokio::sync::Mutex<()>,
     dispatch_work: crate::blocking_budget::BlockingBudget,
     fingerprint_rx: Mutex<Option<mpsc::Receiver<(store::ProbeDispatchId, probe::FingerprintWork)>>>,
+    fingerprint_receiver: tokio::sync::Mutex<()>,
     clock: Mutex<Arc<dyn clock::ProbeClock>>,
     pub comparison_runs: std::sync::atomic::AtomicUsize,
     analysis_schedule: Mutex<season_schedule::SeasonAnalysisSchedule>,
@@ -123,6 +125,7 @@ pub struct ProbeManager {
     pub assessments: AtomicUsize,
     workers_started: AtomicBool,
     background_paused: AtomicBool,
+    fingerprint_paused: AtomicBool,
     pause_epoch: AtomicU64,
     pause_state_lock: Mutex<()>,
     paused_exempt_jobs: std::sync::Mutex<HashSet<String>>,
@@ -130,12 +133,17 @@ pub struct ProbeManager {
     promoted_units: Mutex<HashSet<(String, String)>>,
     obligation_wake: Arc<Notify>,
     probe_settings: Mutex<crate::probe_settings::ProbeSettings>,
+    fingerprint_settings: Mutex<crate::probe_settings::FingerprintProbeSettings>,
     remote_reads_paused: Mutex<bool>,
     settings_publish_lock: Mutex<()>,
     settings_revision: AtomicU64,
     remote_reads_wait_stopped: Arc<AtomicBool>,
     metadata_admission: Mutex<worker::MetadataAdmission>,
     metadata_capacity: Notify,
+    fingerprint_admission: Mutex<worker::MetadataAdmission>,
+    fingerprint_capacity: Notify,
+    active_fingerprint_controls:
+        Mutex<HashMap<(String, String), fingerprint_control::ActiveFingerprintControl>>,
     shutting_down: Arc<AtomicBool>,
     shutdown_signal: tokio::sync::watch::Sender<bool>,
     shutdown_lock: tokio::sync::Mutex<()>,
@@ -252,6 +260,7 @@ impl ProbeManager {
     ) -> Result<Self, store::StoreError> {
         let channels = dispatch::channels();
         let settings = crate::probe_settings::ProbeSettings::load(&store)?;
+        let fingerprint_settings = crate::probe_settings::FingerprintProbeSettings::load(&store)?;
         let remote_reads = crate::probe_settings::RemoteReadsSettings::load(&store)?;
         let (shutdown_signal, _) = tokio::sync::watch::channel(false);
         let data_dir = store.data_dir().to_path_buf();
@@ -282,6 +291,7 @@ impl ProbeManager {
             metadata_receiver: tokio::sync::Mutex::new(()),
             dispatch_work: crate::blocking_budget::BlockingBudget::new(12),
             fingerprint_rx: Mutex::new(Some(channels.fingerprint_rx)),
+            fingerprint_receiver: tokio::sync::Mutex::new(()),
             clock: Mutex::new(Arc::new(clock::SystemClock)),
             comparison_runs: std::sync::atomic::AtomicUsize::new(0),
             analysis_schedule: Mutex::new(season_schedule::SeasonAnalysisSchedule::new(
@@ -290,6 +300,7 @@ impl ProbeManager {
             assessments: AtomicUsize::new(0),
             workers_started: AtomicBool::new(false),
             background_paused: AtomicBool::new(initial_background_paused),
+            fingerprint_paused: AtomicBool::new(fingerprint_settings.paused),
             pause_epoch: AtomicU64::new(0),
             pause_state_lock: Mutex::new(()),
             paused_exempt_jobs: std::sync::Mutex::new(HashSet::new()),
@@ -297,6 +308,7 @@ impl ProbeManager {
             promoted_units: Mutex::new(HashSet::new()),
             obligation_wake: Arc::new(Notify::new()),
             probe_settings: Mutex::new(settings),
+            fingerprint_settings: Mutex::new(fingerprint_settings),
             remote_reads_paused: Mutex::new(remote_reads.paused),
             settings_publish_lock: Mutex::new(()),
             settings_revision: AtomicU64::new(0),
@@ -305,6 +317,11 @@ impl ProbeManager {
                 settings.metadata_workers,
             )),
             metadata_capacity: Notify::new(),
+            fingerprint_admission: Mutex::new(worker::MetadataAdmission::new(
+                fingerprint_settings.workers,
+            )),
+            fingerprint_capacity: Notify::new(),
+            active_fingerprint_controls: Mutex::new(HashMap::new()),
             shutting_down: Arc::new(AtomicBool::new(false)),
             shutdown_signal,
             shutdown_lock: tokio::sync::Mutex::new(()),
@@ -438,10 +455,26 @@ impl ProbeManager {
         self.settings_revision.load(Ordering::Acquire)
     }
 
+    #[cfg(test)]
     pub(crate) fn apply_startup_settings_if_unchanged(
         &self,
         observed_revision: u64,
         settings: Option<crate::probe_settings::ProbeSettings>,
+        remote_reads: Option<crate::probe_settings::RemoteReadsSettings>,
+    ) -> bool {
+        self.apply_startup_all_settings_if_unchanged(
+            observed_revision,
+            settings,
+            None,
+            remote_reads,
+        )
+    }
+
+    pub(crate) fn apply_startup_all_settings_if_unchanged(
+        &self,
+        observed_revision: u64,
+        settings: Option<crate::probe_settings::ProbeSettings>,
+        fingerprint: Option<crate::probe_settings::FingerprintProbeSettings>,
         remote_reads: Option<crate::probe_settings::RemoteReadsSettings>,
     ) -> bool {
         let _publish = self.settings_publish_lock.lock();
@@ -451,6 +484,9 @@ impl ProbeManager {
         }
         if let Some(settings) = settings {
             self.apply_probe_settings_locked(settings);
+        }
+        if let Some(fingerprint) = fingerprint {
+            self.apply_fingerprint_settings_locked(fingerprint);
         }
         self.apply_remote_reads_pause_locked(remote_reads.is_none_or(|settings| settings.paused));
         self.settings_revision.fetch_add(1, Ordering::Release);

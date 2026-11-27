@@ -268,6 +268,123 @@ async fn ordinary_late_arrivals_revisit_exact_evidence_until_three_independent_e
         );
     }
 }
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn early_outro_clipped_at_default_180s_tail_expands_to_300s_and_publishes() {
+    struct ClippedOutroEngine {
+        requests: std::sync::Mutex<Vec<(String, marker::SampleWindow)>>,
+    }
+    impl marker::FingerprintEngine for ClippedOutroEngine {
+        fn extract_at(
+            &self,
+            _: &std::path::Path,
+            _: u32,
+            _: u32,
+            _: &marker::WorkControl,
+        ) -> Result<Vec<u32>, String> {
+            unreachable!()
+        }
+        fn find_common_segment(
+            &self,
+            a: &[u32],
+            b: &[u32],
+            min: f32,
+            max: f32,
+        ) -> Option<marker::CommonSegment> {
+            // Intro at [20_000, 100_000]; early Outro at [2_190_000, 2_250_000] (150s post-credit + preview).
+            for (s, e) in [(20_000i64, 100_000i64), (2_190_000i64, 2_250_000i64)] {
+                let ov_s1 = s.max(a[0] as i64);
+                let ov_e1 = e.min(a[1] as i64);
+                let ov_s2 = s.max(b[0] as i64);
+                let ov_e2 = e.min(b[1] as i64);
+                let dur = (ov_e1 - ov_s1).min(ov_e2 - ov_s2);
+                if dur as f32 / 1000.0 >= min && dur as f32 / 1000.0 <= max {
+                    return Some(marker::CommonSegment {
+                        start1_sec: (ov_s1 - a[0] as i64) as f32 / 1000.0,
+                        end1_sec: (ov_e1 - a[0] as i64) as f32 / 1000.0,
+                        start2_sec: (ov_s2 - b[0] as i64) as f32 / 1000.0,
+                        end2_sec: (ov_e2 - b[0] as i64) as f32 / 1000.0,
+                        duration_sec: dur as f32 / 1000.0,
+                        score: 0.5,
+                    });
+                }
+            }
+            None
+        }
+        fn compare_fingerprints(
+            &self,
+            a: &[u32],
+            b: &[u32],
+            min: f32,
+            max: f32,
+        ) -> marker::PairFingerprintDecision {
+            match self.find_common_segment(a, b, min, max) {
+                Some(seg) => marker::PairFingerprintDecision::Candidates(vec![seg]),
+                None => marker::PairFingerprintDecision::NoMatch,
+            }
+        }
+    }
+    impl marker::FingerprintCaptureEngine for ClippedOutroEngine {
+        fn capture_window(
+            &self,
+            r: &marker::CaptureRequest,
+        ) -> Result<marker::CapturedFingerprint, marker::CaptureFailure> {
+            self.requests
+                .lock()
+                .unwrap()
+                .push((r.path.to_string_lossy().into(), r.window.clone()));
+            let ep = r
+                .path
+                .file_stem()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .rsplit('E')
+                .next()
+                .unwrap()
+                .parse::<u32>()
+                .unwrap();
+            Ok(support::fixture_capture_window(
+                r.window.clone(),
+                vec![r.window.start_ms as u32, r.window.end_ms as u32, ep, 42],
+            ))
+        }
+    }
+
+    let (mut s, _) = scenario(3, -1, 0, None).await;
+    s.manager.shutdown_workers().await.unwrap();
+    let custom = std::sync::Arc::new(ClippedOutroEngine {
+        requests: std::sync::Mutex::new(vec![]),
+    });
+    s.manager = std::sync::Arc::new(
+        api::probe_manager::ProbeManager::with_engines(
+            s.store.clone(),
+            custom.clone(),
+            custom.clone(),
+        )
+        .unwrap(),
+    );
+    s.manager.set_clock(s.clock.clone());
+    assert!(s.manager.try_start_workers());
+
+    let job = run(&s).await;
+    assert_eq!(job.status, "succeeded");
+    for row in &s.ledgers {
+        let marker = s
+            .store
+            .get_file_marker(row.file.file_id, row.units[0])
+            .unwrap()
+            .expect("both intro and early outro should publish");
+        assert_eq!(
+            (marker.intro_start_ms, marker.intro_end_ms),
+            (Some(20_000), Some(100_000))
+        );
+        assert_eq!(
+            (marker.outro_start_ms, marker.outro_end_ms),
+            (Some(2_190_000), Some(2_250_000))
+        );
+    }
+}
+
 #[path = "marker_late_intro_capture/mixed_reuse.rs"]
 mod mixed_reuse;
 #[path = "marker_late_intro_capture/review_conflict.rs"]

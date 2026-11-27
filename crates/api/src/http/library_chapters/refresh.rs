@@ -46,11 +46,7 @@ pub(crate) async fn refresh_item_chapters(
     let requested_season = unit
         .episode_coordinates()
         .map_or(1, |coordinates| coordinates.0);
-    if row.units.len() != 1
-        || rows.iter().any(|candidate| {
-            covers_season(candidate, requested_season) && candidate.units.len() != 1
-        })
-    {
+    if row.units.len() != 1 {
         tracing::error!(%media_id, season = requested_season, error_kind = "unit_time_mapping_unsupported",
             "chapter refresh rejected: multiunit file needs unit time mapping");
         return err(
@@ -84,7 +80,7 @@ pub(crate) async fn refresh_item_chapters(
         .map_or(1, |coordinates| coordinates.0);
     let fingerprint_rows: Vec<_> = rows
         .iter()
-        .filter(|candidate| covers_season(candidate, season))
+        .filter(|candidate| covers_season(candidate, season) && candidate.units.len() == 1)
         .cloned()
         .collect();
     let items = match chapter_items_off_executor(&state, row, refreshed).await {

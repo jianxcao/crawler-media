@@ -54,13 +54,18 @@ pub(in crate::probe_manager) async fn capture_target(
     manager: &ProbeManager,
     unit: &ProbeUnit,
     plan: &CapturePlan,
+    control: &marker::WorkControl,
 ) -> FingerprintRunOutcome {
-    match capture(manager, unit, plan).await {
+    match capture(manager, unit, plan, control).await {
         Ok(()) => FingerprintRunOutcome::Complete,
         Err(error) if error == marker::media_read::READ_WAIT_STOPPED => {
             FingerprintRunOutcome::Retry
         }
-        Err(error) if error.contains("file_deleted") => {
+        Err(error)
+            if error.contains("file_deleted")
+                || error.contains("Library work cancelled")
+                || error.contains("Cancelled:") =>
+        {
             FingerprintRunOutcome::Cancelled { reason: error }
         }
         Err(error) if error.contains("unit_time_mapping_unsupported") => {
@@ -87,6 +92,7 @@ async fn capture(
     manager: &ProbeManager,
     unit: &ProbeUnit,
     plan: &CapturePlan,
+    control: &marker::WorkControl,
 ) -> Result<(), String> {
     let job_id = unit.job_id.clone().ok_or("capture job missing")?;
     let policy = plan.policy.clone();
@@ -109,6 +115,7 @@ async fn capture(
         manager,
         std::slice::from_ref(unit),
     )?;
+    let gate = gate.with_unit_control(unit.row.file.file_id.to_string(), control.clone());
     let context = AdaptiveCaptureContext {
         store: manager.store_access(),
         matcher: manager.fingerprint_engine.clone(),
@@ -138,7 +145,7 @@ async fn capture(
             CapturePolicy::Recapture
         },
         templates,
-        cost_summary: Default::default(),
+        cost_summary: load_source_cost_summary(manager, unit.row.file.library_id),
     };
     let stage_key = crate::fingerprint_job::key_for_file(
         &manager.store,
@@ -147,6 +154,44 @@ async fn capture(
         duration,
     );
     capture_pending(manager, unit, plan, &context, &request, &stage_key).await
+}
+
+fn load_source_cost_summary(
+    manager: &ProbeManager,
+    library_id: domain::LibraryId,
+) -> marker::adaptive::SourceCostSummary {
+    let Ok(attempts) = manager
+        .store
+        .list_recent_library_fingerprint_attempts(library_id, 16)
+    else {
+        return Default::default();
+    };
+    let observations = attempts
+        .into_iter()
+        .filter_map(|attempt| {
+            let parsed =
+                serde_json::from_str::<marker::CaptureMetrics>(&attempt.metrics_json).ok()?;
+            if !parsed.measurement_complete || parsed.time_to_first_pcm_ms.is_none() {
+                return None;
+            }
+            let fallback_elapsed = attempt
+                .finished_at_ms
+                .map(|fin| fin.saturating_sub(attempt.started_at_ms).max(0) as u64)
+                .unwrap_or(0);
+            Some(marker::adaptive::AttemptCostObservation {
+                phase: attempt.phase,
+                succeeded: attempt.status == "succeeded",
+                window_duration_ms: (attempt.window_end_ms - attempt.window_start_ms).max(0),
+                elapsed_ms: if parsed.elapsed_ms > 0 {
+                    parsed.elapsed_ms
+                } else {
+                    fallback_elapsed
+                },
+                time_to_first_pcm_ms: parsed.time_to_first_pcm_ms,
+            })
+        })
+        .collect::<Vec<_>>();
+    marker::adaptive::SourceCostSummary::from_observations(&observations)
 }
 
 async fn capture_pending(

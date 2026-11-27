@@ -24,7 +24,8 @@ pub struct SeasonMatchSession {
 }
 
 struct Cache {
-    entries: BTreeMap<PairKey, Entry>,
+    entries: BTreeMap<Arc<PairKey>, Entry>,
+    order: BTreeMap<u128, Arc<PairKey>>,
     max_pairs: usize,
     max_bytes: usize,
     bytes: usize,
@@ -46,6 +47,7 @@ impl SeasonMatchSession {
             engine,
             cache: Mutex::new(Cache {
                 entries: BTreeMap::new(),
+                order: BTreeMap::new(),
                 max_pairs,
                 max_bytes,
                 bytes: 0,
@@ -71,10 +73,17 @@ impl SeasonMatchSession {
             let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
             cache.clock += 1;
             let touched = cache.clock;
-            cache.entries.get_mut(&key).map(|entry| {
+            if let Some(entry) = cache.entries.get_mut(&key) {
+                let old_touched = entry.touched;
                 entry.touched = touched;
-                entry.decision.clone()
-            })
+                let decision = entry.decision.clone();
+                if let Some(arc_key) = cache.order.remove(&old_touched) {
+                    cache.order.insert(touched, arc_key);
+                }
+                Some(decision)
+            } else {
+                None
+            }
         };
         if let Some(decision) = cached {
             (
@@ -111,11 +120,15 @@ impl Cache {
         if self.max_pairs == 0 || self.entries.contains_key(&key) {
             return;
         }
-        // BTreeMap has no separately retained hash buckets or LRU index. Charge
-        // one full tree node per entry (11 key/value slots plus 12 child pointers),
-        // deliberately exceeding partially occupied node/allocation overhead.
-        let bookkeeping =
-            11 * (size_of::<PairKey>() + size_of::<Entry>()) + 12 * size_of::<usize>() + 128;
+        // Charge Arc<PairKey> storage plus full BTreeMap node slots for both `entries`
+        // and the `order` O(log N) LRU index, conservatively exceeding allocator overhead.
+        let bookkeeping = size_of::<PairKey>()
+            + 11 * (size_of::<Arc<PairKey>>()
+                + size_of::<Entry>()
+                + size_of::<u128>()
+                + size_of::<Arc<PairKey>>())
+            + 24 * size_of::<usize>()
+            + 256;
         let dynamic = match decision {
             PairFingerprintDecision::Candidates(candidates) => candidates
                 .capacity()
@@ -130,12 +143,7 @@ impl Cache {
             return;
         }
         while self.entries.len() >= self.max_pairs || self.bytes > self.max_bytes - bytes {
-            let oldest = self
-                .entries
-                .iter()
-                .min_by_key(|(_, entry)| entry.touched)
-                .map(|(key, _)| key.clone());
-            let Some(oldest) = oldest else {
+            let Some((_, oldest)) = self.order.pop_first() else {
                 break;
             };
             if let Some(entry) = self.entries.remove(&oldest) {
@@ -143,11 +151,14 @@ impl Cache {
             }
         }
         self.clock += 1;
+        let touched = self.clock;
+        let shared_key = Arc::new(key);
+        self.order.insert(touched, shared_key.clone());
         self.entries.insert(
-            key,
+            shared_key,
             Entry {
                 decision: decision.clone(),
-                touched: self.clock,
+                touched,
                 bytes,
             },
         );

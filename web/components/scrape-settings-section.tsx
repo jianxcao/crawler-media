@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { BrandLoader } from "@/components/brand-loader";
+import { FingerprintSettingsCard } from "@/components/fingerprint-settings-card";
 import { ProbeSettingsCard } from "@/components/probe-settings-card";
 import { useToast } from "@/components/feedback";
 import { CheckIcon, PlusIcon, XIcon } from "@/components/icons";
@@ -353,28 +354,54 @@ export function ScrapeSettingsSection() {
           </Group>
 
           <Group label="本地声纹比对 (Chromaprint)">
-            <div className="space-y-2">
-              <label className="text-sub font-medium text-white/80">单集音频采样时长（秒）</label>
-              <input
-                type="number"
-                min={30}
-                max={3600}
-                step={10}
-                className={INPUT_CLASS}
-                placeholder="默认 180（3 分钟）"
-                value={draft.fingerprint_duration_secs ?? ""}
-                onChange={(e) => {
-                  const raw = e.target.value;
-                  const parsed = raw === "" ? null : Number(raw);
-                  set("fingerprint_duration_secs", parsed);
-                }}
-              />
-              <p className="text-caption text-white/40">
-                从每集开头截取多长音频做声纹比对以定位片头。越长越精确但越费流量：本地文件建议 180~300 秒；
-                STRM / 网盘挂载建议 90~180 秒，避免拉取过多音频流。留空跟随默认 180 秒。
-              </p>
+            <div className="space-y-4">
+              <div className="space-y-2">
+                <label className="text-sub font-medium text-white/80">声纹采样模式</label>
+                <select
+                  aria-label="声纹采样模式"
+                  className={INPUT_CLASS}
+                  value={draft.fingerprint_sampling_mode ?? ""}
+                  onChange={(e) =>
+                    set(
+                      "fingerprint_sampling_mode",
+                      (e.target.value || null) as "full_window" | "adaptive" | null,
+                    )
+                  }
+                >
+                  <option value="">跟随默认（固定窗口 full_window）</option>
+                  <option value="adaptive">自适应采样（adaptive · 支持冷开场晚片头与模板复用）</option>
+                  <option value="full_window">固定整窗采样（full_window）</option>
+                </select>
+                <p className="text-caption text-white/40">
+                  自适应模式在识别到本季稳定模板后自动缩小后续集采样窗口，并可向前探索冷开场后的晚片头。
+                </p>
+              </div>
+              <div className="space-y-2">
+                <label className="text-sub font-medium text-white/80">单集音频采样时长（秒）</label>
+                <input
+                  type="number"
+                  min={30}
+                  max={3600}
+                  step={10}
+                  className={INPUT_CLASS}
+                  placeholder="默认 180（3 分钟）"
+                  value={draft.fingerprint_duration_secs ?? ""}
+                  onChange={(e) => {
+                    const raw = e.target.value;
+                    const parsed = raw === "" ? null : Number(raw);
+                    set("fingerprint_duration_secs", parsed);
+                  }}
+                />
+                <p className="text-caption text-white/40">
+                  从每集开头截取多长音频做声纹比对以定位片头。越长越精确但越费流量：本地文件建议 180~300 秒；
+                  STRM / 网盘挂载建议 90~180 秒，避免拉取过多音频流。留空跟随默认 180 秒。
+                </p>
+              </div>
             </div>
           </Group>
+          <div className="lg:col-span-2">
+            <FingerprintSettingsCard />
+          </div>
         </div>
       )}
 
