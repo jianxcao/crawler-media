@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex};
 
 use domain::{Site, SiteId};
-use hooks::{Bus, CheckInPlugin, HttpPost, LoginPlugin, PluginError, SiteCredentials};
+use hooks::{CheckInPlugin, HookPipeline, HttpPost, LoginPlugin, PluginError, SiteCredentials};
 use indexer::{Browser, BrowserConfig, IndexerError, PageSession};
 
 struct Credentials(Mutex<Site>);
@@ -30,6 +30,8 @@ fn credentials(cookie: Option<&str>) -> Credentials {
         downloader_id: None,
         enabled: true,
         maintenance_via: domain::MaintenanceVia::Http,
+        browser_search: false,
+        timezone: "UTC".into(),
     }))
 }
 
@@ -68,7 +70,7 @@ fn fetched_login_form_challenge_and_unknown_page_never_authenticate() {
         let store = credentials(Some("uid=valid; pass=secret"));
         let before = store.0.lock().unwrap().clone();
         assert!(
-            LoginPlugin::http(&Bus::new(), &store, &Reply(body))
+            LoginPlugin::http(&HookPipeline::new(), &store, &Reply(body))
                 .login(before.id)
                 .is_err(),
             "{body}"
@@ -87,7 +89,7 @@ fn english_completed_and_already_completed_accept_normalized_whitespace() {
     ] {
         let store = credentials(Some("uid=valid"));
         let id = store.0.lock().unwrap().id;
-        let result = CheckInPlugin::http(&Bus::new(), &store, &Reply(body)).check_in(id);
+        let result = CheckInPlugin::http(&HookPipeline::new(), &store, &Reply(body)).check_in(id);
         assert!(result.is_ok(), "{body}: {result:?}");
     }
 }
@@ -122,7 +124,8 @@ fn split_negative_conditional_and_help_never_confirm_or_save_cookies() {
     ] {
         let store = credentials(Some("uid=valid"));
         let before = store.0.lock().unwrap().clone();
-        let result = CheckInPlugin::http(&Bus::new(), &store, &Reply(body)).check_in(before.id);
+        let result =
+            CheckInPlugin::http(&HookPipeline::new(), &store, &Reply(body)).check_in(before.id);
         assert!(result.is_err(), "{body}");
         assert_eq!(store.0.lock().unwrap().cookie, before.cookie, "{body}");
     }
@@ -141,7 +144,7 @@ fn split_reward_confirmation_still_passes() {
     ] {
         let store = credentials(Some("uid=valid"));
         let id = store.0.lock().unwrap().id;
-        let result = CheckInPlugin::http(&Bus::new(), &store, &Reply(body)).check_in(id);
+        let result = CheckInPlugin::http(&HookPipeline::new(), &store, &Reply(body)).check_in(id);
         assert!(result.is_ok(), "{body}: {result:?}");
     }
 }
@@ -152,7 +155,7 @@ fn visible_success_with_reward_text_is_confirmed() {
     let id = store.0.lock().unwrap().id;
     let reply = Reply("<html><div>签到成功！获得 10 魔力</div></html>");
     assert!(
-        CheckInPlugin::http(&Bus::new(), &store, &reply)
+        CheckInPlugin::http(&HookPipeline::new(), &store, &reply)
             .check_in(id)
             .is_ok()
     );
@@ -164,7 +167,7 @@ fn check_in_requires_verified_success_not_transport_success_or_cookie_rotation()
         let store = credentials(Some("uid=valid; pass=secret"));
         let before = store.0.lock().unwrap().clone();
         assert!(
-            CheckInPlugin::http(&Bus::new(), &store, &Reply(body))
+            CheckInPlugin::http(&HookPipeline::new(), &store, &Reply(body))
                 .check_in(before.id)
                 .is_err(),
             "{body}"
@@ -179,7 +182,7 @@ fn conflicting_check_in_confirmation_is_not_success() {
     let id = store.0.lock().unwrap().id;
     let reply = Reply("<html><div>签到失败</div><div>签到成功</div></html>");
     assert!(
-        CheckInPlugin::http(&Bus::new(), &store, &reply)
+        CheckInPlugin::http(&HookPipeline::new(), &store, &reply)
             .check_in(id)
             .is_err()
     );
@@ -189,8 +192,12 @@ fn conflicting_check_in_confirmation_is_not_success() {
 fn missing_login_credentials_are_actionable_not_empty_submission() {
     let store = credentials(None);
     let id = store.0.lock().unwrap().id;
-    let result =
-        LoginPlugin::http(&Bus::new(), &store, &Reply("Set-Cookie: uid=fabricated")).login(id);
+    let result = LoginPlugin::http(
+        &HookPipeline::new(),
+        &store,
+        &Reply("Set-Cookie: uid=fabricated"),
+    )
+    .login(id);
     assert!(result.is_err());
     assert!(store.0.lock().unwrap().cookie.is_none());
 }
@@ -214,7 +221,7 @@ fn browser_login_never_fabricates_cookie_from_an_unverified_page() {
             Ok(Arc::new(Page(body)) as Arc<dyn PageSession>)
         });
         assert!(
-            LoginPlugin::browser(&Bus::new(), &store, &browser)
+            LoginPlugin::browser(&HookPipeline::new(), &store, &browser)
                 .login(before.id)
                 .is_err()
         );
@@ -227,7 +234,7 @@ fn hook_dispatch_without_a_transport_is_not_a_completed_check_in() {
     let store = credentials(Some("uid=valid"));
     let id = store.0.lock().unwrap().id;
     assert!(
-        CheckInPlugin::new(&Bus::new(), &store)
+        CheckInPlugin::new(&HookPipeline::new(), &store)
             .check_in(id)
             .is_err()
     );
@@ -238,7 +245,7 @@ fn profile_specific_authentication_evidence_can_be_injected() {
     let store = credentials(Some("uid=valid"));
     let id = store.0.lock().unwrap().id;
     let policy = hooks::NexusPhpPolicy::new(Some("#profile-auth".into()));
-    let bus = Bus::new();
+    let bus = HookPipeline::new();
     let reply = Reply("<html><div id='profile-auth'>Authenticated</div></html>");
     assert!(
         LoginPlugin::http(&bus, &store, &reply)
@@ -267,7 +274,7 @@ impl hooks::SiteResponsePolicy for AttendancePolicy {
 fn profile_specific_completed_and_already_completed_contracts_can_be_injected() {
     let store = credentials(Some("uid=valid"));
     let id = store.0.lock().unwrap().id;
-    let bus = Bus::new();
+    let bus = HookPipeline::new();
     for body in ["profile-complete", "profile-already-complete"] {
         let reply = Reply(body);
         assert!(
@@ -291,7 +298,7 @@ fn confirmed_success_and_already_checked_in_are_both_valid_outcomes() {
         let store = credentials(Some("uid=valid"));
         let id = store.0.lock().unwrap().id;
         assert!(
-            CheckInPlugin::http(&Bus::new(), &store, &Reply(body))
+            CheckInPlugin::http(&HookPipeline::new(), &store, &Reply(body))
                 .check_in(id)
                 .is_ok()
         );

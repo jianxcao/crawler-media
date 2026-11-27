@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use domain::{Site, SiteId};
-use indexer::{FetchMethod, FetchRequest, Fetcher, Indexer, IndexerError, ProfileSet};
+use indexer::{FetchMethod, FetchRequest, Fetcher, Indexer, IndexerError, RegistrySnapshot};
 use parking_lot::Mutex;
 
 fn nexus_site(profile_id: &str) -> Site {
@@ -19,6 +19,8 @@ fn nexus_site(profile_id: &str) -> Site {
         downloader_id: None,
         enabled: true,
         maintenance_via: domain::MaintenanceVia::Http,
+        browser_search: false,
+        timezone: "UTC".into(),
     }
 }
 
@@ -41,7 +43,7 @@ fn nexusphp_single_and_multi_category_search_uses_cat_id_flags() {
         urls: Mutex::new(Vec::new()),
         html: include_str!("fixtures/nexusphp.html"),
     });
-    let indexer = Indexer::new(ProfileSet::load(None).unwrap(), fetcher.clone());
+    let indexer = Indexer::new(RegistrySnapshot::builtin().unwrap(), fetcher.clone());
     let demo = nexus_site("demo");
 
     let movie =
@@ -81,7 +83,7 @@ fn hdarea_and_standard_nexusphp_profiles_have_verified_category_mappings() {
         urls: Mutex::new(Vec::new()),
         html: "<html><body><table class='torrents'></table></body></html>",
     });
-    let profiles = ProfileSet::load(None).unwrap();
+    let profiles = RegistrySnapshot::builtin().unwrap();
     let indexer = Indexer::new(profiles.clone(), fetcher.clone());
 
     let hdarea_site = nexus_site("hdarea");
@@ -138,7 +140,9 @@ fn hdarea_and_standard_nexusphp_profiles_have_verified_category_mappings() {
         "ttg",
     ] {
         fetcher.urls.lock().clear();
-        let profile = profiles.get(id).unwrap_or_else(|| panic!("missing {id}"));
+        let profile = profiles
+            .profile(id)
+            .unwrap_or_else(|| panic!("missing {id}"));
         assert!(
             profile.categories.is_some(),
             "profile {id} must define categories"
@@ -182,7 +186,10 @@ fields:
         urls: Mutex::new(Vec::new()),
         html: include_str!("fixtures/nexusphp.html"),
     });
-    let indexer = Indexer::new(ProfileSet::load(Some(dir.path())).unwrap(), fetcher.clone());
+    let indexer = Indexer::new(
+        RegistrySnapshot::load_with_overlay(Some(dir.path())).unwrap(),
+        fetcher.clone(),
+    );
     let site = nexus_site("custom");
     let _ = indexer.search_page_categories(
         std::slice::from_ref(&site),

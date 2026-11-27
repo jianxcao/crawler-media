@@ -43,6 +43,8 @@ pub struct Site {
     pub downloader_id: Option<DownloaderId>,
     pub enabled: bool,
     pub maintenance_via: MaintenanceVia,
+    pub browser_search: bool,
+    pub timezone: String,
 }
 
 /// 手写 `Debug`：`cookie` 是站点会话凭证、`api_key` 是站点 API 凭证，
@@ -68,6 +70,8 @@ impl std::fmt::Debug for Site {
             .field("downloader_id", &self.downloader_id)
             .field("enabled", &self.enabled)
             .field("maintenance_via", &self.maintenance_via)
+            .field("browser_search", &self.browser_search)
+            .field("timezone", &self.timezone)
             .finish()
     }
 }
@@ -126,6 +130,8 @@ mod debug_tests {
             downloader_id: None,
             enabled: true,
             maintenance_via: super::MaintenanceVia::Http,
+            browser_search: false,
+            timezone: "UTC".into(),
         }
     }
 
@@ -145,6 +151,8 @@ mod debug_tests {
             downloader_id: None,
             enabled: true,
             maintenance_via: super::MaintenanceVia::Http,
+            browser_search: true,
+            timezone: "Asia/Shanghai".into(),
         };
         let rendered = format!("{site:?}");
         assert!(
@@ -158,6 +166,8 @@ mod debug_tests {
         assert!(rendered.contains("<redacted>"), "{rendered}");
         assert!(rendered.contains("pt.example"), "{rendered}");
         assert!(rendered.contains("demo"), "{rendered}");
+        assert!(rendered.contains("browser_search: true"), "{rendered}");
+        assert!(rendered.contains("Asia/Shanghai"), "{rendered}");
     }
 
     /// 统一语义后：用户名保留（便于排障），口令必须消失。

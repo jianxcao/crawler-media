@@ -9,7 +9,7 @@ pub enum FetchMethod {
     PostJson,
     PostForm,
 }
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FetchRequest {
     pub key: String,
     pub url: String,
@@ -337,13 +337,19 @@ fn url_encode(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::profile::ProfileSet;
     use domain::SiteId;
+
+    fn hdarea_profile() -> Profile {
+        crate::profile::load_builtin_profiles()
+            .unwrap()
+            .into_iter()
+            .find(|p| p.id == "hdarea")
+            .unwrap()
+    }
 
     #[test]
     fn post_form_download_token_request_url_encodes_param_and_id() {
-        let profiles = ProfileSet::load(None).unwrap();
-        let mut profile = profiles.get("hdarea").unwrap().clone();
+        let mut profile = hdarea_profile();
         if let Some(dl) = profile.download.as_mut() {
             dl.method = Some("post_form".into());
             dl.id_param = Some("torrent id".into());
@@ -362,6 +368,8 @@ mod tests {
             downloader_id: None,
             enabled: true,
             maintenance_via: domain::MaintenanceVia::Http,
+            browser_search: false,
+            timezone: "UTC".into(),
         };
         let req = download_token_request(&site, &profile, "469752&inject=1").unwrap();
         assert_eq!(req.method, FetchMethod::PostForm);
@@ -374,8 +382,8 @@ mod tests {
 
     #[test]
     fn apikey_only_profile_disables_html_cookie_fallback_and_rss_cookie() {
-        let profiles = ProfileSet::load(None).unwrap();
-        let mut apikey_only = profiles.get("hdarea").unwrap().clone();
+        let hybrid = hdarea_profile();
+        let mut apikey_only = hybrid.clone();
         apikey_only.auth_types = vec!["apikey".into()];
 
         let site = Site {
@@ -392,6 +400,8 @@ mod tests {
             downloader_id: None,
             enabled: true,
             maintenance_via: domain::MaintenanceVia::Http,
+            browser_search: false,
+            timezone: "UTC".into(),
         };
 
         assert!(!uses_html_cookie_fallback(&site, &apikey_only));
@@ -402,10 +412,9 @@ mod tests {
         let rss_req = rss_request(&site, &apikey_only);
         assert_eq!(rss_req.cookie, None);
 
-        let hybrid = profiles.get("hdarea").unwrap();
-        assert!(uses_html_cookie_fallback(&site, hybrid));
+        assert!(uses_html_cookie_fallback(&site, &hybrid));
         assert_eq!(
-            rss_request(&site, hybrid).cookie.as_deref(),
+            rss_request(&site, &hybrid).cookie.as_deref(),
             Some("c_secure_uid=stale")
         );
     }

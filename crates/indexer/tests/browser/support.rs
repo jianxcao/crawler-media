@@ -10,7 +10,7 @@ pub(crate) use std::time::Instant;
 pub(crate) use domain::{Site, SiteId};
 pub(crate) use indexer::{
     Browser, BrowserConfig, FetchMethod, FetchRequest, Indexer, IndexerError, PageSession,
-    ProfileSet, RecordingFetcher,
+    RecordingFetcher, RegistrySnapshot,
 };
 pub(crate) fn site_with_profile(profile_id: &str, cdp_url: Option<&str>) -> Site {
     Site {
@@ -27,6 +27,8 @@ pub(crate) fn site_with_profile(profile_id: &str, cdp_url: Option<&str>) -> Site
         downloader_id: None,
         enabled: true,
         maintenance_via: domain::MaintenanceVia::Http,
+        browser_search: false,
+        timezone: "UTC".into(),
     }
 }
 pub(crate) fn write_render_overlay(dir: &std::path::Path) {

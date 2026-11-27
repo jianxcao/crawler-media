@@ -5,7 +5,7 @@ use crate::IndexerError;
 use crate::fetch::{FetchRequest, Fetcher};
 
 #[path = "browser_slots.rs"]
-mod browser_slots;
+pub(crate) mod browser_slots;
 pub use browser_slots::BrowserSlots;
 
 pub trait PageSession: Send + Sync {
@@ -40,6 +40,15 @@ pub enum BrowserRoute {
 }
 
 type Opener = Arc<dyn Fn(Option<&str>) -> Result<Arc<dyn PageSession>, IndexerError> + Send + Sync>;
+type PluginOpener = Arc<
+    dyn Fn(
+            Option<&str>,
+        ) -> Result<
+            Box<dyn crate::plugin_browser::PluginBrowserPage>,
+            crate::plugin_browser::PluginBrowserError,
+        > + Send
+        + Sync,
+>;
 type ConfigProvider = Arc<dyn Fn() -> Result<BrowserConfig, IndexerError> + Send + Sync>;
 
 /// Configuration for browser endpoint resolution.
@@ -124,6 +133,7 @@ pub struct Browser {
     managed_endpoint: Arc<parking_lot::RwLock<Option<String>>>,
     provider: Option<ConfigProvider>,
     opener: Option<Opener>,
+    plugin_opener: Option<PluginOpener>,
     slots: Arc<BrowserSlots>,
     max_sessions: usize,
     render_deadline: Duration,
@@ -142,6 +152,7 @@ impl Browser {
             managed_endpoint: Arc::new(parking_lot::RwLock::new(None)),
             provider: None,
             opener: None,
+            plugin_opener: None,
             slots: BrowserSlots::new(max_sessions),
             max_sessions,
             render_deadline: Duration::from_secs(30),
@@ -167,6 +178,67 @@ impl Browser {
     {
         self.provider = Some(Arc::new(provider));
         self
+    }
+
+    pub fn with_plugin_opener<F>(mut self, opener: F) -> Self
+    where
+        F: Fn(
+                Option<&str>,
+            ) -> Result<
+                Box<dyn crate::plugin_browser::PluginBrowserPage>,
+                crate::plugin_browser::PluginBrowserError,
+            > + Send
+            + Sync
+            + 'static,
+    {
+        self.plugin_opener = Some(Arc::new(opener));
+        self
+    }
+
+    pub(crate) fn plugin_opener(&self) -> Option<&PluginOpener> {
+        self.plugin_opener.as_ref()
+    }
+
+    pub(crate) fn slots(&self) -> &Arc<BrowserSlots> {
+        &self.slots
+    }
+
+    pub(crate) fn render_deadline(&self) -> Duration {
+        self.render_deadline
+    }
+
+    pub(crate) fn queue_cap(&self) -> Duration {
+        self.queue_cap
+    }
+
+    pub(crate) fn min_work(&self) -> Duration {
+        self.min_work
+    }
+
+    pub(crate) fn target_close_cap(&self) -> Duration {
+        self.target_close_cap
+    }
+
+    pub(crate) fn record_incompatible(&self, endpoint: String, reason: String) {
+        self.incompatible.lock().insert(endpoint, reason);
+    }
+
+    pub fn open_plugin_session(
+        &self,
+        site_url: &str,
+        cdp_url: Option<&str>,
+        deadline: Instant,
+    ) -> Result<crate::plugin_browser::PluginBrowserLease, crate::plugin_browser::PluginBrowserError>
+    {
+        crate::plugin_browser::open_plugin_session_inner(self, site_url, cdp_url, deadline)
+    }
+
+    pub fn check_plugin_cdp_context(
+        &self,
+        cdp_url: Option<&str>,
+        deadline: Instant,
+    ) -> Result<(), crate::plugin_browser::PluginBrowserError> {
+        crate::plugin_browser::check_plugin_cdp_context_inner(self, cdp_url, deadline)
     }
 
     pub fn with_max_sessions(mut self, n: usize) -> Self {

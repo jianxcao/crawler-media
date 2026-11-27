@@ -8,7 +8,7 @@ use crate::IndexerError;
 use crate::browser::PageSession;
 
 #[path = "cdp_page_transport.rs"]
-mod transport;
+pub(crate) mod transport;
 use transport::{TIMEOUT, Transport, failure, is_method_not_found, remaining};
 
 /// Prefix of the `BrowserSetup` message for endpoints that cannot isolate a
@@ -25,7 +25,7 @@ pub struct CdpPageSession {
 }
 
 impl CdpPageSession {
-    fn with_transport<T>(
+    pub(crate) fn with_transport<T>(
         &self,
         operation: impl FnOnce(&mut Transport, Instant) -> Result<T, IndexerError>,
     ) -> Result<T, IndexerError> {
@@ -58,6 +58,7 @@ impl PageSession for CdpPageSession {
     fn goto(&self, url: &str) -> Result<(), IndexerError> {
         self.with_transport(|transport, deadline| {
             transport.loaded_loaders.clear();
+            transport.doc_responses.clear();
             // -32601 means the page/method does not exist: nothing was sent to
             // the site, so this is a pre-navigation (fallback-safe) failure.
             let result = transport
@@ -77,9 +78,19 @@ impl PageSession for CdpPageSession {
                 return Err(failure("navigation", "no document navigation"));
             }
             loop {
+                remaining(deadline)?;
                 let state = evaluate(transport, "document.readyState", deadline)?;
-                let loader = result["loaderId"].as_str();
-                let loaded = loader.is_none_or(|id| transport.loaded_loaders.contains(id));
+                let active_loader = frame_id
+                    .and_then(|fid| {
+                        transport
+                            .doc_responses
+                            .iter()
+                            .rev()
+                            .find(|r| r.frame_id.as_deref() == Some(fid))
+                            .and_then(|r| r.loader_id.as_deref())
+                    })
+                    .or_else(|| result["loaderId"].as_str());
+                let loaded = active_loader.is_none_or(|id| transport.loaded_loaders.contains(id));
                 if state == "complete" && loaded {
                     return Ok(());
                 }
@@ -191,11 +202,60 @@ impl PageSession for CdpPageSession {
     }
 }
 
-fn evaluate(
+impl CdpPageSession {
+    pub(crate) fn close_verified_inner(&mut self) -> Result<(), IndexerError> {
+        let cap = self.target_close_cap;
+        let target_id = self.target_id.clone();
+        let context_id = self.context_id.take();
+        let mut transport = self
+            .transport
+            .get_mut()
+            .map_err(|_| failure("transport", "mutex poisoned"))?
+            .take()
+            .ok_or_else(|| failure("transport", "connection already closed"))?;
+        let mut first_err: Option<IndexerError> = None;
+        if !target_id.is_empty()
+            && let Err(error) = transport.command_cleanup_root(
+                "Target.closeTarget",
+                json!({"targetId": target_id}),
+                Instant::now() + cap,
+            )
+        {
+            first_err.get_or_insert(error);
+        }
+        if let Some(context_id) = context_id
+            && let Err(error) = transport.command_cleanup_root(
+                "Target.disposeBrowserContext",
+                json!({"browserContextId": context_id}),
+                Instant::now() + cap,
+            )
+        {
+            first_err.get_or_insert(error);
+        }
+        transport.close();
+        match first_err {
+            Some(err) => Err(err),
+            None => Ok(()),
+        }
+    }
+}
+
+pub(crate) fn evaluate(
     transport: &mut Transport,
     expression: &str,
     deadline: Instant,
 ) -> Result<String, IndexerError> {
+    let val = evaluate_json(transport, expression, deadline)?;
+    val.as_str()
+        .map(str::to_owned)
+        .ok_or_else(|| failure("evaluation", "expected string result"))
+}
+
+pub(crate) fn evaluate_json(
+    transport: &mut Transport,
+    expression: &str,
+    deadline: Instant,
+) -> Result<Value, IndexerError> {
     let result = transport.command(
         "Runtime.evaluate",
         json!({"expression": expression, "returnByValue": true}),
@@ -204,10 +264,7 @@ fn evaluate(
     if let Some(exception) = result.get("exceptionDetails") {
         return Err(failure("evaluation exception", exception));
     }
-    result["result"]["value"]
-        .as_str()
-        .map(str::to_owned)
-        .ok_or_else(|| failure("evaluation", "expected string result"))
+    Ok(result["result"]["value"].clone())
 }
 
 impl Drop for CdpPageSession {
@@ -216,10 +273,10 @@ impl Drop for CdpPageSession {
         let target_id = self.target_id.clone();
         let context_id = self.context_id.clone();
         if let Ok(Some(transport)) = self.transport.get_mut().map(Option::as_mut) {
-            // Fresh deadline per cleanup command; transport may have been marked
-            // failed by an earlier timeout, in which case these are skipped.
+            // Fresh deadline per cleanup command; runs even after a command
+            // timeout as long as WebSocket I/O framing is still intact.
             if !target_id.is_empty()
-                && let Err(error) = transport.command_root(
+                && let Err(error) = transport.command_cleanup_root(
                     "Target.closeTarget",
                     json!({"targetId": target_id}),
                     Instant::now() + cap,
@@ -228,7 +285,7 @@ impl Drop for CdpPageSession {
                 tracing::warn!(%target_id, %error, "CDP target close failed");
             }
             if let Some(context_id) = context_id
-                && let Err(error) = transport.command_root(
+                && let Err(error) = transport.command_cleanup_root(
                     "Target.disposeBrowserContext",
                     json!({"browserContextId": context_id}),
                     Instant::now() + cap,
@@ -244,6 +301,7 @@ impl Drop for CdpPageSession {
 fn http_agent(timeout: Duration) -> ureq::Agent {
     ureq::Agent::config_builder()
         .timeout_global(Some(timeout))
+        .proxy(None)
         .build()
         .new_agent()
 }
@@ -285,7 +343,7 @@ fn check_same_endpoint(base: &str, ws_url: &str, cdp_url: &str) -> Result<(), In
     Ok(())
 }
 
-fn open_cdp_session_inner(
+pub(crate) fn open_cdp_session_inner(
     cdp_url: &str,
     deadline: Instant,
     target_close_cap: Duration,
@@ -309,7 +367,7 @@ fn open_cdp_session_inner(
         .ok_or_else(|| failure("json/version", "missing webSocketDebuggerUrl"))?
         .to_owned();
     check_same_endpoint(base, &browser_ws, cdp_url)?;
-    let mut transport = Transport::connect(&browser_ws)?;
+    let mut transport = Transport::connect(&browser_ws, deadline)?;
 
     // 2. Isolated cookie jar per session. Only an explicit "not supported"
     //    answer marks the endpoint incompatible; timeouts etc. stay transient.

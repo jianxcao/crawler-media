@@ -3,7 +3,9 @@ use std::fs;
 use std::sync::Arc;
 
 use domain::{Site, SiteId};
-use indexer::{FetchMethod, FetchRequest, Fetcher, Indexer, IndexerError, ProfileSet};
+use indexer::{
+    FetchMethod, FetchRequest, Fetcher, Indexer, IndexerError, RegistrySnapshot, ResolvedDownload,
+};
 
 fn demo_site(id: SiteId, profile_id: &str) -> Site {
     Site {
@@ -20,6 +22,8 @@ fn demo_site(id: SiteId, profile_id: &str) -> Site {
         downloader_id: None,
         enabled: true,
         maintenance_via: domain::MaintenanceVia::Http,
+        browser_search: false,
+        timezone: "UTC".into(),
     }
 }
 
@@ -41,7 +45,7 @@ fn indexer_with(
     bodies: HashMap<String, Result<String, String>>,
     overlay: Option<&std::path::Path>,
 ) -> Indexer {
-    let profiles = ProfileSet::load(overlay).unwrap();
+    let profiles = RegistrySnapshot::load_with_overlay(overlay).unwrap();
     Indexer::new(profiles, Arc::new(Injected { bodies }))
 }
 
@@ -120,7 +124,10 @@ fn mteam_json_fixture_uses_api_contract_and_produces_torrent_fields() {
     // 即使用户填了网页端的 URL，也会通过 profile 的 base_url 自动映射到 api.m-team.cc
     site.url = "https://kp.m-team.cc/".into();
     site.api_key = Some("secret-key".into());
-    let indexer = Indexer::new(ProfileSet::load(None).unwrap(), Arc::new(MTeamInjected));
+    let indexer = Indexer::new(
+        RegistrySnapshot::builtin().unwrap(),
+        Arc::new(MTeamInjected),
+    );
 
     let outcome = indexer.search(&[site.clone()], "dune");
     assert!(outcome.failures.is_empty(), "{:?}", outcome.failures);
@@ -141,7 +148,9 @@ fn mteam_json_fixture_uses_api_contract_and_produces_torrent_fields() {
     );
     assert_eq!(
         indexer.resolve_torrent_download(&site, torrent).unwrap(),
-        Some("https://api.m-team.cc/api/rss/dlv2?sign=signed-token".into()),
+        Some(ResolvedDownload::Url(
+            "https://api.m-team.cc/api/rss/dlv2?sign=signed-token".into()
+        )),
     );
 }
 
@@ -161,7 +170,10 @@ fn mteam_category_scope_reaches_the_outbound_search_request() {
     }
     let mut site = demo_site(SiteId::new(), "mteam");
     site.api_key = Some("test-key".into());
-    let indexer = Indexer::new(ProfileSet::load(None).unwrap(), Arc::new(CategoryFetcher));
+    let indexer = Indexer::new(
+        RegistrySnapshot::builtin().unwrap(),
+        Arc::new(CategoryFetcher),
+    );
     let outcome = indexer.search_page_categories(&[site], "dune", 1, &["movie".into()]);
     assert!(outcome.failures.is_empty(), "{:?}", outcome.failures);
     assert_eq!(outcome.torrents.len(), 1);
@@ -364,7 +376,7 @@ fn expired_cookie_redirecting_to_login_triggers_auth_failure() {
 
 #[test]
 fn all_builtin_profiles_load_and_have_core_fields() {
-    let profiles = ProfileSet::load(None).unwrap();
+    let profiles = RegistrySnapshot::builtin().unwrap();
     // 内置应有：demo + mteam + pterclub + U7 移植的 6 站。
     for id in [
         "demo",
@@ -393,7 +405,7 @@ fn all_builtin_profiles_load_and_have_core_fields() {
         "ttg",
     ] {
         let profile = profiles
-            .get(id)
+            .profile(id)
             .unwrap_or_else(|| panic!("profile {id} 应内置"));
         assert!(
             profile.search.path.starts_with('/'),
@@ -408,7 +420,7 @@ fn all_builtin_profiles_load_and_have_core_fields() {
         }
     }
     // U7 移植站应带 U2 扩展字段（leechers/snatched/upload_time/detail）。
-    let chdbits = profiles.get("chdbits").unwrap();
+    let chdbits = profiles.profile("chdbits").unwrap();
     assert!(chdbits.fields.leechers.is_some());
     assert!(chdbits.fields.snatched.is_some());
     assert!(chdbits.fields.upload_time.is_some());
@@ -437,7 +449,7 @@ fn all_builtin_profiles_load_and_have_core_fields() {
         "tjupt",
         "ttg",
     ] {
-        let profile = profiles.get(id).unwrap();
+        let profile = profiles.profile(id).unwrap();
         assert!(profile.rss.is_some(), "profile {id} 应有 RSS 映射");
     }
 }

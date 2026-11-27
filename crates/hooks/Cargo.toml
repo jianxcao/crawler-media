@@ -7,6 +7,9 @@ license.workspace = true
 [dependencies]
 domain.workspace = true
 indexer.workspace = true
+plugin-api.workspace = true
+serde.workspace = true
+time = { workspace = true, features = ["parsing"] }
 scraper = "0.24"
 thiserror.workspace = true
 tracing.workspace = true

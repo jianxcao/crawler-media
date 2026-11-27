@@ -167,12 +167,36 @@ fn serve_ws(
         } else {
             response(&command, mode, cookie && network, &mut polls)
         };
-        for event in [
-            json!({"method":"Page.lifecycleEvent","params":{"name":"load","frameId":"iframe","loaderId":"iframe-loader"}}),
-            json!({"method":"Page.lifecycleEvent","params":{"name":"load","frameId":"frame","loaderId":if polls >= 3 {"loader"} else {"stale-loader"}}}),
-            json!({"id":99999,"result":{}}),
-            result,
-        ] {
+        let events = if mode == "never_load" {
+            vec![json!({"id":99999,"result":{}}), result]
+        } else if mode == "redirect_loader" {
+            vec![
+                json!({
+                    "method": "Network.responseReceived",
+                    "params": {
+                        "requestId": "req-redirect-1",
+                        "type": "Document",
+                        "frameId": "frame",
+                        "loaderId": "redirected-loader",
+                        "response": {
+                            "url": "https://site.invalid/login",
+                            "status": 200,
+                            "headers": {"content-type": "text/html"}
+                        }
+                    }
+                }),
+                json!({"method":"Page.lifecycleEvent","params":{"name":"load","frameId":"frame","loaderId":"redirected-loader"}}),
+                result,
+            ]
+        } else {
+            vec![
+                json!({"method":"Page.lifecycleEvent","params":{"name":"load","frameId":"iframe","loaderId":"iframe-loader"}}),
+                json!({"method":"Page.lifecycleEvent","params":{"name":"load","frameId":"frame","loaderId":if polls >= 3 {"loader"} else {"stale-loader"}}}),
+                json!({"id":99999,"result":{}}),
+                result,
+            ]
+        };
+        for event in events {
             if let Err(error) = socket.send(Message::Text(event.to_string().into())) {
                 eprintln!("fixture send: {error}");
                 return;
@@ -558,4 +582,163 @@ fn endpoint_without_browser_contexts_is_incompatible_setup_error() {
         }
         other => panic!("expected BrowserSetup, got {other:?}"),
     }
+}
+
+#[test]
+fn post_nav_deadline_timeout_still_closes_target_and_disposes_context() {
+    let fixture = Fixture::start("never_load");
+    let page = open_cdp_session(&fixture.url).unwrap();
+    page.set_site_cookies("https://site.invalid/attendance.php", "session=secret")
+        .unwrap();
+    page.set_deadline(Instant::now() + Duration::from_millis(120));
+    let err = page
+        .goto("https://site.invalid/attendance.php")
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("operation deadline exceeded"),
+        "expected deadline timeout error, got {err:?}"
+    );
+    drop(page);
+
+    let cmds = fixture.commands.lock().unwrap();
+    assert!(
+        cmds.iter().any(|c| c["method"] == "Page.navigate"),
+        "expected Page.navigate: {cmds:?}"
+    );
+    assert!(
+        cmds.iter().any(|c| c["method"] == "Target.closeTarget"),
+        "timeout after Page.navigate must still close target: {cmds:?}"
+    );
+    assert!(
+        cmds.iter()
+            .any(|c| c["method"] == "Target.disposeBrowserContext"
+                && c["params"]["browserContextId"] == "ctx"),
+        "timeout after Page.navigate must still dispose browser context: {cmds:?}"
+    );
+}
+
+#[test]
+fn exchange_deadline_timeout_on_hanging_evaluate_still_closes_target_and_disposes_context() {
+    use indexer::{CdpPluginPage, PluginBrowserErrorKind, PluginBrowserPage};
+
+    let fixture = Fixture::start("silent");
+    let page = open_cdp_session(&fixture.url).unwrap();
+    page.set_site_cookies("https://site.invalid/search", "session=secret")
+        .unwrap();
+    page.set_deadline(Instant::now() + Duration::from_millis(120));
+    let err = page.goto("https://site.invalid/search").unwrap_err();
+    assert!(
+        err.to_string().contains("operation deadline exceeded"),
+        "expected deadline timeout inside exchange, got {err:?}"
+    );
+    drop(page);
+
+    let cmds = fixture.commands.lock().unwrap().clone();
+    assert!(cmds.iter().any(|c| c["method"] == "Runtime.evaluate"));
+    assert!(
+        cmds.iter()
+            .any(|c| c["method"] == "Target.closeTarget" && c["params"]["targetId"] == "fixture"),
+        "hanging Runtime.evaluate timeout must still close target on Drop: {cmds:?}"
+    );
+    assert!(
+        cmds.iter()
+            .any(|c| c["method"] == "Target.disposeBrowserContext"
+                && c["params"]["browserContextId"] == "ctx"),
+        "hanging Runtime.evaluate timeout must still dispose context on Drop: {cmds:?}"
+    );
+
+    let fixture2 = Fixture::start("silent");
+    let mut plugin_page = CdpPluginPage::open(
+        &fixture2.url,
+        Instant::now() + Duration::from_millis(400),
+        Duration::from_secs(2),
+    )
+    .unwrap();
+    plugin_page.mark_post_nav_sent();
+    let eval_err = plugin_page.eval_json("document.title").unwrap_err();
+    assert_eq!(eval_err.kind, PluginBrowserErrorKind::PostNavUnknown);
+    plugin_page
+        .close_verified()
+        .expect("close_verified must send and receive both cleanup replies after exchange timeout");
+    let cmds2 = fixture2.commands.lock().unwrap();
+    assert!(cmds2.iter().any(|c| c["method"] == "Target.closeTarget"));
+    assert!(
+        cmds2
+            .iter()
+            .any(|c| c["method"] == "Target.disposeBrowserContext")
+    );
+}
+
+#[test]
+fn plugin_page_pre_send_deadline_timeout_keeps_pre_nav_transport_kind_and_cleans_up() {
+    use indexer::{CdpPluginPage, PluginBrowserErrorKind, PluginBrowserPage};
+
+    let fixture = Fixture::start("success");
+    let mut plugin_page = CdpPluginPage::open(
+        &fixture.url,
+        Instant::now() + Duration::from_millis(450),
+        Duration::from_secs(2),
+    )
+    .unwrap();
+    std::thread::sleep(Duration::from_millis(500));
+
+    let nav_err = plugin_page
+        .navigate("https://site.invalid/search", "load")
+        .unwrap_err();
+    assert_eq!(
+        nav_err.kind,
+        PluginBrowserErrorKind::Transport,
+        "pre-send deadline expiry before Page.navigate must preserve Transport kind: {nav_err:?}"
+    );
+    assert!(
+        !fixture
+            .commands
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|c| c["method"] == "Page.navigate"),
+        "no Page.navigate frame may be transmitted after deadline expiry"
+    );
+
+    plugin_page
+        .close_verified()
+        .expect("close_verified must still clean up target and context after pre-send timeout");
+    let cmds = fixture.commands.lock().unwrap();
+    assert!(cmds.iter().any(|c| c["method"] == "Target.closeTarget"));
+    assert!(
+        cmds.iter()
+            .any(|c| c["method"] == "Target.disposeBrowserContext"
+                && c["params"]["browserContextId"] == "ctx")
+    );
+}
+
+#[test]
+fn cdp_page_session_goto_completes_when_redirect_replaces_initial_loader_id() {
+    let fixture = Fixture::start("redirect_loader");
+    let page = open_cdp_session(&fixture.url).unwrap();
+    page.set_site_cookies("https://site.invalid/challenge", "session=secret")
+        .unwrap();
+    page.set_deadline(Instant::now() + Duration::from_millis(250));
+    page.goto("https://site.invalid/challenge")
+        .expect("CdpPageSession::goto must follow redirected main-frame loaderId");
+    assert_eq!(page.content().unwrap(), "<html>authenticated</html>");
+}
+
+#[test]
+fn cdp_plugin_page_open_clamps_websocket_handshake_to_caller_deadline() {
+    use indexer::CdpPluginPage;
+
+    let fixture = Fixture::start("handshake");
+    let start = Instant::now();
+    let res = CdpPluginPage::open(
+        &fixture.url,
+        Instant::now() + Duration::from_millis(250),
+        Duration::from_secs(2),
+    );
+    assert!(res.is_err(), "stalled WS handshake must fail");
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed < Duration::from_secs(1),
+        "WS handshake ignored 250ms caller deadline and took {elapsed:?}"
+    );
 }

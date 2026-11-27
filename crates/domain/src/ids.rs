@@ -85,6 +85,8 @@ entity_id!(JobId);
 entity_id!(JobDefId);
 entity_id!(CollectionId);
 entity_id!(LibraryId);
+entity_id!(PluginTaskBindingId);
+entity_id!(PluginOperationId);
 
 #[cfg(test)]
 mod tests {
@@ -104,6 +106,8 @@ mod tests {
             JobDefId::default().as_uuid(),
             CollectionId::default().as_uuid(),
             LibraryId::default().as_uuid(),
+            PluginTaskBindingId::default().as_uuid(),
+            PluginOperationId::default().as_uuid(),
         ];
         for (index, id) in ids.iter().enumerate() {
             assert_eq!(id.get_version_num(), 4);

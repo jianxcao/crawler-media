@@ -15,7 +15,7 @@ fn recording_fetcher_never_launches_chromium_for_injected_html() {
         requests.clone(),
     );
     let indexer = Indexer::new(
-        ProfileSet::load(Some(overlay.path())).unwrap(),
+        RegistrySnapshot::load_with_overlay(Some(overlay.path())).unwrap(),
         Arc::new(fetcher),
     );
     let outcome = indexer.search(&[site], "matrix");

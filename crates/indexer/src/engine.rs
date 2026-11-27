@@ -1,35 +1,38 @@
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::thread;
-use std::time::{Duration, Instant};
 
 use domain::{Site, SiteId, Torrent};
-use parking_lot::Mutex;
+use parking_lot::RwLock;
 
-use crate::IndexerError;
-use crate::fetch::{
-    FetchRequest, Fetcher, download_token_request, effective_base_url, mteam_download_request,
-    rss_request, uses_html_cookie_fallback,
+use crate::fetch::{FetchRequest, Fetcher};
+use crate::profile::Profile;
+use crate::provider::{
+    ProviderAvailability, ProviderCallContext, ProviderCapability, ResolvedDownload, SearchQuery,
+    SiteFetch, SiteRateLimiter,
 };
-use crate::parse;
-use crate::profile::{ApiDialect, Framework, Profile, ProfileSet};
+use crate::registry::{RegistryCandidate, RegistrySnapshot};
+use crate::{IndexerError, RegistryError, SiteFailureKind};
 
-#[derive(Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SiteFailure {
     pub site_id: SiteId,
+    pub provider_id: Option<String>,
+    pub generation: u64,
+    pub kind: SiteFailureKind,
     pub error: String,
 }
 
 #[derive(Debug, Default)]
 pub struct SearchOutcome {
+    pub generation: u64,
     pub torrents: Vec<Torrent>,
     pub failures: Vec<SiteFailure>,
 }
 
 pub struct Indexer {
-    profiles: ProfileSet,
+    snapshot: RwLock<Arc<RegistrySnapshot>>,
     fetcher: Arc<dyn Fetcher>,
-    next_request: Mutex<HashMap<SiteId, Instant>>,
+    rate_limiter: Arc<SiteRateLimiter>,
 }
 
 #[derive(Clone, Copy)]
@@ -42,22 +45,66 @@ enum Mode<'a> {
     Rss,
 }
 
+impl SiteFetch for Indexer {
+    fn fetch(&self, site: &Site, request: &FetchRequest) -> Result<String, IndexerError> {
+        self.rate_limiter.wait_if_needed(site);
+        self.fetcher.fetch(request)
+    }
+}
+
 impl Indexer {
-    pub fn new(profiles: ProfileSet, fetcher: Arc<dyn Fetcher>) -> Self {
+    pub fn new(snapshot: Arc<RegistrySnapshot>, fetcher: Arc<dyn Fetcher>) -> Self {
         Self {
-            profiles,
+            snapshot: RwLock::new(snapshot),
             fetcher,
-            next_request: Mutex::new(HashMap::new()),
+            rate_limiter: Arc::new(SiteRateLimiter::new()),
         }
     }
 
-    pub fn profile(&self, id: &str) -> Option<&Profile> {
-        self.profiles.get(id)
+    pub fn snapshot(&self) -> Arc<RegistrySnapshot> {
+        Arc::clone(&self.snapshot.read())
     }
 
-    /// 可用 profile id 清单（sites/catalog 用）。
+    pub fn rate_limiter(&self) -> &Arc<SiteRateLimiter> {
+        &self.rate_limiter
+    }
+
+    pub fn publish(
+        &self,
+        candidate: RegistryCandidate,
+    ) -> Result<Arc<RegistrySnapshot>, RegistryError> {
+        let mut guard = self.snapshot.write();
+        let next_gen = guard.generation().saturating_add(1);
+        let next = candidate.build_with_generation(next_gen)?;
+        *guard = Arc::clone(&next);
+        Ok(next)
+    }
+
+    pub fn publish_if_generation(
+        &self,
+        expected_generation: u64,
+        candidate: RegistryCandidate,
+    ) -> Result<Arc<RegistrySnapshot>, RegistryError> {
+        let mut guard = self.snapshot.write();
+        let actual = guard.generation();
+        if actual != expected_generation {
+            return Err(RegistryError::StaleExpectedGeneration {
+                expected: expected_generation,
+                actual,
+            });
+        }
+        let next_gen = actual.saturating_add(1);
+        let next = candidate.build_with_generation(next_gen)?;
+        *guard = Arc::clone(&next);
+        Ok(next)
+    }
+
+    pub fn profile(&self, id: &str) -> Option<Arc<Profile>> {
+        self.snapshot().profile(id)
+    }
+
     pub fn profile_ids(&self) -> Vec<String> {
-        self.profiles.ids()
+        self.snapshot().profile_ids()
     }
 
     pub fn search(&self, sites: &[Site], keyword: &str) -> SearchOutcome {
@@ -75,7 +122,39 @@ impl Indexer {
         page: u32,
         categories: &[String],
     ) -> SearchOutcome {
+        let snapshot = self.snapshot();
+        self.search_page_categories_with_snapshot(&snapshot, sites, keyword, page, categories)
+    }
+
+    pub fn search_with_snapshot(
+        &self,
+        snapshot: &RegistrySnapshot,
+        sites: &[Site],
+        keyword: &str,
+    ) -> SearchOutcome {
+        self.search_page_categories_with_snapshot(snapshot, sites, keyword, 1, &[])
+    }
+
+    pub fn search_page_with_snapshot(
+        &self,
+        snapshot: &RegistrySnapshot,
+        sites: &[Site],
+        keyword: &str,
+        page: u32,
+    ) -> SearchOutcome {
+        self.search_page_categories_with_snapshot(snapshot, sites, keyword, page, &[])
+    }
+
+    pub fn search_page_categories_with_snapshot(
+        &self,
+        snapshot: &RegistrySnapshot,
+        sites: &[Site],
+        keyword: &str,
+        page: u32,
+        categories: &[String],
+    ) -> SearchOutcome {
         self.run(
+            snapshot,
             sites,
             Mode::Search {
                 keyword,
@@ -86,171 +165,156 @@ impl Indexer {
     }
 
     pub fn rss(&self, sites: &[Site]) -> SearchOutcome {
-        self.run(sites, Mode::Rss)
+        let snapshot = self.snapshot();
+        self.rss_with_snapshot(&snapshot, sites)
     }
 
-    /// Resolve an API Site's short-lived Torrent URL only when it is about to
-    /// be delivered. The search result keeps its stable enclosure as identity.
+    pub fn rss_with_snapshot(&self, snapshot: &RegistrySnapshot, sites: &[Site]) -> SearchOutcome {
+        self.run(snapshot, sites, Mode::Rss)
+    }
+
     pub fn resolve_torrent_download(
         &self,
         site: &Site,
         torrent: &Torrent,
-    ) -> Result<Option<String>, IndexerError> {
-        let profile = self
-            .profiles
-            .get(&site.profile_id)
-            .ok_or_else(|| IndexerError::UnknownProfile(site.profile_id.clone()))?;
-        if profile.framework != Framework::Api || uses_html_cookie_fallback(site, profile) {
-            return Ok(None);
+    ) -> Result<Option<ResolvedDownload>, IndexerError> {
+        let snapshot = self.snapshot();
+        self.resolve_torrent_download_at(site, torrent, snapshot.generation())
+    }
+
+    pub fn resolve_torrent_download_at(
+        &self,
+        site: &Site,
+        torrent: &Torrent,
+        expected_generation: u64,
+    ) -> Result<Option<ResolvedDownload>, IndexerError> {
+        if site.id != torrent.site_id {
+            return Err(IndexerError::InvalidInput(format!(
+                "site id {} does not match torrent site_id {}",
+                site.id, torrent.site_id
+            )));
         }
-        if profile.api_dialect == ApiDialect::HdareaV1
-            && (profile.download.is_none()
-                || torrent.enclosure.contains("dl_token=")
-                || torrent.enclosure.contains("passkey="))
+        let snapshot = self.snapshot();
+        let actual = snapshot.generation();
+        if actual != expected_generation {
+            return Err(IndexerError::StaleGeneration {
+                expected: expected_generation,
+                actual,
+            });
+        }
+        let entry = snapshot
+            .indexer(&site.profile_id)
+            .ok_or_else(|| IndexerError::UnknownProfile(site.profile_id.clone()))?;
+        if let ProviderAvailability::Disabled { reason } = &entry.descriptor().availability {
+            return Err(IndexerError::ProviderDisabled {
+                provider_id: entry.descriptor().id.clone(),
+                reason: reason.clone(),
+            });
+        }
+        if !entry
+            .descriptor()
+            .capabilities
+            .contains(&ProviderCapability::ResolveDownload)
         {
             return Ok(None);
         }
-        let id = torrent
-            .id
-            .as_deref()
-            .filter(|id| !id.is_empty())
-            .map(str::to_string)
-            .or_else(|| parse::extract_id(&torrent.enclosure));
-        let Some(id) = id else {
-            return Err(IndexerError::Parse(
-                "API Torrent 缺少 ID，无法获取下载令牌".into(),
-            ));
+        let ctx = ProviderCallContext {
+            generation: actual,
+            fetcher: self,
         };
-        self.resolve_download(site, profile, &id).map(Some)
+        entry.provider().resolve_download(&ctx, site, torrent)
     }
 
-    fn run(&self, sites: &[Site], mode: Mode<'_>) -> SearchOutcome {
+    fn run(&self, snapshot: &RegistrySnapshot, sites: &[Site], mode: Mode<'_>) -> SearchOutcome {
+        let generation = snapshot.generation();
         let mut torrents = Vec::new();
         let mut failures = Vec::new();
         thread::scope(|scope| {
             let mut joins = Vec::new();
             for site in sites {
-                joins.push((site.id, scope.spawn(|| self.one(site, mode))));
+                joins.push((site, scope.spawn(|| self.one(snapshot, site, mode))));
             }
-            for (site_id, join) in joins {
+            for (site, join) in joins {
                 match join
                     .join()
                     .unwrap_or_else(|_| Err(IndexerError::Fetch("search thread panicked".into())))
                 {
                     Ok(mut found) => torrents.append(&mut found),
                     Err(err) => failures.push(SiteFailure {
-                        site_id,
+                        site_id: site.id,
+                        provider_id: Some(site.profile_id.clone()),
+                        generation,
+                        kind: err.failure_kind(),
                         error: err.to_string(),
                     }),
                 }
             }
         });
-        SearchOutcome { torrents, failures }
+        SearchOutcome {
+            generation,
+            torrents,
+            failures,
+        }
     }
 
-    fn one(&self, site: &Site, mode: Mode<'_>) -> Result<Vec<Torrent>, IndexerError> {
-        let profile = self
-            .profiles
-            .get(&site.profile_id)
+    fn one(
+        &self,
+        snapshot: &RegistrySnapshot,
+        site: &Site,
+        mode: Mode<'_>,
+    ) -> Result<Vec<Torrent>, IndexerError> {
+        let entry = snapshot
+            .indexer(&site.profile_id)
             .ok_or_else(|| IndexerError::UnknownProfile(site.profile_id.clone()))?;
-        let request = match mode {
+        let desc = entry.descriptor();
+        if let ProviderAvailability::Disabled { reason } = &desc.availability {
+            return Err(IndexerError::ProviderDisabled {
+                provider_id: desc.id.clone(),
+                reason: reason.clone(),
+            });
+        }
+        let required_cap = match mode {
+            Mode::Search { .. } => ProviderCapability::Search,
+            Mode::Rss => ProviderCapability::Rss,
+        };
+        if !desc.capabilities.contains(&required_cap) {
+            return Err(IndexerError::UnsupportedCapability {
+                provider_id: desc.id.clone(),
+                capability: required_cap.as_str().into(),
+            });
+        }
+
+        let ctx = ProviderCallContext {
+            generation: snapshot.generation(),
+            fetcher: self,
+        };
+        let results = match mode {
             Mode::Search {
                 keyword,
                 page,
                 categories,
             } => {
                 tracing::debug!(site = %site.name, keyword = %keyword, "正在索引站点搜索");
-                crate::fetch::search_request_page_categories(
-                    site, profile, keyword, page, categories,
-                )
+                let query = SearchQuery {
+                    keyword,
+                    page,
+                    categories,
+                };
+                entry.provider().search(&ctx, site, &query)
             }
             Mode::Rss => {
                 tracing::debug!(site = %site.name, "正在拉取索引站点 RSS");
-                rss_request(site, profile)
+                entry.provider().rss(&ctx, site, None)
             }
-        };
-        let body = self.fetch(site, &request).map_err(|e| {
-            tracing::error!(site = %site.name, error = %e, "拉取索引站点响应失败");
-            e
-        })?;
-        let results = match mode {
-            Mode::Search { .. } if uses_html_cookie_fallback(site, profile) => {
-                parse::parse_html(site, profile, &body)
-            }
-            Mode::Search { .. } if profile.framework == Framework::Api => {
-                match profile.api_dialect {
-                    ApiDialect::Mteam => {
-                        let items = parse::parse_mteam_items(&body)?;
-                        // 不在搜索阶段逐个触发 genDlToken（搜索可能返回上百个种子，连续调 100 次
-                        // 会直接触发馒头的风控「請求過於頻繁」并耗尽 API 配额，且耗时高达几十秒）。
-                        // 这里用占位或种子详情/ID 链接作为 enclosure，在真正投递或下载时按需调用，
-                        // 或者在没有报错时保留已有的成功项。
-                        let mut torrents = Vec::new();
-                        for item in items {
-                            let id_str = item.id.clone().unwrap_or_default();
-                            let enclosure = format!(
-                                "{}/api/torrent/download?id={id_str}",
-                                site.url.trim_end_matches('/')
-                            );
-                            torrents.push(item.into_torrent(site.id, enclosure));
-                        }
-                        Ok(torrents)
-                    }
-                    ApiDialect::HdareaV1 => parse::parse_hdarea_torrents(site, profile, &body),
-                }
-            }
-            Mode::Search { .. } => parse::search(site, profile, &body),
-            Mode::Rss => parse::rss(site, profile, &body),
         };
         match &results {
             Ok(torrents) => {
                 tracing::info!(site = %site.name, count = torrents.len(), "索引站点返回种子");
             }
             Err(error) => {
-                tracing::error!(site = %site.name, error = %error, "解析索引站点响应失败");
+                tracing::error!(site = %site.name, error = %error, "索引站点执行失败");
             }
         }
         results
-    }
-
-    fn resolve_download(
-        &self,
-        site: &Site,
-        profile: &Profile,
-        id: &str,
-    ) -> Result<String, IndexerError> {
-        match profile.api_dialect {
-            ApiDialect::Mteam => {
-                let request = download_token_request(site, profile, id)
-                    .unwrap_or_else(|| mteam_download_request(site, id));
-                let body = self.fetch(site, &request)?;
-                parse::parse_mteam_download(&body)
-            }
-            ApiDialect::HdareaV1 => {
-                let request = download_token_request(site, profile, id).ok_or_else(|| {
-                    IndexerError::Fetch("HDArea profile 未配置下载令牌端点".into())
-                })?;
-                let body = self.fetch(site, &request)?;
-                let base = effective_base_url(site, profile);
-                parse::parse_hdarea_download(&base, &body)
-            }
-        }
-    }
-
-    fn fetch(&self, site: &Site, request: &FetchRequest) -> Result<String, IndexerError> {
-        if let Some(limit) = site.rate_limit_per_minute.filter(|limit| *limit > 0) {
-            let interval = Duration::from_secs_f64(60.0 / f64::from(limit));
-            let delay = {
-                let mut next_request = self.next_request.lock();
-                let now = Instant::now();
-                let scheduled = next_request.get(&site.id).copied().unwrap_or(now).max(now);
-                next_request.insert(site.id, scheduled + interval);
-                scheduled.saturating_duration_since(now)
-            };
-            if !delay.is_zero() {
-                thread::sleep(delay);
-            }
-        }
-        self.fetcher.fetch(request)
     }
 }

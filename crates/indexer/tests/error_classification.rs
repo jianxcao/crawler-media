@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use domain::{MaintenanceVia, Site, SiteId, Torrent};
-use indexer::{FetchRequest, Fetcher, Indexer, IndexerError, ProfileSet};
+use indexer::{FetchRequest, Fetcher, Indexer, IndexerError, RegistrySnapshot};
 use parking_lot::Mutex;
 
 #[test]
@@ -41,6 +41,8 @@ fn api_site(profile_id: &str, url: &str) -> (Site, Torrent) {
         downloader_id: None,
         enabled: true,
         maintenance_via: MaintenanceVia::Http,
+        browser_search: false,
+        timezone: "UTC".into(),
     };
     let torrent = Torrent {
         site_id: site.id,
@@ -72,7 +74,7 @@ fn mteam_and_hdarea_download_resolution_only_marks_missing_sources_definitive() 
     }
 
     let stub = Arc::new(BodyStub(Mutex::new(String::new())));
-    let indexer = Indexer::new(ProfileSet::load(None).unwrap(), stub.clone());
+    let indexer = Indexer::new(RegistrySnapshot::builtin().unwrap(), stub.clone());
     let (mteam, mteam_torrent) = api_site("mteam", "https://api.m-team.cc");
     let (hdarea, hdarea_torrent) = api_site("hdarea", "https://hdarea.club");
 
@@ -146,4 +148,12 @@ fn mteam_and_hdarea_download_resolution_only_marks_missing_sources_definitive() 
             "HDArea transient/auth/quota/HTML must NOT be definitive: {body} -> {err:?}"
         );
     }
+
+    let mut missing_id_torrent = mteam_torrent;
+    missing_id_torrent.id = None;
+    missing_id_torrent.enclosure = "https://api.m-team.cc/mt.torrent".into();
+    let missing_id_err = indexer
+        .resolve_torrent_download(&mteam, &missing_id_torrent)
+        .unwrap_err();
+    assert!(matches!(missing_id_err, IndexerError::InvalidInput(_)));
 }

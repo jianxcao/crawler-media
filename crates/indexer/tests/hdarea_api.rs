@@ -1,7 +1,10 @@
 use std::sync::Arc;
 
 use domain::{Site, SiteId, Torrent};
-use indexer::{FetchMethod, FetchRequest, Fetcher, Framework, Indexer, IndexerError, ProfileSet};
+use indexer::{
+    FetchMethod, FetchRequest, Fetcher, Framework, Indexer, IndexerError, RegistrySnapshot,
+    ResolvedDownload,
+};
 use parking_lot::Mutex;
 
 fn hdarea_site(url: &str, api_key: Option<&str>, cookie: Option<&str>) -> Site {
@@ -19,6 +22,8 @@ fn hdarea_site(url: &str, api_key: Option<&str>, cookie: Option<&str>) -> Site {
         downloader_id: None,
         enabled: true,
         maintenance_via: domain::MaintenanceVia::Http,
+        browser_search: false,
+        timezone: "UTC".into(),
     }
 }
 
@@ -89,8 +94,8 @@ const LIVE_SEARCH_JSON: &str = r#"{
 
 #[test]
 fn hdarea_profile_declares_hybrid_auth_and_api_check_in() {
-    let profiles = ProfileSet::load(None).unwrap();
-    let hdarea = profiles.get("hdarea").unwrap();
+    let profiles = RegistrySnapshot::builtin().unwrap();
+    let hdarea = profiles.profile("hdarea").unwrap();
     assert_eq!(hdarea.framework, Framework::Api);
     assert_eq!(hdarea.effective_auth_types(), vec!["apikey", "cookie"]);
     assert_eq!(
@@ -108,11 +113,11 @@ fn hdarea_profile_declares_hybrid_auth_and_api_check_in() {
         "http://127.0.0.1:19876"
     );
 
-    let mteam = profiles.get("mteam").unwrap();
+    let mteam = profiles.profile("mteam").unwrap();
     assert_eq!(mteam.effective_auth_types(), vec!["apikey"]);
     assert!(!mteam.supports_check_in());
 
-    let pterclub = profiles.get("pterclub").unwrap();
+    let pterclub = profiles.profile("pterclub").unwrap();
     assert_eq!(pterclub.effective_auth_types(), vec!["cookie"]);
     assert!(pterclub.supports_check_in());
 }
@@ -135,7 +140,7 @@ fn hdarea_api_search_builds_rest_v1_get_and_parses_items() {
         }
     }
 
-    let profiles = ProfileSet::load(None).unwrap();
+    let profiles = RegistrySnapshot::builtin().unwrap();
     let indexer = Indexer::new(profiles, Arc::new(Stub));
     let site = hdarea_site("", Some("0123456789abcdef0123456789abcdef"), None);
     let outcome = indexer.search_page_categories(&[site], "Knowing Bros", 2, &["tv".into()]);
@@ -197,7 +202,7 @@ fn hdarea_whitespace_keyword_omits_q_param_for_verify_probe() {
         }
     }
 
-    let indexer = Indexer::new(ProfileSet::load(None).unwrap(), Arc::new(BlankStub));
+    let indexer = Indexer::new(RegistrySnapshot::builtin().unwrap(), Arc::new(BlankStub));
     let site = hdarea_site("http://127.0.0.1:28080/", Some("hexkey"), None);
     let outcome = indexer.search(&[site], "   ");
     assert!(outcome.failures.is_empty(), "{:?}", outcome.failures);
@@ -216,7 +221,7 @@ fn hdarea_error_envelopes_distinguish_auth_401_and_business_errors() {
     let stub = Arc::new(ErrStub(Mutex::new(
         r#"{"success":false,"code":401,"http_code":401,"message":"Invalid API Key"}"#.into(),
     )));
-    let indexer = Indexer::new(ProfileSet::load(None).unwrap(), stub.clone());
+    let indexer = Indexer::new(RegistrySnapshot::builtin().unwrap(), stub.clone());
     let site = hdarea_site("https://hdarea.club", Some("badkey"), None);
 
     let auth_out = indexer.search(std::slice::from_ref(&site), "dune");
@@ -262,7 +267,7 @@ fn hdarea_resolve_torrent_download_handles_string_and_object_shapes() {
     let stub = Arc::new(DlStub(Mutex::new(
         r#"{"success":true,"code":0,"data":"https://hdarea.club/download.php?id=469752&dl_token=str_tok"}"#.into(),
     )));
-    let indexer = Indexer::new(ProfileSet::load(None).unwrap(), stub.clone());
+    let indexer = Indexer::new(RegistrySnapshot::builtin().unwrap(), stub.clone());
     let site = hdarea_site("https://hdarea.club", Some("valid-key"), None);
     let torrent = Torrent {
         site_id: site.id,
@@ -284,13 +289,17 @@ fn hdarea_resolve_torrent_download_handles_string_and_object_shapes() {
 
     assert_eq!(
         indexer.resolve_torrent_download(&site, &torrent).unwrap(),
-        Some("https://hdarea.club/download.php?id=469752&dl_token=str_tok".into())
+        Some(ResolvedDownload::Url(
+            "https://hdarea.club/download.php?id=469752&dl_token=str_tok".into()
+        ))
     );
 
     *stub.0.lock() = r#"{"success":true,"code":"0","data":{"download_url":"https://hdarea.club/download.php?id=469752&dl_token=obj_dl"}}"#.into();
     assert_eq!(
         indexer.resolve_torrent_download(&site, &torrent).unwrap(),
-        Some("https://hdarea.club/download.php?id=469752&dl_token=obj_dl".into())
+        Some(ResolvedDownload::Url(
+            "https://hdarea.club/download.php?id=469752&dl_token=obj_dl".into()
+        ))
     );
 
     *stub.0.lock() =
@@ -298,7 +307,9 @@ fn hdarea_resolve_torrent_download_handles_string_and_object_shapes() {
             .into();
     assert_eq!(
         indexer.resolve_torrent_download(&site, &torrent).unwrap(),
-        Some("https://hdarea.club/download.php?id=469752&dl_token=rel_url".into())
+        Some(ResolvedDownload::Url(
+            "https://hdarea.club/download.php?id=469752&dl_token=rel_url".into()
+        ))
     );
 }
 
@@ -344,7 +355,7 @@ fn hdarea_cookie_without_apikey_falls_back_to_nexusphp_html_search() {
         }
     }
 
-    let indexer = Indexer::new(ProfileSet::load(None).unwrap(), Arc::new(CookieStub));
+    let indexer = Indexer::new(RegistrySnapshot::builtin().unwrap(), Arc::new(CookieStub));
     let site = hdarea_site("https://hdarea.club", None, Some("c_secure_uid=7"));
     let outcome =
         indexer.search_page_categories(std::slice::from_ref(&site), "matrix", 1, &["tv".into()]);
@@ -376,7 +387,7 @@ fn hdarea_resolve_torrent_download_short_circuits_existing_dl_token_and_passkey(
         }
     }
 
-    let indexer = Indexer::new(ProfileSet::load(None).unwrap(), Arc::new(PanicStub));
+    let indexer = Indexer::new(RegistrySnapshot::builtin().unwrap(), Arc::new(PanicStub));
     let site = hdarea_site("https://hdarea.club", Some("valid-key"), None);
     let mut torrent = Torrent {
         site_id: site.id,
@@ -428,7 +439,10 @@ fn hdarea_api_mode_omits_stale_cookie_in_search_and_download_requests() {
         }
     }
 
-    let indexer = Indexer::new(ProfileSet::load(None).unwrap(), Arc::new(InspectCookieStub));
+    let indexer = Indexer::new(
+        RegistrySnapshot::builtin().unwrap(),
+        Arc::new(InspectCookieStub),
+    );
     let site = hdarea_site(
         "https://hdarea.club",
         Some("0123456789abcdef0123456789abcdef"),
@@ -441,6 +455,8 @@ fn hdarea_api_mode_omits_stale_cookie_in_search_and_download_requests() {
     let unsigned = &outcome.torrents[1];
     assert_eq!(
         indexer.resolve_torrent_download(&site, unsigned).unwrap(),
-        Some("https://hdarea.club/download.php?id=469753&dl_token=fresh".into())
+        Some(ResolvedDownload::Url(
+            "https://hdarea.club/download.php?id=469753&dl_token=fresh".into()
+        ))
     );
 }

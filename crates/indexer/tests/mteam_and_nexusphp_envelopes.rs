@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use domain::{Site, SiteId, Torrent};
-use indexer::{FetchRequest, Fetcher, Indexer, IndexerError, ProfileSet};
+use indexer::{FetchRequest, Fetcher, Indexer, IndexerError, RegistrySnapshot};
 use parking_lot::Mutex;
 
 fn make_site(profile_id: &str, url: &str, api_key: Option<&str>, cookie: Option<&str>) -> Site {
@@ -19,6 +19,8 @@ fn make_site(profile_id: &str, url: &str, api_key: Option<&str>, cookie: Option<
         downloader_id: None,
         enabled: true,
         maintenance_via: domain::MaintenanceVia::Http,
+        browser_search: false,
+        timezone: "UTC".into(),
     }
 }
 
@@ -32,7 +34,7 @@ fn mteam_search_rejects_false_success_and_numeric_code_envelopes() {
     }
 
     let stub = Arc::new(BodyStub(Mutex::new(String::new())));
-    let indexer = Indexer::new(ProfileSet::load(None).unwrap(), stub.clone());
+    let indexer = Indexer::new(RegistrySnapshot::builtin().unwrap(), stub.clone());
     let site = make_site("mteam", "https://api.m-team.cc", Some("bad-key"), None);
 
     for (envelope, expected_fragment) in [
@@ -79,7 +81,7 @@ fn mteam_download_rejects_error_envelopes_before_inspecting_data() {
     }
 
     let stub = Arc::new(BodyStub(Mutex::new(String::new())));
-    let indexer = Indexer::new(ProfileSet::load(None).unwrap(), stub.clone());
+    let indexer = Indexer::new(RegistrySnapshot::builtin().unwrap(), stub.clone());
     let site = make_site("mteam", "https://api.m-team.cc", Some("bad-key"), None);
     let torrent = Torrent {
         site_id: site.id,
@@ -144,7 +146,7 @@ fn nexusphp_search_and_rss_never_attach_api_key() {
     }
 
     let indexer = Indexer::new(
-        ProfileSet::load(None).unwrap(),
+        RegistrySnapshot::builtin().unwrap(),
         Arc::new(InspectRequestStub),
     );
     let site = make_site(
@@ -173,7 +175,7 @@ fn mteam_and_hdarea_accept_trimmed_zero_code_and_null_nested_arrays() {
     }
 
     let stub = Arc::new(BodyStub(Mutex::new(String::new())));
-    let indexer = Indexer::new(ProfileSet::load(None).unwrap(), stub.clone());
+    let indexer = Indexer::new(RegistrySnapshot::builtin().unwrap(), stub.clone());
     let mteam = make_site("mteam", "https://api.m-team.cc", Some("ok-key"), None);
     let hdarea = make_site("hdarea", "https://hdarea.club", Some("ok-key"), None);
 
@@ -237,7 +239,7 @@ fn hdarea_search_checks_error_envelope_before_deserializing_scalar_data() {
         r#"{"success":false,"code":" 401 ","http_code":401,"message":"Invalid API Key","data":""}"#
             .into(),
     )));
-    let indexer = Indexer::new(ProfileSet::load(None).unwrap(), stub.clone());
+    let indexer = Indexer::new(RegistrySnapshot::builtin().unwrap(), stub.clone());
     let hdarea = make_site("hdarea", "https://hdarea.club", Some("bad-key"), None);
 
     let auth_out = indexer.search(std::slice::from_ref(&hdarea), "dune");

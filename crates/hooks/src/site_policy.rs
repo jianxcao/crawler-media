@@ -282,7 +282,7 @@ fn confirmation_suffix(suffix: &str) -> bool {
         })
 }
 
-pub(crate) fn reject_challenge(body: &str) -> Result<(), PluginError> {
+pub fn reject_challenge(body: &str) -> Result<(), PluginError> {
     let css = "input[type='password' i], input[name='password' i], form[action*='login' i], input[name*='captcha' i], input[id*='captcha' i], img[src*='captcha' i], iframe[src*='captcha' i], .g-recaptcha, .h-captcha, #challenge-form, #cf-challenge-running";
     if has_element(body, css)?
         || [

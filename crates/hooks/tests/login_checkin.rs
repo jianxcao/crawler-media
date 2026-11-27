@@ -2,7 +2,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use domain::{Site, SiteId};
-use hooks::{Bus, CheckInPlugin, Hook, HookEvent, LoginPlugin, PluginError, SiteCredentials, Step};
+use hooks::{
+    CheckInPlugin, Gate, GateContext, HookPipeline, LoginPlugin, PluginError, Registration,
+    SiteAction, SiteCredentials, SiteTransport,
+};
 use indexer::{Browser, BrowserConfig, IndexerError, PageSession};
 
 fn site() -> Site {
@@ -20,6 +23,8 @@ fn site() -> Site {
         downloader_id: None,
         enabled: true,
         maintenance_via: domain::MaintenanceVia::Http,
+        browser_search: false,
+        timezone: "UTC".into(),
     }
 }
 
@@ -95,7 +100,7 @@ fn login_plugin_refreshes_cookie_via_http_and_persists() {
         site: Mutex::new(site()),
     };
     let http = RecordingHttp::default();
-    let bus = Bus::new();
+    let bus = HookPipeline::new();
     let plugin = LoginPlugin::http(&bus, &store, &http);
     let id = store.site.lock().unwrap().id;
 
@@ -124,7 +129,7 @@ fn login_plugin_can_use_browser_session() {
     let browser = Browser::with_opener(BrowserConfig::enabled_for_test(), move |_| {
         Ok(page_for_open.clone() as Arc<dyn PageSession>)
     });
-    let bus = Bus::new();
+    let bus = HookPipeline::new();
     let plugin = LoginPlugin::browser(&bus, &store, &browser);
     let id = store.site.lock().unwrap().id;
 
@@ -153,7 +158,7 @@ fn check_in_plugin_can_use_browser_session() {
     let browser = Browser::with_opener(BrowserConfig::enabled_for_test(), move |_| {
         Ok(page_for_open.clone() as Arc<dyn PageSession>)
     });
-    let bus = Bus::new();
+    let bus = HookPipeline::new();
     let plugin = CheckInPlugin::browser(&bus, &store, &browser);
     let id = store.site.lock().unwrap().id;
 
@@ -176,11 +181,16 @@ fn check_in_plugin_runs_on_schedule_without_searching() {
     };
     let searched = Arc::new(Mutex::new(false));
     let flag = searched.clone();
-    let bus = Bus::new();
-    bus.register(Hook::new(Step::CheckIn, move |_event: &HookEvent| {
-        *flag.lock().unwrap() = false;
-        Ok(())
-    }));
+    let bus = HookPipeline::new();
+    bus.register(Registration::new(
+        0,
+        "test",
+        "checkin",
+        Arc::new(move |_: &GateContext| {
+            *flag.lock().unwrap() = false;
+            Ok(Gate::Allow)
+        }),
+    ));
     let http = RecordingHttp::default();
     let plugin = CheckInPlugin::http(&bus, &store, &http);
     let id = store.site.lock().unwrap().id;
@@ -196,7 +206,7 @@ fn check_in_plugin_posts_attendance_and_persists_cookie() {
         site: Mutex::new(site()),
     };
     let http = RecordingHttp::default();
-    let bus = Bus::new();
+    let bus = HookPipeline::new();
     let plugin = CheckInPlugin::http(&bus, &store, &http);
     let id = store.site.lock().unwrap().id;
 
@@ -218,12 +228,25 @@ fn veto_hook_prevents_check_in_post() {
         site: Mutex::new(site()),
     };
     let http = RecordingHttp::default();
-    let bus = Bus::new();
-    bus.register(Hook::new(Step::CheckIn, |_event: &HookEvent| {
-        Err(PluginError::Veto("no".into()))
-    }));
-    let plugin = CheckInPlugin::http(&bus, &store, &http);
+    let bus = HookPipeline::new();
     let id = store.site.lock().unwrap().id;
+    bus.register(Registration::new(
+        0,
+        "test",
+        "checkin",
+        Arc::new(move |context: &GateContext| {
+            assert_eq!(
+                context,
+                &GateContext::Site {
+                    site_id: id,
+                    action: SiteAction::CheckIn,
+                    transport: SiteTransport::Http
+                }
+            );
+            Ok(Gate::Reject("no".into()))
+        }),
+    ));
+    let plugin = CheckInPlugin::http(&bus, &store, &http);
 
     let err = plugin.check_in(id).unwrap_err();
     assert!(matches!(err, PluginError::Veto(_)));
@@ -240,12 +263,25 @@ fn veto_hook_prevents_login_side_effect() {
         site: Mutex::new(site()),
     };
     let http = RecordingHttp::default();
-    let bus = Bus::new();
-    bus.register(Hook::new(Step::Login, |_| {
-        Err(PluginError::Veto("skip".into()))
-    }));
-    let plugin = LoginPlugin::http(&bus, &store, &http);
+    let bus = HookPipeline::new();
     let id = store.site.lock().unwrap().id;
+    bus.register(Registration::new(
+        0,
+        "test",
+        "login",
+        Arc::new(move |context: &GateContext| {
+            assert_eq!(
+                context,
+                &GateContext::Site {
+                    site_id: id,
+                    action: SiteAction::Authenticate,
+                    transport: SiteTransport::Http
+                }
+            );
+            Ok(Gate::Reject("skip".into()))
+        }),
+    ));
+    let plugin = LoginPlugin::http(&bus, &store, &http);
     let err = plugin.login(id).unwrap_err();
     assert!(matches!(err, PluginError::Veto(_)));
     assert_eq!(
@@ -263,7 +299,7 @@ fn keep_site_alive_requires_cookie_when_login_credentials_are_unavailable() {
         site: Mutex::new(row),
     };
     let http = RecordingHttp::default();
-    let bus = Bus::new();
+    let bus = HookPipeline::new();
     let id = store.site.lock().unwrap().id;
     let error = hooks::keep_site_alive(&bus, &store, &http, id).unwrap_err();
     assert!(error.to_string().contains("Cookie"));
@@ -277,7 +313,7 @@ fn keep_site_alive_skips_login_when_cookie_present() {
         site: Mutex::new(site()),
     };
     let http = RecordingHttp::default();
-    let bus = Bus::new();
+    let bus = HookPipeline::new();
     let id = store.site.lock().unwrap().id;
     hooks::keep_site_alive(&bus, &store, &http, id).unwrap();
     assert_eq!(
@@ -294,7 +330,7 @@ fn check_in_passes_site_proxy_to_http_post() {
         site: Mutex::new(row),
     };
     let http = RecordingHttp::default();
-    let bus = Bus::new();
+    let bus = HookPipeline::new();
     let plugin = CheckInPlugin::http(&bus, &store, &http);
     let id = store.site.lock().unwrap().id;
 

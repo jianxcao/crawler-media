@@ -1,8 +1,8 @@
 use domain::{Site, SiteId};
 use indexer::Browser;
 
-use crate::bus::{Bus, HookEvent, Step};
 use crate::site_policy::{NexusPhpPolicy, SiteResponsePolicy, reject_challenge};
+use crate::{Gate, GateContext, HookPipeline, SiteAction, SiteTransport};
 
 #[derive(Debug, thiserror::Error)]
 pub enum PluginError {
@@ -10,6 +10,8 @@ pub enum PluginError {
     NotFound,
     #[error("veto: {0}")]
     Veto(String),
+    #[error("Hook runtime failure: {0}")]
+    HookRuntime(String),
     #[error("{0}")]
     Fetch(String),
     /// Browser failed before the target page was navigated (busy, endpoint,
@@ -17,6 +19,8 @@ pub enum PluginError {
     /// caller may safely fall back to HTTP.
     #[error("browser pre-navigation: {0}")]
     BrowserPreNavigation(String),
+    #[error("unknown outcome: {0}")]
+    UnknownOutcome(String),
 }
 
 impl PluginError {
@@ -50,7 +54,7 @@ pub trait HttpPost {
 static DEFAULT_POLICY: NexusPhpPolicy = NexusPhpPolicy::new(None);
 
 pub struct LoginPlugin<'a> {
-    bus: &'a Bus,
+    bus: &'a HookPipeline,
     store: &'a dyn SiteCredentials,
     via: LoginVia<'a>,
     policy: &'a dyn SiteResponsePolicy,
@@ -63,7 +67,11 @@ enum LoginVia<'a> {
 }
 
 impl<'a> LoginPlugin<'a> {
-    pub fn http(bus: &'a Bus, store: &'a dyn SiteCredentials, http: &'a dyn HttpPost) -> Self {
+    pub fn http(
+        bus: &'a HookPipeline,
+        store: &'a dyn SiteCredentials,
+        http: &'a dyn HttpPost,
+    ) -> Self {
         Self {
             bus,
             store,
@@ -73,7 +81,11 @@ impl<'a> LoginPlugin<'a> {
         }
     }
 
-    pub fn browser(bus: &'a Bus, store: &'a dyn SiteCredentials, browser: &'a Browser) -> Self {
+    pub fn browser(
+        bus: &'a HookPipeline,
+        store: &'a dyn SiteCredentials,
+        browser: &'a Browser,
+    ) -> Self {
         Self {
             bus,
             store,
@@ -88,9 +100,8 @@ impl<'a> LoginPlugin<'a> {
         self
     }
 
-    /// Skip the Bus hook event: used when a browser attempt already emitted it
-    /// and failed before navigation, so an HTTP fallback must not emit twice.
-    pub fn without_hook_event(mut self) -> Self {
+    /// The browser attempt already ran the Gate before a pre-navigation failure.
+    pub fn without_gate(mut self) -> Self {
         self.emit_hook = false;
         self
     }
@@ -112,10 +123,14 @@ impl<'a> LoginPlugin<'a> {
     }
 
     fn login_inner(&self, id: SiteId) -> Result<(), PluginError> {
-        if self.emit_hook {
-            self.bus.emit(&HookEvent { step: Step::Login })?;
-        }
         let mut site = self.store.load(id)?;
+        if self.emit_hook {
+            let transport = match self.via {
+                LoginVia::Http(_) => SiteTransport::Http,
+                LoginVia::Browser(_) => SiteTransport::Browser,
+            };
+            site_gate(self.bus, id, SiteAction::Authenticate, transport)?;
+        }
         require_cookie(&site)?;
         // No credentials can be submitted: verify the supplied session, not an empty login form.
         let url = format!("{}index.php", site_base(&site));
@@ -160,6 +175,7 @@ fn browser_render(
         indexer::IndexerError::BrowserSetup(_) | indexer::IndexerError::BrowserBusy => {
             PluginError::BrowserPreNavigation(err.to_string())
         }
+        indexer::IndexerError::UnknownOutcome(msg) => PluginError::UnknownOutcome(msg),
         other => PluginError::Fetch(other.to_string()),
     })
 }
@@ -212,7 +228,7 @@ fn cookies_from_response(response: &str) -> Option<String> {
     (!cookies.is_empty()).then(|| cookies.join("; "))
 }
 
-fn merge_cookie_string(old_cookie: Option<&str>, new_cookie: &str) -> String {
+pub fn merge_cookie_string(old_cookie: Option<&str>, new_cookie: &str) -> String {
     let mut map = std::collections::BTreeMap::new();
     for part in old_cookie
         .unwrap_or_default()
@@ -229,13 +245,29 @@ fn merge_cookie_string(old_cookie: Option<&str>, new_cookie: &str) -> String {
         .join("; ")
 }
 
+pub fn merge_set_cookies(old_cookie: Option<&str>, set_cookies: &[String]) -> Option<String> {
+    let pairs: Vec<&str> = set_cookies
+        .iter()
+        .filter_map(|raw| raw.split(';').next())
+        .map(str::trim)
+        .filter(|pair| {
+            pair.split_once('=')
+                .is_some_and(|(k, _)| !k.trim().is_empty())
+        })
+        .collect();
+    if pairs.is_empty() {
+        return None;
+    }
+    Some(merge_cookie_string(old_cookie, &pairs.join("; ")))
+}
+
 enum CheckInVia<'a> {
     Http(&'a dyn HttpPost),
     Browser(&'a Browser),
 }
 
 pub struct CheckInPlugin<'a> {
-    bus: &'a Bus,
+    bus: &'a HookPipeline,
     store: &'a dyn SiteCredentials,
     via: Option<CheckInVia<'a>>,
     policy: &'a dyn SiteResponsePolicy,
@@ -243,7 +275,7 @@ pub struct CheckInPlugin<'a> {
 }
 
 impl<'a> CheckInPlugin<'a> {
-    pub fn new(bus: &'a Bus, store: &'a dyn SiteCredentials) -> Self {
+    pub fn new(bus: &'a HookPipeline, store: &'a dyn SiteCredentials) -> Self {
         Self {
             bus,
             store,
@@ -253,7 +285,11 @@ impl<'a> CheckInPlugin<'a> {
         }
     }
 
-    pub fn http(bus: &'a Bus, store: &'a dyn SiteCredentials, http: &'a dyn HttpPost) -> Self {
+    pub fn http(
+        bus: &'a HookPipeline,
+        store: &'a dyn SiteCredentials,
+        http: &'a dyn HttpPost,
+    ) -> Self {
         Self {
             bus,
             store,
@@ -263,7 +299,11 @@ impl<'a> CheckInPlugin<'a> {
         }
     }
 
-    pub fn browser(bus: &'a Bus, store: &'a dyn SiteCredentials, browser: &'a Browser) -> Self {
+    pub fn browser(
+        bus: &'a HookPipeline,
+        store: &'a dyn SiteCredentials,
+        browser: &'a Browser,
+    ) -> Self {
         Self {
             bus,
             store,
@@ -278,9 +318,8 @@ impl<'a> CheckInPlugin<'a> {
         self
     }
 
-    /// Skip the Bus hook event: used when a browser attempt already emitted it
-    /// and failed before navigation, so an HTTP fallback must not emit twice.
-    pub fn without_hook_event(mut self) -> Self {
+    /// The browser attempt already ran the Gate before a pre-navigation failure.
+    pub fn without_gate(mut self) -> Self {
         self.emit_hook = false;
         self
     }
@@ -298,9 +337,12 @@ impl<'a> CheckInPlugin<'a> {
     fn check_in_inner(&self, id: SiteId) -> Result<(), PluginError> {
         let mut site = self.store.load(id)?;
         if self.emit_hook {
-            self.bus.emit(&HookEvent {
-                step: Step::CheckIn,
-            })?;
+            let transport = match self.via {
+                Some(CheckInVia::Http(_)) => SiteTransport::Http,
+                Some(CheckInVia::Browser(_)) => SiteTransport::Browser,
+                None => SiteTransport::Unavailable,
+            };
+            site_gate(self.bus, id, SiteAction::CheckIn, transport)?;
         }
         let via = self.via.as_ref().ok_or_else(|| {
             PluginError::Fetch("Check-in 不支持仅分发 Hook；请配置 transport".into())
@@ -336,7 +378,7 @@ impl<'a> CheckInPlugin<'a> {
 }
 
 pub fn keep_site_alive(
-    bus: &Bus,
+    bus: &HookPipeline,
     store: &dyn SiteCredentials,
     http: &dyn HttpPost,
     id: SiteId,
@@ -344,4 +386,21 @@ pub fn keep_site_alive(
     let site = store.load(id)?;
     require_cookie(&site)?;
     CheckInPlugin::http(bus, store, http).check_in(id)
+}
+
+fn site_gate(
+    pipeline: &HookPipeline,
+    site_id: SiteId,
+    action: SiteAction,
+    transport: SiteTransport,
+) -> Result<(), PluginError> {
+    match pipeline.gate(&GateContext::Site {
+        site_id,
+        action,
+        transport,
+    }) {
+        Ok(Gate::Reject(reason) | Gate::Defer { reason, .. }) => Err(PluginError::Veto(reason)),
+        Ok(Gate::Allow | Gate::Abstain) => Ok(()),
+        Err(error) => Err(PluginError::HookRuntime(error)),
+    }
 }

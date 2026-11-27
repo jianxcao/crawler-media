@@ -114,7 +114,7 @@ fields:
         requests.clone(),
     );
     let indexer = indexer::Indexer::new(
-        indexer::ProfileSet::load(Some(overlay.path())).unwrap(),
+        indexer::RegistrySnapshot::load_with_overlay(Some(overlay.path())).unwrap(),
         Arc::new(fetcher),
     );
     let site = domain::Site {
@@ -131,6 +131,8 @@ fields:
         downloader_id: None,
         enabled: true,
         maintenance_via: domain::MaintenanceVia::Http,
+        browser_search: false,
+        timezone: "UTC".into(),
     };
     let outcome = indexer.search(&[site], "matrix");
     assert_eq!(outcome.torrents.len(), 1);

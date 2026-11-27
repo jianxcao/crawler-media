@@ -1,9 +1,8 @@
-use std::collections::HashMap;
 use std::path::Path;
 
 use serde::Deserialize;
 
-use crate::IndexerError;
+use crate::RegistryError;
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -217,12 +216,6 @@ fn is_loopback_url(url: &str) -> bool {
     }
     false
 }
-
-#[derive(Clone, Default)]
-pub struct ProfileSet {
-    profiles: HashMap<String, Profile>,
-}
-
 const BUILTIN: &[(&str, &str)] = &[
     ("demo", include_str!("profiles/demo.yaml")),
     ("mteam", include_str!("profiles/mteam.yaml")),
@@ -251,44 +244,43 @@ const BUILTIN: &[(&str, &str)] = &[
     ("ttg", include_str!("profiles/ttg.yaml")),
 ];
 
-impl ProfileSet {
-    /// 全部 profile id（含 overlay，排序稳定）。
-    pub fn ids(&self) -> Vec<String> {
-        let mut ids: Vec<String> = self.profiles.keys().cloned().collect();
-        ids.sort();
-        ids
+pub(crate) fn parse_yaml_profile(yaml: &str) -> Result<Profile, RegistryError> {
+    let profile: Profile = serde_yaml::from_str(yaml)?;
+    if profile.render {
+        tracing::warn!(
+            profile = %profile.id,
+            "render is ignored: search never uses the Browser"
+        );
     }
+    Ok(profile)
+}
 
-    pub fn load(overlay: Option<&Path>) -> Result<Self, IndexerError> {
-        let mut profiles = HashMap::new();
-        for (_, yaml) in BUILTIN {
-            let profile: Profile = serde_yaml::from_str(yaml)?;
-            if profile.render {
-                tracing::warn!(profile = %profile.id, "render is ignored: search never uses the Browser");
-            }
-            profiles.insert(profile.id.clone(), profile);
-        }
-        if let Some(dir) = overlay {
-            for entry in std::fs::read_dir(dir)? {
-                let path = entry?.path();
-                let is_yaml = path
-                    .extension()
-                    .and_then(|ext| ext.to_str())
-                    .is_some_and(|ext| ext == "yaml" || ext == "yml");
-                if !is_yaml {
-                    continue;
-                }
-                let profile: Profile = serde_yaml::from_str(&std::fs::read_to_string(path)?)?;
-                if profile.render {
-                    tracing::warn!(profile = %profile.id, "render is ignored: search never uses the Browser");
-                }
-                profiles.insert(profile.id.clone(), profile);
-            }
-        }
-        Ok(Self { profiles })
+pub(crate) fn load_builtin_profiles() -> Result<Vec<Profile>, RegistryError> {
+    let mut profiles = Vec::with_capacity(BUILTIN.len());
+    for (_, yaml) in BUILTIN {
+        profiles.push(parse_yaml_profile(yaml)?);
     }
+    Ok(profiles)
+}
 
-    pub fn get(&self, id: &str) -> Option<&Profile> {
-        self.profiles.get(id)
+pub(crate) fn load_overlay_profiles(dir: &Path) -> Result<Vec<(String, Profile)>, RegistryError> {
+    let mut paths = Vec::new();
+    for entry in std::fs::read_dir(dir)? {
+        let path = entry?.path();
+        let is_yaml = path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| ext == "yaml" || ext == "yml");
+        if is_yaml {
+            paths.push(path);
+        }
     }
+    paths.sort();
+    let mut out = Vec::with_capacity(paths.len());
+    for path in paths {
+        let yaml = std::fs::read_to_string(&path)?;
+        let profile = parse_yaml_profile(&yaml)?;
+        out.push((path.display().to_string(), profile));
+    }
+    Ok(out)
 }
