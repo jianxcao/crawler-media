@@ -510,11 +510,17 @@ fn record_merged_cookie_token(
 
 fn classify_plugin_error(
     err: PluginError,
+    action: MaintenanceAction,
     browser_attempted: bool,
 ) -> Result<MaintenanceOutcome, IndexerError> {
     let msg = err.to_string();
     match err {
-        PluginError::UnknownOutcome(_) => return Err(IndexerError::UnknownOutcome(msg)),
+        PluginError::UnknownOutcome(_) => {
+            if action == MaintenanceAction::CheckIn {
+                return Err(IndexerError::UnknownOutcome(msg));
+            }
+            return Err(IndexerError::Fetch(msg));
+        }
         PluginError::BrowserPreNavigation(_) => return Err(IndexerError::BrowserSetup(msg)),
         _ => {}
     }
@@ -538,7 +544,7 @@ fn classify_plugin_error(
             session_capture: None,
         });
     }
-    if browser_attempted {
+    if browser_attempted && action == MaintenanceAction::CheckIn {
         return Err(IndexerError::UnknownOutcome(msg));
     }
     Err(IndexerError::Fetch(msg))
@@ -711,7 +717,7 @@ impl MaintenanceProvider for BuiltinNexusPhpMaintenanceProvider {
                     session_capture: capture,
                 })
             }
-            Err(err) => classify_plugin_error(err, browser_attempted),
+            Err(err) => classify_plugin_error(err, action, browser_attempted),
         }
     }
 }

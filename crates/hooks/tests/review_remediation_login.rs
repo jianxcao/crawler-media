@@ -294,13 +294,30 @@ fn profile_specific_completed_and_already_completed_contracts_can_be_injected() 
 
 #[test]
 fn confirmed_success_and_already_checked_in_are_both_valid_outcomes() {
-    for body in ["<html>签到成功</html>", "<html>您今天已经签到过了</html>"] {
+    for body in [
+        "<html>签到成功</html>",
+        "<html>您今天已经签到过了</html>",
+        "拒绝访问：已签到，无需再签",
+        "<div>已签到，无需再签</div>",
+        "<div>已签到！</div>",
+    ] {
         let store = credentials(Some("uid=valid"));
         let id = store.0.lock().unwrap().id;
         assert!(
             CheckInPlugin::http(&HookPipeline::new(), &store, &Reply(body))
                 .check_in(id)
-                .is_ok()
+                .is_ok(),
+            "expected Ok for {body}"
+        );
+    }
+    for bad in ["<div>拒绝访问</div>", "<div>未签到</div>"] {
+        let store = credentials(Some("uid=valid"));
+        let id = store.0.lock().unwrap().id;
+        assert!(
+            CheckInPlugin::http(&HookPipeline::new(), &store, &Reply(bad))
+                .check_in(id)
+                .is_err(),
+            "expected Err for {bad}"
         );
     }
 }

@@ -538,3 +538,72 @@ fn receipt_reads_use_reader_pool_without_blocking_on_app_writer_and_paginate() {
     tx_release.send(()).unwrap();
     handle.join().unwrap();
 }
+
+#[test]
+fn verify_session_reclaims_unknown_receipt_while_check_in_stays_blocked() {
+    let dir = tempfile::tempdir_in("/tmp").unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    let site = test_site("pt-unknown-verify");
+    store.insert_site(&site).unwrap();
+
+    let t_start = 1_700_006_400;
+    let t_end = t_start + 86_400;
+    for action in [
+        SiteMaintenanceAction::CheckIn,
+        SiteMaintenanceAction::VerifySession,
+    ] {
+        let claimed = match store
+            .claim_site_maintenance_receipt(&claim_req(
+                site.id,
+                action,
+                ("2023-11-15", "UTC", t_start, t_end, t_start + 10),
+                ("builtin.nexusphp-maintenance", "nexusphp", 1, "epoch-1"),
+            ))
+            .unwrap()
+        {
+            SiteMaintenanceClaimResult::Claimed(r) => r,
+            other => panic!("expected Claimed, got {other:?}"),
+        };
+        let marked = store
+            .mark_site_maintenance_receipt_unknown(
+                &claimed.receipt_id,
+                claimed.revision,
+                Some("unknown"),
+                Some("timeout"),
+                t_start + 12,
+            )
+            .unwrap();
+        assert_eq!(marked.state, SiteMaintenanceState::Unknown);
+    }
+
+    // CheckIn must remain blocked so attendance is never submitted twice
+    let checkin_retry = store
+        .claim_site_maintenance_receipt(&claim_req(
+            site.id,
+            SiteMaintenanceAction::CheckIn,
+            ("2023-11-15", "UTC", t_start, t_end, t_start + 20),
+            ("builtin.nexusphp-maintenance", "nexusphp", 1, "epoch-2"),
+        ))
+        .unwrap();
+    assert!(matches!(
+        checkin_retry,
+        SiteMaintenanceClaimResult::BlockedUnknown(_)
+    ));
+
+    // VerifySession is read-only/idempotent and reclaims its unknown receipt cleanly
+    let verify_retry = store
+        .claim_site_maintenance_receipt(&claim_req(
+            site.id,
+            SiteMaintenanceAction::VerifySession,
+            ("2023-11-15", "UTC", t_start, t_end, t_start + 20),
+            ("builtin.nexusphp-maintenance", "nexusphp", 1, "epoch-2"),
+        ))
+        .unwrap();
+    match verify_retry {
+        SiteMaintenanceClaimResult::Claimed(r) => {
+            assert_eq!(r.state, SiteMaintenanceState::Pending);
+            assert_eq!(r.credential_epoch, "epoch-2");
+        }
+        other => panic!("expected Claimed for VerifySession, got {other:?}"),
+    }
+}

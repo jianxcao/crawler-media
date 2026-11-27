@@ -116,7 +116,10 @@ fn fetch_overlapping_active(
             "SELECT {COLUMNS} FROM site_maintenance_receipts
              WHERE site_id = ?1
                AND action = ?2
-               AND state IN ('pending', 'completed', 'unknown')
+               AND (
+                    state IN ('pending', 'completed')
+                    OR (state = 'unknown' AND ?2 = 'check-in')
+               )
                AND window_end_utc > ?3
                AND (?4 IS NULL OR receipt_id != ?4)
              ORDER BY CASE state WHEN 'unknown' THEN 0 WHEN 'pending' THEN 1 ELSE 2 END,
@@ -172,7 +175,10 @@ impl App<'_> {
 
         let existing = fetch_for_window(&tx, input.site_id, input.action, &input.window_key)?;
         if let Some(row) = existing {
-            if row.state != SiteMaintenanceState::Failed {
+            let reclaimable = row.state == SiteMaintenanceState::Failed
+                || (input.action == SiteMaintenanceAction::VerifySession
+                    && row.state == SiteMaintenanceState::Unknown);
+            if !reclaimable {
                 tx.commit()?;
                 return blocking_result(row);
             }
@@ -192,7 +198,7 @@ impl App<'_> {
                      plugin_id = ?5, provider_id = ?6, generation = ?7,
                      credential_epoch = ?8, state = 'pending', outcome = NULL,
                      evidence = NULL, revision = revision + 1, updated_at = ?9
-                 WHERE receipt_id = ?1 AND revision = ?10 AND state = 'failed'",
+                 WHERE receipt_id = ?1 AND revision = ?10 AND state = ?11",
                 params![
                     row.receipt_id,
                     input.timezone,
@@ -204,6 +210,7 @@ impl App<'_> {
                     input.credential_epoch,
                     input.now_utc,
                     row.revision,
+                    row.state.as_str(),
                 ],
             )?;
             if updated == 0 {

@@ -591,3 +591,134 @@ async fn guest_site_maintenance_command_executes_end_to_end_via_jobs_tick() {
     assert_eq!(page.items.len(), 1);
     assert_eq!(page.items[0].state, SiteMaintenanceState::Completed);
 }
+
+#[tokio::test]
+async fn verify_session_browser_timeout_records_failed_and_http_retry_succeeds() {
+    use indexer::{Browser, BrowserConfig, IndexerError, PageSession};
+
+    struct TimeoutPage;
+    impl PageSession for TimeoutPage {
+        fn goto(&self, _url: &str) -> Result<(), IndexerError> {
+            Err(IndexerError::Fetch(
+                "CDP timeout: operation deadline exceeded".into(),
+            ))
+        }
+        fn content(&self) -> Result<String, IndexerError> {
+            Err(IndexerError::Fetch("unreachable".into()))
+        }
+    }
+
+    let browser = Browser::with_opener(BrowserConfig::enabled_for_test(), |_| {
+        Ok(Arc::new(TimeoutPage) as Arc<dyn PageSession>)
+    });
+    let dir = tempfile::tempdir_in("/tmp").unwrap();
+    let store = Arc::new(api::Store::open(dir.path().join("data")).unwrap());
+    let dl = Arc::new(downloader::MemoryDownloader::new(dir.path().join("stage")));
+    let state = api::ApiState::new_arc_with_admin_password(
+        store,
+        TOKEN.into(),
+        Some(plugin_http_support::ADMIN_PASS.into()),
+        indexer::RegistrySnapshot::builtin().unwrap(),
+        Arc::new(LoopbackGetFetcher),
+        dl,
+    )
+    .unwrap()
+    .with_browser(Arc::new(browser));
+    let env = HttpEnv {
+        _dir: dir,
+        app: api::router(state.clone()),
+        state,
+        member_token: String::new(),
+    };
+
+    let (addr, _hits, _srv) = spawn_raw_stub(vec![StubBehavior::SuccessHtml]);
+    let (st_c, _, b_c) = env
+        .send(req_json(
+            "POST",
+            "/api/v1/sites",
+            Some(TOKEN),
+            &[],
+            Some(json!({
+                "name": "AudiencesVerifyTest",
+                "url": format!("http://{addr}/"),
+                "profile_id": "pterclub",
+                "cookie": "uid=1; pass=init",
+                "maintenance_via": "browser",
+                "timezone": "UTC",
+                "enabled": true,
+            })),
+        ))
+        .await;
+    let site_id: SiteId = assert_ok(st_c, &b_c, StatusCode::CREATED)["id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+
+    // 1. Browser VerifySession failure must record Failed (never freezing as Unknown)
+    let (st1, _, b1) = env
+        .send(req_json(
+            "POST",
+            &format!("/api/v1/sites/{site_id}/verify"),
+            Some(TOKEN),
+            &[],
+            Some(json!({})),
+        ))
+        .await;
+    let v1 = assert_ok(st1, &b1, StatusCode::OK);
+    assert_eq!(v1["ok"], false);
+    let receipts1 = env
+        .state
+        .store()
+        .list_site_maintenance_receipts(
+            &SiteMaintenanceReceiptFilter {
+                site_id: Some(site_id),
+                action: Some(SiteMaintenanceAction::VerifySession),
+                state: None,
+            },
+            None,
+            Some(10),
+        )
+        .unwrap();
+    assert_eq!(receipts1.items.len(), 1);
+    assert_eq!(receipts1.items[0].state, SiteMaintenanceState::Failed);
+
+    // 2. Switch to HTTP and retry -> must reclaim cleanly and succeed
+    let (st_p, _, _) = env
+        .send(req_json(
+            "PATCH",
+            &format!("/api/v1/sites/{site_id}"),
+            Some(TOKEN),
+            &[],
+            Some(json!({ "maintenance_via": "http" })),
+        ))
+        .await;
+    assert_eq!(st_p, StatusCode::OK);
+
+    let (st2, _, b2) = env
+        .send(req_json(
+            "POST",
+            &format!("/api/v1/sites/{site_id}/verify"),
+            Some(TOKEN),
+            &[],
+            Some(json!({})),
+        ))
+        .await;
+    let v2 = assert_ok(st2, &b2, StatusCode::OK);
+    assert_eq!(v2["ok"], true, "expected HTTP retry verify ok=true: {v2}");
+    let receipts2 = env
+        .state
+        .store()
+        .list_site_maintenance_receipts(
+            &SiteMaintenanceReceiptFilter {
+                site_id: Some(site_id),
+                action: Some(SiteMaintenanceAction::VerifySession),
+                state: None,
+            },
+            None,
+            Some(10),
+        )
+        .unwrap();
+    assert_eq!(receipts2.items.len(), 1);
+    assert_eq!(receipts2.items[0].state, SiteMaintenanceState::Completed);
+}
