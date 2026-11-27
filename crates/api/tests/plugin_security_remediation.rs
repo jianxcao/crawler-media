@@ -40,10 +40,11 @@ fn cmd_req(key: &str, action: CommandAction) -> CommandRequest {
 #[tokio::test]
 async fn p1_member_cookie_paired_with_admin_bearer_is_rejected_on_plugin_ui_assets() {
     let env = HttpEnv::new().await;
+    plugin_http_support::plugins_fixture::install_cm_checkin(&env, true, false, false, true).await;
     let (st_ui, _, b_ui) = env
         .send(req_json(
             "GET",
-            "/api/v1/plugins/builtin.checkin/ui",
+            "/api/v1/plugins/cm.checkin/ui",
             Some(TOKEN),
             &[],
             None,

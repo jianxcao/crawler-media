@@ -21,7 +21,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use store::plugins::CanonicalPluginRequest;
 use support::NoopFetcher;
-use support::plugin_http_support::{HttpEnv, TOKEN, assert_ok, req_json};
+use support::plugin_http_support::{ADMIN_PASS, HttpEnv, TOKEN, assert_ok, req_json};
 use support::poll_op;
 
 pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
@@ -118,9 +118,10 @@ pub(crate) fn env_with_dl_maps<D: Downloader + 'static>(
     path_maps: Vec<PathMap>,
 ) -> (HttpEnv, domain::SiteId, DownloaderId) {
     let store = Arc::new(Store::open(dir.path().join("data")).unwrap());
-    let state = ApiState::new_arc(
+    let state = ApiState::new_arc_with_admin_password(
         store,
         TOKEN.into(),
+        Some(ADMIN_PASS.into()),
         RegistrySnapshot::builtin().unwrap(),
         Arc::new(NoopFetcher),
         dl,
@@ -154,11 +155,11 @@ pub(crate) fn env_with_dl_maps<D: Downloader + 'static>(
 }
 
 pub(crate) async fn run_boost_cmd(env: &HttpEnv, idem: &str, kind: &str, payload: Value) -> Value {
-    let rev = env.get_plugin_rev("builtin.boost").await;
+    let rev = env.get_plugin_rev("cm.boost").await;
     let (st, _, body) = env
         .send(req_json(
             "POST",
-            "/api/v1/plugins/builtin.boost/commands",
+            "/api/v1/plugins/cm.boost/commands",
             Some(TOKEN),
             &[
                 ("If-Match", &format!("\"{rev}\"")),

@@ -12,13 +12,15 @@ use store::SiteMaintenanceReceiptFilter;
 use store::plugins::{PluginGrant, PluginGrantScope};
 
 use super::replace_plugin_grants;
-use super::support::plugin_http_support::{ADMIN_PASS, HttpEnv, TOKEN, assert_ok, req_json};
-use super::support::{
-    BoostTestDownloader, NoopFetcher, StubTorrentServer, poll_op, save_boost_config,
+use super::support::plugin_http_support::{
+    ADMIN_PASS, HttpEnv, TOKEN, assert_err, assert_ok,
+    plugins_fixture::{install_cm_boost, install_cm_checkin, save_plugin_config_direct},
+    req_json,
 };
+use super::support::{BoostTestDownloader, NoopFetcher, StubTorrentServer, poll_op};
 
 struct MiniAttendanceServer {
-    port: u16,
+    addr: std::net::SocketAddr,
     stop: Arc<AtomicBool>,
     handle: Option<std::thread::JoinHandle<()>>,
 }
@@ -26,7 +28,7 @@ struct MiniAttendanceServer {
 impl MiniAttendanceServer {
     fn start() -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
+        let addr = listener.local_addr().unwrap();
         listener.set_nonblocking(true).unwrap();
         let stop = Arc::new(AtomicBool::new(false));
         let stop_c = stop.clone();
@@ -52,14 +54,18 @@ impl MiniAttendanceServer {
             }
         });
         Self {
-            port,
+            addr,
             stop,
             handle: Some(handle),
         }
     }
 
+    fn addr(&self) -> std::net::SocketAddr {
+        self.addr
+    }
+
     fn url(&self) -> String {
-        format!("http://127.0.0.1:{}/", self.port)
+        format!("http://{}/", self.addr)
     }
 }
 
@@ -106,6 +112,8 @@ impl indexer::IndexerProvider for RecordingSearchProvider {
             imdb_id: None,
             detail_url: None,
             category: None,
+            free_2x: false,
+            free_until: None,
         }])
     }
 
@@ -146,7 +154,9 @@ async fn builtin_checkin_and_boost_enforce_config_site_id_grants_and_budget_cap(
     )
     .unwrap()
     .with_plugin_http_policy_override(
-        net_guard::TargetPolicy::production().with_test_loopback_socket(tor_srv.addr()),
+        net_guard::TargetPolicy::production()
+            .with_test_loopback_socket(att_srv.addr())
+            .with_test_loopback_socket(tor_srv.addr()),
     );
     {
         let jobs = state.jobs();
@@ -163,6 +173,8 @@ async fn builtin_checkin_and_boost_enforce_config_site_id_grants_and_budget_cap(
         state,
         member_token: String::new(),
     };
+    install_cm_checkin(&env, false, false, false, false).await;
+    install_cm_boost(&env, false, false, false).await;
 
     let insert_site = |name: &str, profile: &str, url: String, cookie: Option<&str>| {
         let id = SiteId::new();
@@ -218,24 +230,23 @@ async fn builtin_checkin_and_boost_enforce_config_site_id_grants_and_budget_cap(
 }
 
 async fn configure_checkin_site_a_and_enable_task(env: &HttpEnv, site_a: SiteId) -> i64 {
-    let rev = env.get_plugin_rev("builtin.checkin").await;
-    env.disable_plugin("builtin.checkin", rev, "chk-dis-e")
-        .await;
+    let rev = env.get_plugin_rev("cm.checkin").await;
+    env.disable_plugin("cm.checkin", rev, "chk-dis-e").await;
     let (_, _, cfg_body) = env
         .send(req_json(
             "GET",
-            "/api/v1/plugins/builtin.checkin/config",
+            "/api/v1/plugins/cm.checkin/config",
             Some(TOKEN),
             &[],
             None,
         ))
         .await;
     let cfg = assert_ok(StatusCode::OK, &cfg_body, StatusCode::OK);
-    let rev_dis = env.get_plugin_rev("builtin.checkin").await;
+    let rev_dis = env.get_plugin_rev("cm.checkin").await;
     let (st_put, _, b_put) = env
         .send(req_json(
             "PUT",
-            "/api/v1/plugins/builtin.checkin/config",
+            "/api/v1/plugins/cm.checkin/config",
             Some(TOKEN),
             &[
                 ("if-match", &format!("\"{rev_dis}\"")),
@@ -249,13 +260,12 @@ async fn configure_checkin_site_a_and_enable_task(env: &HttpEnv, site_a: SiteId)
         ))
         .await;
     assert_ok(st_put, &b_put, StatusCode::OK);
-    let rev_en = env.get_plugin_rev("builtin.checkin").await;
-    env.enable_plugin("builtin.checkin", rev_en, "chk-en-e")
-        .await;
+    let rev_en = env.get_plugin_rev("cm.checkin").await;
+    env.enable_plugin("cm.checkin", rev_en, "chk-en-e").await;
 
     replace_plugin_grants(
         env.state.store().as_ref(),
-        "builtin.checkin",
+        "cm.checkin",
         &[PluginGrant {
             capability: "command:site.check-in".into(),
             scope: PluginGrantScope::Site(site_a),
@@ -266,7 +276,7 @@ async fn configure_checkin_site_a_and_enable_task(env: &HttpEnv, site_a: SiteId)
     let (_, _, t_body) = env
         .send(req_json(
             "GET",
-            "/api/v1/plugins/builtin.checkin/tasks",
+            "/api/v1/plugins/cm.checkin/tasks",
             Some(TOKEN),
             &[],
             None,
@@ -276,7 +286,7 @@ async fn configure_checkin_site_a_and_enable_task(env: &HttpEnv, site_a: SiteId)
     let (st_up, _, b_up) = env
         .send(req_json(
             "POST",
-            "/api/v1/plugins/builtin.checkin/tasks/check-in/update",
+            "/api/v1/plugins/cm.checkin/tasks/check-in/update",
             Some(TOKEN),
             &[
                 ("if-match", &format!("\"{def_rev}\"")),
@@ -295,7 +305,7 @@ async fn assert_checkin_config_and_grants(env: &HttpEnv, site_a: SiteId, site_b:
     let (st_run, _, b_run) = env
         .send(req_json(
             "POST",
-            "/api/v1/plugins/builtin.checkin/tasks/check-in/run",
+            "/api/v1/plugins/cm.checkin/tasks/check-in/run",
             Some(TOKEN),
             &[
                 ("if-match", &format!("\"{next_def_rev}\"")),
@@ -305,6 +315,19 @@ async fn assert_checkin_config_and_grants(env: &HttpEnv, site_a: SiteId, site_b:
         ))
         .await;
     assert_ok(st_run, &b_run, StatusCode::ACCEPTED);
+    let (st_run_b, _, b_run_b) = env
+        .send(req_json(
+            "POST",
+            "/api/v1/plugins/cm.checkin/tasks/check-in/run",
+            Some(TOKEN),
+            &[
+                ("if-match", &format!("\"{next_def_rev}\"")),
+                ("idempotency-key", "chk-run-b"),
+            ],
+            Some(json!({ "input": { "site_id": site_b.to_string() } })),
+        ))
+        .await;
+    assert_ok(st_run_b, &b_run_b, StatusCode::ACCEPTED);
     for _ in 0..20 {
         let _ = env
             .send(req_json(
@@ -332,37 +355,54 @@ async fn assert_checkin_config_and_grants(env: &HttpEnv, site_a: SiteId, site_b:
             .unwrap()
             .items
     };
+    let rev = env.get_plugin_rev("cm.checkin").await;
+    let (st_cmd_a, _, b_cmd_a) = env
+        .send(req_json(
+            "POST",
+            "/api/v1/plugins/cm.checkin/commands",
+            Some(TOKEN),
+            &[
+                ("if-match", &format!("\"{rev}\"")),
+                ("idempotency-key", "chk-cmd-a"),
+            ],
+            Some(json!({
+                "kind": "site.check-in",
+                "payload": { "site_id": site_a.to_string() }
+            })),
+        ))
+        .await;
+    let op_a = assert_ok(st_cmd_a, &b_cmd_a, StatusCode::ACCEPTED);
+    let done_a = poll_op(env, op_a["operation_id"].as_str().unwrap()).await;
+    assert_eq!(done_a["state"], "succeeded", "done_a={done_a}");
     assert_eq!(
         list_rc(site_a).len(),
         1,
-        "site_a must be checked in via stored config fallback"
+        "granted site_a must succeed check-in"
     );
     assert!(list_rc(site_b).is_empty(), "site_b must NOT be checked in");
 
-    let (st_run_b, _, b_run_b) = env
+    let rev_b = env.get_plugin_rev("cm.checkin").await;
+    let (st_cmd_b, _, b_cmd_b) = env
         .send(req_json(
             "POST",
-            "/api/v1/plugins/builtin.checkin/tasks/check-in/run",
+            "/api/v1/plugins/cm.checkin/commands",
             Some(TOKEN),
             &[
-                ("if-match", &format!("\"{next_def_rev}\"")),
-                ("idempotency-key", "chk-run-b"),
+                ("if-match", &format!("\"{rev_b}\"")),
+                ("idempotency-key", "chk-cmd-b"),
             ],
-            Some(json!({ "input": { "site_id": site_b.to_string() } })),
+            Some(json!({
+                "kind": "site.check-in",
+                "payload": { "site_id": site_b.to_string() }
+            })),
         ))
         .await;
-    assert_ok(st_run_b, &b_run_b, StatusCode::ACCEPTED);
-    for _ in 0..20 {
-        let _ = env
-            .send(req_json(
-                "POST",
-                "/api/v1/jobs/tick",
-                Some(TOKEN),
-                &[],
-                None,
-            ))
-            .await;
-    }
+    assert_err(
+        st_cmd_b,
+        &b_cmd_b,
+        StatusCode::FORBIDDEN,
+        "plugin.forbidden",
+    );
     assert!(
         list_rc(site_b).is_empty(),
         "unauthorized site_b must be blocked"
@@ -377,7 +417,7 @@ fn grant_boost_scoped(store: &Store, idx_a: SiteId, dl_id: DownloaderId) {
     };
     replace_plugin_grants(
         store,
-        "builtin.boost",
+        "cm.boost",
         &[
             g("kv", PluginGrantScope::Global),
             g("read:boost", PluginGrantScope::Global),
@@ -420,14 +460,14 @@ async fn assert_boost_grants_and_budget_cap(
         })
         .unwrap();
 
-    save_boost_config(&env.state, json!({ "dry_run": false }));
+    save_plugin_config_direct(&env.state, "cm.boost", json!({ "dry_run": false }));
     grant_boost_scoped(env.state.store().as_ref(), idx_a, dl_id);
 
-    let rev = env.get_plugin_rev("builtin.boost").await;
+    let rev = env.get_plugin_rev("cm.boost").await;
     let (st_run, _, b_run) = env
         .send(req_json(
             "POST",
-            "/api/v1/plugins/builtin.boost/commands",
+            "/api/v1/plugins/cm.boost/commands",
             Some(TOKEN),
             &[
                 ("if-match", &format!("\"{rev}\"")),
@@ -453,11 +493,11 @@ async fn assert_boost_grants_and_budget_cap(
         "ungranted idx_b must never be searched"
     );
 
-    let rev2 = env.get_plugin_rev("builtin.boost").await;
+    let rev2 = env.get_plugin_rev("cm.boost").await;
     let (st_b, _, b_b) = env
         .send(req_json(
             "POST",
-            "/api/v1/plugins/builtin.boost/commands",
+            "/api/v1/plugins/cm.boost/commands",
             Some(TOKEN),
             &[
                 ("if-match", &format!("\"{rev2}\"")),

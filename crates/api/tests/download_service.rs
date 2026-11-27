@@ -316,6 +316,8 @@ fn test_torrent(site_id: SiteId, id: &str, enclosure: &str, claimed_size: Option
         imdb_id: None,
         detail_url: None,
         category: None,
+        free_2x: false,
+        free_until: None,
     }
 }
 

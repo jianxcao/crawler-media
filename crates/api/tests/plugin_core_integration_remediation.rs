@@ -20,7 +20,7 @@ use indexer::{
 use serde_json::{Value, json};
 use store::BoostProtectionState;
 use support::plugin_http_support::{ADMIN_PASS, HttpEnv, TOKEN, assert_err, assert_ok, req_json};
-use support::{BoostTestDownloader, StubTorrentServer, poll_op, save_boost_config};
+use support::{BoostTestDownloader, StubTorrentServer, poll_op};
 
 #[derive(Default)]
 struct RecordingIntegrationFetcher {
@@ -455,14 +455,14 @@ async fn submit_boost_command(env: &HttpEnv, payload: Value, idem: &str) -> (Sta
     let rev = env
         .state
         .store()
-        .get_plugin("builtin.boost")
+        .get_plugin("cm.boost")
         .unwrap()
         .unwrap()
         .revision;
     let (st, _, b) = env
         .send(req_json(
             "POST",
-            "/api/v1/plugins/builtin.boost/commands",
+            "/api/v1/plugins/cm.boost/commands",
             Some(TOKEN),
             &[
                 ("If-Match", &format!("\"{rev}\"")),
@@ -478,8 +478,11 @@ async fn submit_boost_command(env: &HttpEnv, payload: Value, idem: &str) -> (Sta
 async fn downloader_add_hdarea_and_mteam_extract_numeric_id_and_honor_hr_protection() {
     let srv = StubTorrentServer::start_dynamic(2048);
     let (env, fetcher, dl_id) = build_remediation_env(Some(&srv));
-    save_boost_config(
+    support::plugin_http_support::plugins_fixture::install_cm_boost(&env, false, false, false)
+        .await;
+    support::plugin_http_support::plugins_fixture::save_plugin_config_direct(
         &env.state,
+        "cm.boost",
         json!({ "hold_days": 0, "budget_bytes": 100_000 }),
     );
     let srv_origin = format!("http://{}", srv.addr());
@@ -715,11 +718,15 @@ async fn hdarea_api_key_check_in_via_plugin_actions_and_checkin_command_plus_cat
     assert_eq!(op_act["state"], "succeeded", "op_act={op_act}");
     assert_eq!(signin_srv.hits.load(Ordering::SeqCst), 1);
 
-    let checkin_rev = env.get_plugin_rev("builtin.checkin").await;
+    support::plugin_http_support::plugins_fixture::install_cm_checkin(
+        &env, false, false, false, false,
+    )
+    .await;
+    let checkin_rev = env.get_plugin_rev("cm.checkin").await;
     let (st_cmd, _, b_cmd) = env
         .send(req_json(
             "POST",
-            "/api/v1/plugins/builtin.checkin/commands",
+            "/api/v1/plugins/cm.checkin/commands",
             Some(TOKEN),
             &[
                 ("If-Match", &format!("\"{checkin_rev}\"")),

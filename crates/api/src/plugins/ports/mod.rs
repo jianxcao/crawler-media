@@ -6,6 +6,10 @@ mod ops_and_errors;
 mod site;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_boost_cycle;
+#[cfg(test)]
+mod tests_site_boost;
 
 pub(crate) use cookies_and_manifest::CapturedCookieRecord;
 use cookies_and_manifest::{CapturedCookieBook, filter_grants_for_manifest_invocation};
@@ -14,7 +18,7 @@ use ops_and_errors::{parse_etag, state_entry_dto};
 
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use domain::SiteId;
 use net_guard::{NetGuardClient, TargetPolicy};
@@ -50,6 +54,7 @@ pub(crate) struct HostDeps {
     pub effects: Arc<dyn PluginEffectAdapter>,
     pub in_flight: Arc<InFlightRegistry>,
     pub browser: Arc<indexer::Browser>,
+    pub indexer: Weak<indexer::Indexer>,
     pub downloader: Arc<dyn downloader::Downloader>,
     pub instance_writable: Arc<std::sync::atomic::AtomicBool>,
     pub write_gate: Arc<crate::write_gate::WriteGate>,
@@ -66,6 +71,7 @@ impl HostDeps {
             effects: state.plugins.effects().clone(),
             in_flight: state.plugins.in_flight().clone(),
             browser: state.browser.clone(),
+            indexer: Arc::downgrade(&state.indexer),
             downloader: state.downloader.clone(),
             instance_writable: state.instance_writable.clone(),
             write_gate: state.write_gate.clone(),
@@ -125,20 +131,37 @@ impl Drop for InvocationGuard {
     }
 }
 
+pub(crate) struct TaskStateGuard {
+    states: Arc<Mutex<HashMap<String, ApiState>>>,
+    id: String,
+}
+
+impl Drop for TaskStateGuard {
+    fn drop(&mut self) {
+        self.states.lock().remove(&self.id);
+    }
+}
+
+type SiteStatsCache = Mutex<HashMap<(SiteId, String), (i64, StatsView)>>;
+
 pub(crate) struct StoreHostPorts {
     active: Arc<Mutex<HashMap<String, ActiveInvocation>>>,
+    active_task_states: Arc<Mutex<HashMap<String, ApiState>>>,
     deps: RwLock<Option<HostDeps>>,
     http_client: NetGuardClient,
     captured_cookies: Arc<Mutex<CapturedCookieBook>>,
+    site_stats_cache: Arc<SiteStatsCache>,
 }
 
 impl Default for StoreHostPorts {
     fn default() -> Self {
         Self {
             active: Arc::new(Mutex::new(HashMap::new())),
+            active_task_states: Arc::new(Mutex::new(HashMap::new())),
             deps: RwLock::new(None),
             http_client: NetGuardClient::new(),
             captured_cookies: Arc::new(Mutex::new(CapturedCookieBook::default())),
+            site_stats_cache: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
@@ -147,10 +170,24 @@ impl StoreHostPorts {
     pub(crate) fn clone_handle(&self) -> Self {
         Self {
             active: self.active.clone(),
+            active_task_states: self.active_task_states.clone(),
             deps: RwLock::new(self.deps.read().clone()),
             http_client: self.http_client.clone(),
             captured_cookies: self.captured_cookies.clone(),
+            site_stats_cache: self.site_stats_cache.clone(),
         }
+    }
+
+    pub(crate) fn register_task_state(&self, id: String, state: ApiState) -> TaskStateGuard {
+        self.active_task_states.lock().insert(id.clone(), state);
+        TaskStateGuard {
+            states: self.active_task_states.clone(),
+            id,
+        }
+    }
+
+    pub(super) fn lookup_task_state(&self, id: &str) -> Option<ApiState> {
+        self.active_task_states.lock().get(id).cloned()
     }
 
     pub(crate) fn bind_deps(&self, deps: HostDeps) {
@@ -735,5 +772,9 @@ impl HostPorts for StoreHostPorts {
         downloaders: &[String],
     ) -> Result<BoostSnapshotView, ApiError> {
         boost_download::boost_snapshot(self, inv, sites, downloaders)
+    }
+
+    fn boost_run_cycle(&self, inv: &Invocation, override_json: &str) -> Result<String, ApiError> {
+        boost_download::boost_run_cycle(self, inv, override_json)
     }
 }

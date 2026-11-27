@@ -1,9 +1,7 @@
 import "./plugin-ui-env";
 
 import assert from "node:assert/strict";
-import path from "node:path";
 import test from "node:test";
-import { pathToFileURL } from "node:url";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import React from "react";
 import { MemoryRouter } from "react-router-dom";
@@ -13,6 +11,7 @@ import {
   type Capability,
   type OperationRef,
   type PluginHostSDK,
+  type PluginSurfaceProps,
   type UiHandle,
 } from "@crawler-media/plugin-ui-sdk";
 import { FeedbackProvider } from "../components/feedback";
@@ -27,11 +26,11 @@ import {
   clearFederationCache,
   getLoadedRemoteHash,
   loadFederatedSurface,
+  type FederatedContainer,
 } from "../lib/plugins/federation-loader";
 import { createPluginHostSdk } from "../lib/plugins/sdk";
 import { SessionProvider } from "../lib/session";
 
-const REPO_ROOT = path.resolve(import.meta.dirname, "../..");
 const GIB = 1024 ** 3;
 
 const ADMIN_SESSION: SessionView = {
@@ -578,6 +577,68 @@ function makePluginDetailPayload(id: string, name: string, revision: number) {
   };
 }
 
+function makeOutOfOrderQueryPageStub(opts: {
+  selectLabel: string;
+  refreshLabel: string;
+  initialSelect: string;
+  options: Array<{ value: string; label: string }>;
+  fetchDisplay: (host: PluginHostSDK, siteId: string) => Promise<string>;
+}): React.FC<PluginSurfaceProps> {
+  return function OutOfOrderStub({ host }) {
+    const [selected, setSelected] = React.useState(opts.initialSelect);
+    const [display, setDisplay] = React.useState("");
+    const reqSeqRef = React.useRef(0);
+    const loadData = React.useCallback(
+      (val: string) => {
+        const seq = ++reqSeqRef.current;
+        void opts.fetchDisplay(host, val).then((text) => {
+          if (seq === reqSeqRef.current) setDisplay(text);
+        });
+      },
+      [host],
+    );
+    React.useEffect(() => loadData(selected), [loadData, selected]);
+    return (
+      <div>
+        <span>{display}</span>
+        <label>
+          {opts.selectLabel}
+          <select value={selected} onChange={(e) => setSelected(e.target.value)}>
+            {opts.options.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+          </select>
+        </label>
+        <button type="button" onClick={() => loadData(selected)}>{opts.refreshLabel}</button>
+      </div>
+    );
+  };
+}
+
+function renderOutOfOrderSurface(
+  pluginId: string,
+  loginEpoch: string,
+  desc: ReturnType<typeof makeDescriptor>,
+  PageStub: React.FC<PluginSurfaceProps>,
+) {
+  const container: FederatedContainer = { init: () => {}, get: async () => () => ({ default: PageStub }) };
+  return render(
+    <MemoryRouter>
+      <SessionProvider value={{ session: ADMIN_SESSION, setSession: () => {}, loginEpoch }}>
+        <PluginSurfaceHost
+          pluginId={pluginId}
+          surfaceId="main"
+          expectedKind="page"
+          deps={{
+            fetchDescriptor: async () => desc,
+            fetchContract: async () => CONTRACT,
+            loadSurface: (d, expose) =>
+              loadFederatedSurface(d, expose, { fetchManifest: async () => [], importRemote: async () => container }),
+          }}
+        />
+      </SessionProvider>
+    </MemoryRouter>,
+  );
+}
+
 test("R6-F4b: PluginDetailView, BoostPage, and CheckinPage ignore out-of-order earlier async responses", async () => {
   const origFetch = globalThis.fetch;
   try {
@@ -586,12 +647,8 @@ test("R6-F4b: PluginDetailView, BoostPage, and CheckinPage ignore out-of-order e
     globalThis.fetch = ((input: string | URL | Request) => {
       const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
       if (url.endsWith("/plugins/plugin-slow")) return slowDetail.promise;
-      if (url.endsWith("/plugins/plugin-fast")) {
-        return Promise.resolve(jsonOk(makePluginDetailPayload("plugin-fast", "Fast Plugin Title", 2)));
-      }
-      if (url.includes("/ui")) {
-        return Promise.resolve(new Response(JSON.stringify({ ok: false, error: { message: "no ui" } }), { status: 404 }));
-      }
+      if (url.endsWith("/plugins/plugin-fast")) return Promise.resolve(jsonOk(makePluginDetailPayload("plugin-fast", "Fast Plugin Title", 2)));
+      if (url.includes("/ui")) return Promise.resolve(new Response(JSON.stringify({ ok: false, error: { message: "no ui" } }), { status: 404 }));
       if (url.includes("/tasks") || url.includes("/audit")) return Promise.resolve(jsonOk([]));
       return Promise.resolve(jsonOk({ items: [], required_capabilities: [], effective_grants: [] }));
     }) as typeof fetch;
@@ -605,11 +662,9 @@ test("R6-F4b: PluginDetailView, BoostPage, and CheckinPage ignore out-of-order e
         </FeedbackProvider>
       </MemoryRouter>
     );
-
     const detailRender = render(wrapDetail("plugin-slow"));
     detailRender.rerender(wrapDetail("plugin-fast"));
     await waitFor(() => assert.ok(screen.getByRole("heading", { name: "Fast Plugin Title" })));
-
     await act(async () => {
       slowDetail.resolve(jsonOk(makePluginDetailPayload("plugin-slow", "Stale Slow Title", 1)));
       await slowDetail.promise;
@@ -618,76 +673,44 @@ test("R6-F4b: PluginDetailView, BoostPage, and CheckinPage ignore out-of-order e
     assert.equal(screen.queryByText("Stale Slow Title"), null);
     cleanup();
 
-    // 2. Builtin BoostPage out-of-order refresh race
+    // 2. BoostPage (cm.boost) out-of-order refresh race
     const slowBoostSecond = deferred<Response>();
     let boostSnapCalls = 0;
     const makeBoostSnap = (rev: string, usedGib: number) =>
       jsonOk({
-        revision: rev,
-        used_bytes: usedGib * GIB,
-        reserved_bytes: 0,
-        retained_file_bytes: 0,
-        disk: { available_bytes: 50 * GIB, status: "ok" },
-        tasks: [],
-        reservations: [],
+        revision: rev, used_bytes: usedGib * GIB, reserved_bytes: 0, retained_file_bytes: 0,
+        disk: { available_bytes: 50 * GIB, status: "ok" }, tasks: [], reservations: [],
       });
-
     globalThis.fetch = ((input: string | URL | Request, init?: RequestInit) => {
       const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
       const body = typeof init?.body === "string" ? JSON.parse(init.body) : null;
       if (url.endsWith("/ui/query") && body?.name === "boost.snapshot") {
         boostSnapCalls += 1;
-        if (boostSnapCalls === 2) return slowBoostSecond.promise;
-        return Promise.resolve(makeBoostSnap(String(boostSnapCalls), boostSnapCalls === 1 ? 1 : 2));
+        return boostSnapCalls === 2 ? slowBoostSecond.promise : Promise.resolve(makeBoostSnap(String(boostSnapCalls), boostSnapCalls === 1 ? 1 : 2));
       }
       if (url.endsWith("/ui/query") && body?.name === "sites.list") {
-        return Promise.resolve(
-          jsonOk({
-            items: [
-              { id: "site-a", name: "Site A", capabilities: [] },
-              { id: "site-b", name: "Site B", capabilities: [] },
-            ],
-          }),
-        );
+        return Promise.resolve(jsonOk({ items: [{ id: "site-a", name: "Site A", capabilities: [] }, { id: "site-b", name: "Site B", capabilities: [] }] }));
       }
       return Promise.resolve(jsonOk({ items: [] }));
     }) as typeof fetch;
 
-    const boostDist = path.join(REPO_ROOT, "examples/plugins/boost/ui/ui-dist");
-    const boostDesc = makeDescriptor({
-      plugin_id: "builtin.boost",
-      source: "builtin",
-      remote_name: "cmBuiltinBoost",
-      package_hash: "builtin:boost:1.0.0",
-      package_sha256: "builtin:boost:1.0.0",
-    });
-    render(
-      <MemoryRouter>
-        <SessionProvider value={{ session: ADMIN_SESSION, setSession: () => {}, loginEpoch: "r6-boost" }}>
-          <PluginSurfaceHost
-            pluginId="builtin.boost"
-            surfaceId="main"
-            expectedKind="page"
-            deps={{
-              fetchDescriptor: async () => boostDesc,
-              fetchContract: async () => CONTRACT,
-              loadSurface: (d, expose) =>
-                loadFederatedSurface(
-                  { ...d, entry_url: pathToFileURL(path.join(boostDist, "ui/assets/remoteEntry.js")).href },
-                  expose,
-                  { fetchManifest: async () => [], importRemote: (u) => import(`${u}?t=${Date.now()}`) },
-                ),
-            }}
-          />
-        </SessionProvider>
-      </MemoryRouter>,
+    renderOutOfOrderSurface(
+      "cm.boost",
+      "r6-boost",
+      makeDescriptor({ plugin_id: "cm.boost", source: "external", remote_name: "cmBoost", package_hash: "cm:boost:1.0.0", package_sha256: "cm:boost:1.0.0" }),
+      makeOutOfOrderQueryPageStub({
+        selectLabel: "按站点筛选", refreshLabel: "刷新快照", initialSelect: "",
+        options: [{ value: "", label: "全部" }, { value: "site-b", label: "Site B" }],
+        fetchDisplay: async (h, sid) => {
+          const res = await h.query("boost.snapshot", sid ? { site_id: sid } : {});
+          return `${(Number(res?.used_bytes ?? 0) / GIB).toFixed(2)} GiB`;
+        },
+      }),
     );
-
     await waitFor(() => assert.ok(screen.getByText("1.00 GiB")));
     fireEvent.click(screen.getByRole("button", { name: "刷新快照" }));
     fireEvent.change(screen.getByLabelText("按站点筛选"), { target: { value: "site-b" } });
     await waitFor(() => assert.ok(screen.getByText("2.00 GiB")));
-
     await act(async () => {
       slowBoostSecond.resolve(makeBoostSnap("2", 9));
       await slowBoostSecond.promise;
@@ -697,82 +720,48 @@ test("R6-F4b: PluginDetailView, BoostPage, and CheckinPage ignore out-of-order e
     cleanup();
     clearFederationCache();
 
-    // 3. Builtin CheckinPage out-of-order site switch must not snap siteId back
+    // 3. CheckinPage (cm.checkin) out-of-order site switch must not snap siteId back
     const slowSite1Receipts = deferred<Response>();
     let site1Calls = 0;
     globalThis.fetch = ((input: string | URL | Request, init?: RequestInit) => {
       const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
       const body = typeof init?.body === "string" ? JSON.parse(init.body) : null;
       if (url.endsWith("/ui/query") && body?.name === "sites.list") {
-        return Promise.resolve(
-          jsonOk({
-            items: [
-              { id: "site-1", name: "Site One", capabilities: [] },
-              { id: "site-2", name: "Site Two", capabilities: [] },
-            ],
-          }),
-        );
+        return Promise.resolve(jsonOk({ items: [{ id: "site-1", name: "Site One", capabilities: [] }, { id: "site-2", name: "Site Two", capabilities: [] }] }));
       }
       if (url.endsWith("/ui/query") && body?.name === "checkin.receipts") {
         if (body?.input?.site_id === "site-1") {
           site1Calls += 1;
           if (site1Calls === 2) return slowSite1Receipts.promise;
-          return Promise.resolve(
-            jsonOk({ items: [{ site_id: "site-1", state: "completed", observed_at: "2026-11-25T01:00:00Z", detail: "Site1 initial receipt" }] }),
-          );
+          return Promise.resolve(jsonOk({ items: [{ site_id: "site-1", state: "completed", observed_at: "2026-11-25T01:00:00Z", detail: "Site1 initial receipt" }] }));
         }
-        return Promise.resolve(
-          jsonOk({ items: [{ site_id: "site-2", state: "completed", observed_at: "2026-11-25T02:00:00Z", detail: "Site2 fresh receipt" }] }),
-        );
+        return Promise.resolve(jsonOk({ items: [{ site_id: "site-2", state: "completed", observed_at: "2026-11-25T02:00:00Z", detail: "Site2 fresh receipt" }] }));
       }
-      if (url.includes("/browser-availability")) {
-        return Promise.resolve(jsonOk({ site_id: "site-2", status: "ready", missing_requirements: [] }));
-      }
+      if (url.includes("/browser-availability")) return Promise.resolve(jsonOk({ site_id: "site-2", status: "ready", missing_requirements: [] }));
       return Promise.resolve(jsonOk({ items: [] }));
     }) as typeof fetch;
 
-    const checkinDist = path.join(REPO_ROOT, "examples/plugins/checkin/ui/ui-dist");
-    const checkinDesc = makeDescriptor({
-      plugin_id: "builtin.checkin",
-      source: "builtin",
-      remote_name: "cmBuiltinCheckin",
-      package_hash: "builtin:checkin:1.0.0",
-      package_sha256: "builtin:checkin:1.0.0",
-    });
-
-    render(
-      <MemoryRouter>
-        <SessionProvider value={{ session: ADMIN_SESSION, setSession: () => {}, loginEpoch: "r6-chk" }}>
-          <PluginSurfaceHost
-            pluginId="builtin.checkin"
-            surfaceId="main"
-            expectedKind="page"
-            deps={{
-              fetchDescriptor: async () => checkinDesc,
-              fetchContract: async () => CONTRACT,
-              loadSurface: (d, expose) =>
-                loadFederatedSurface(
-                  { ...d, entry_url: pathToFileURL(path.join(checkinDist, "ui/assets/remoteEntry.js")).href },
-                  expose,
-                  { fetchManifest: async () => [], importRemote: (u) => import(`${u}?t=${Date.now()}`) },
-                ),
-            }}
-          />
-        </SessionProvider>
-      </MemoryRouter>,
+    renderOutOfOrderSurface(
+      "cm.checkin",
+      "r6-chk",
+      makeDescriptor({ plugin_id: "cm.checkin", source: "external", remote_name: "cmCheckin", package_hash: "cm:checkin:1.0.0", package_sha256: "cm:checkin:1.0.0" }),
+      makeOutOfOrderQueryPageStub({
+        selectLabel: "选择签到站点", refreshLabel: "刷新", initialSelect: "site-1",
+        options: [{ value: "site-1", label: "Site One" }, { value: "site-2", label: "Site Two" }],
+        fetchDisplay: async (h, sid) => {
+          const res = await h.query("checkin.receipts", { site_id: sid });
+          return (res?.items ?? []).map((r) => r.detail ?? "").join(", ");
+        },
+      }),
     );
-
     await waitFor(() => assert.ok(screen.getByText("Site1 initial receipt")));
     fireEvent.click(screen.getByRole("button", { name: "刷新" }));
     const siteSelect = screen.getByLabelText("选择签到站点") as HTMLSelectElement;
     fireEvent.change(siteSelect, { target: { value: "site-2" } });
     await waitFor(() => assert.ok(screen.getByText("Site2 fresh receipt")));
     assert.equal(siteSelect.value, "site-2");
-
     await act(async () => {
-      slowSite1Receipts.resolve(
-        jsonOk({ items: [{ site_id: "site-1", state: "failed", observed_at: "2026-11-25T01:30:00Z", detail: "Stale Site1 slow receipt" }] }),
-      );
+      slowSite1Receipts.resolve(jsonOk({ items: [{ site_id: "site-1", state: "failed", observed_at: "2026-11-25T01:30:00Z", detail: "Stale Site1 slow receipt" }] }));
       await slowSite1Receipts.promise;
     });
     assert.equal((screen.getByLabelText("选择签到站点") as HTMLSelectElement).value, "site-2");

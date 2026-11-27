@@ -1,147 +1,22 @@
+#[path = "phase1_support/mod.rs"]
+mod support;
+
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use hooks::{Gate, HookPipeline, Registration};
 use plugin_api::{
-    ApiError, BoostDisk, BoostReservationView, BoostSnapshotView, BoostTaskView, Candidate,
-    CommandAction, CommandRequest, DownloadAfterEvent, DownloadBefore, DownloadOptions,
+    ApiError, CommandAction, CommandRequest, DownloadAfterEvent, DownloadBefore, DownloadOptions,
     DownloadPlanView, ENDPOINT_WORLD, EndpointRequest, ErrorCode, Event, EventPayload, FilterAfter,
-    FilterInput, FilterPayload, GateInput, GatePayload, HOOK_WORLD, HookContext, OwnedRevision,
-    Patch, SearchBefore, SearchQuery, SiteCheckinAfterEvent, SubscribeScore, SubscribeSelect,
-    TASK_WORLD, TaskControl, TaskInput, TransferCompletedEvent, TransferRename,
+    FilterInput, FilterPayload, GateInput, GatePayload, HOOK_WORLD, OwnedRevision, Patch,
+    SearchBefore, SearchQuery, SiteCheckinAfterEvent, SubscribeScore, SubscribeSelect, TASK_WORLD,
+    TaskControl, TaskInput, TransferCompletedEvent, TransferRename,
 };
-use plugin_host::{HostPorts, Invocation, Limits, PluginHost, PluginRuntime, PolicyInvoker};
-
-const POLICY_WASM: &[u8] = include_bytes!("fixtures/policy.wasm");
-const TASK_WASM: &[u8] = include_bytes!("fixtures/task_fixture.wasm");
-const ENDPOINT_WASM: &[u8] = include_bytes!("fixtures/endpoint_fixture.wasm");
-
-fn ctx(plugin_id: &str) -> HookContext {
-    HookContext {
-        invocation_id: "inv-host-1".into(),
-        cause_id: "cause-host-1".into(),
-        plugin_id: plugin_id.into(),
-        generation: 1,
-        config_revision: 1,
-        subject: "subject:1".into(),
-        site_id: Some("site-1".into()),
-        subscribe_id: Some("sub-1".into()),
-        library_id: None,
-        deadline_ms: 9_999_999_999,
-        cancelled: false,
-    }
-}
-
-fn candidate(handle: &str, title: &str) -> Candidate {
-    Candidate {
-        handle: handle.into(),
-        site_id: "site-1".into(),
-        provider: "prov-1".into(),
-        generation: 1,
-        title: title.into(),
-        size: Some(1024),
-        seeders: Some(10),
-        leechers: Some(1),
-        published_at: Some(100),
-        free: Some(true),
-        hr: Some(false),
-        release: Some("1080p".into()),
-        score: Some(50),
-        labels: vec![],
-        revision: 1,
-    }
-}
-
-struct BoostAndCmdPorts {
-    allow_boost: bool,
-    captured_commands: Mutex<Vec<CommandRequest>>,
-}
-
-impl HostPorts for BoostAndCmdPorts {
-    fn authorized(&self, _inv: &Invocation, cap: &str) -> bool {
-        if cap == "read:boost" {
-            return self.allow_boost;
-        }
-        true
-    }
-
-    fn boost_snapshot(
-        &self,
-        _inv: &Invocation,
-        sites: &[String],
-        downloaders: &[String],
-    ) -> Result<BoostSnapshotView, ApiError> {
-        Ok(BoostSnapshotView {
-            revision: 7,
-            used_bytes: 2_000,
-            reserved_bytes: 500,
-            retained_file_bytes: 1_000,
-            reservations: vec![BoostReservationView {
-                handle: "res-1".into(),
-                operation_id: "op-1".into(),
-                quota_key: sites.first().cloned().unwrap_or_else(|| "pool:1".into()),
-                downloader_id: downloaders
-                    .first()
-                    .cloned()
-                    .unwrap_or_else(|| "dl-1".into()),
-                site_id: Some("site-1".into()),
-                info_hash: Some("hash-1".into()),
-                reserved_bytes: 500,
-                stage: "final".into(),
-                expires_at: None,
-                revision: 1,
-            }],
-            tasks: vec![BoostTaskView {
-                handle: "tf-1".into(),
-                quota_key: "pool:1".into(),
-                downloader_id: "dl-1".into(),
-                site_id: Some("site-1".into()),
-                info_hash: "hash-2".into(),
-                state: "seeding".into(),
-                task_bytes: 2_000,
-                retained_bytes: 0,
-                uploaded_bytes: 4_000,
-                hr_protected: Some(false),
-                hold_until: Some(100),
-                free_until: Some(900),
-                protection_state: "eligible".into(),
-                transfer_active: false,
-                library_referenced: false,
-                observed_at: 200,
-                revision: 2,
-            }],
-            disk: BoostDisk {
-                available_bytes: Some(50_000),
-                observed_at: 200,
-                status: "ok".into(),
-            },
-        })
-    }
-
-    fn commands_submit(&self, _inv: &Invocation, req: CommandRequest) -> Result<String, ApiError> {
-        let mut guard = self.captured_commands.lock().unwrap();
-        let idx = guard.len() + 1;
-        guard.push(req);
-        Ok(format!("op-dl-{idx}"))
-    }
-}
-
-fn run_filter_patch(
-    host: &PluginHost,
-    policy: &plugin_host::CompiledPolicy,
-    payload: FilterPayload,
-) -> Vec<Patch> {
-    host.invoke_filter(
-        policy,
-        Invocation::new("org.example.policy", Duration::from_secs(2)),
-        FilterInput {
-            schema_version: 1,
-            context: ctx("org.example.policy"),
-            payload,
-        },
-    )
-    .unwrap()
-}
+use plugin_host::{Invocation, Limits, PluginHost, PluginRuntime, PolicyInvoker};
+use support::{
+    BoostAndCmdPorts, ContextSpyPorts, ENDPOINT_WASM, POLICY_WASM, TASK_WASM, candidate, ctx,
+    new_spy_invocation, run_filter_patch,
+};
 
 #[test]
 fn real_policy_wasm_executes_typed_filter_patches() {
@@ -450,24 +325,111 @@ fn real_task_and_endpoint_wasm_exercise_boost_snapshot_and_structured_downloader
 }
 
 #[test]
-fn boost_import_is_blocked_for_hook_world_and_lifecycle_context() {
-    // Lifecycle validate calling boost.snapshot (if task_fixture invoked in lifecycle) returns WrongContext,
-    // and loading a hook-plugin that imports boost is rejected by HOOK_IMPORTS allowlist.
+fn hook_gate_and_task_run_cycle_enforce_context_and_permissions() {
     let runtime = PluginRuntime::new(Limits::default()).unwrap();
-    let host = runtime.host(Arc::new(BoostAndCmdPorts {
+    let allow_ports = Arc::new(BoostAndCmdPorts {
         allow_boost: true,
         captured_commands: Mutex::new(Vec::new()),
-    }));
+    });
+    let host = runtime.host(allow_ports);
     // Task component cannot be loaded into hook world (wrong imports + exports).
     assert!(matches!(
         host.load(TASK_WASM, HOOK_WORLD),
         Err(plugin_api::Failure::InvalidComponent(_))
     ));
+    let policy = host.load(POLICY_WASM, HOOK_WORLD).unwrap();
+    let decision = host
+        .invoke_gate(
+            &policy,
+            Invocation::new("cm.boost", Duration::from_secs(2)),
+            GateInput {
+                schema_version: 1,
+                context: ctx("cm.boost"),
+                hook_id: "download.before".into(),
+                handles: vec!["h-gate-1".into()],
+                revision: 1,
+                payload: GatePayload::DownloadBefore(Box::new(DownloadBefore {
+                    candidate: candidate("h-gate-1", "boost-gate-check"),
+                    purpose: "subscribe".into(),
+                    plan: DownloadPlanView {
+                        downloader_id: "dl-1".into(),
+                        relative_directory: None,
+                        category: None,
+                        tags: vec![],
+                        paused: false,
+                        upload_limit: None,
+                        download_limit: None,
+                        sequential: false,
+                        first_last_piece: false,
+                    },
+                })),
+            },
+        )
+        .unwrap();
+    assert_eq!(decision, Gate::Allow);
+
+    let denied_host = runtime.host(Arc::new(BoostAndCmdPorts {
+        allow_boost: false,
+        captured_commands: Mutex::new(Vec::new()),
+    }));
+    let denied_gate = denied_host
+        .invoke_gate(
+            &policy,
+            Invocation::new("cm.boost", Duration::from_secs(2)),
+            GateInput {
+                schema_version: 1,
+                context: ctx("cm.boost"),
+                hook_id: "download.before".into(),
+                handles: vec!["h-gate-2".into()],
+                revision: 1,
+                payload: GatePayload::DownloadBefore(Box::new(DownloadBefore {
+                    candidate: candidate("h-gate-2", "boost-gate-check"),
+                    purpose: "subscribe".into(),
+                    plan: DownloadPlanView {
+                        downloader_id: "dl-1".into(),
+                        relative_directory: None,
+                        category: None,
+                        tags: vec![],
+                        paused: false,
+                        upload_limit: None,
+                        download_limit: None,
+                        sequential: false,
+                        first_last_piece: false,
+                    },
+                })),
+            },
+        )
+        .unwrap_err();
+    assert!(matches!(
+        denied_gate,
+        plugin_api::Failure::Guest(ApiError {
+            code: ErrorCode::PermissionDenied,
+            ..
+        })
+    ));
+
     let task = host.load_task(TASK_WASM, TASK_WORLD).unwrap();
+    let cycle_out = host
+        .invoke_task(
+            &task,
+            Invocation::new("cm.boost", Duration::from_secs(2)),
+            TaskInput {
+                task_id: "traffic-cycle".into(),
+                validated_input: "boost-run-cycle".into(),
+                job_id: "j-cycle-1".into(),
+                attempt: 1,
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        cycle_out.summary,
+        "{\"ok\":true,\"override\":{\"dry_run\":true}}"
+    );
+
     let err = host
         .validate_task(
             &task,
-            Invocation::new("builtin.boost", Duration::from_secs(2)),
+            Invocation::new("cm.boost", Duration::from_secs(2)),
             "wrong-context-boost",
             1,
         )
@@ -479,74 +441,6 @@ fn boost_import_is_blocked_for_hook_world_and_lifecycle_context() {
             ..
         })
     ));
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct SeenCall {
-    inv_id: String,
-    plugin_id: String,
-    role: plugin_api::GuestRole,
-    generation: u64,
-    logged_fields: Vec<(String, String)>,
-}
-
-struct ContextSpyPorts {
-    begun: Mutex<Vec<(String, String, plugin_api::GuestRole, u64)>>,
-    logged: Mutex<Vec<SeenCall>>,
-}
-
-impl ContextSpyPorts {
-    fn new() -> Arc<Self> {
-        Arc::new(Self {
-            begun: Mutex::new(Vec::new()),
-            logged: Mutex::new(Vec::new()),
-        })
-    }
-}
-
-impl HostPorts for ContextSpyPorts {
-    fn begin_invocation(
-        &self,
-        inv: &Invocation,
-    ) -> Result<Option<Box<dyn std::any::Any + Send + Sync>>, ApiError> {
-        self.begun.lock().unwrap().push((
-            inv.id().to_string(),
-            inv.plugin_id.clone(),
-            inv.role,
-            inv.generation,
-        ));
-        Ok(None)
-    }
-
-    fn authorized(&self, _inv: &Invocation, _cap: &str) -> bool {
-        true
-    }
-
-    fn log_write(
-        &self,
-        inv: &Invocation,
-        _level: plugin_api::LogLevel,
-        message: &str,
-        fields: &[(String, String)],
-    ) -> Result<(), ApiError> {
-        if message == "current-context" {
-            self.logged.lock().unwrap().push(SeenCall {
-                inv_id: inv.id().to_string(),
-                plugin_id: inv.plugin_id.clone(),
-                role: inv.role,
-                generation: inv.generation,
-                logged_fields: fields.to_vec(),
-            });
-        }
-        Ok(())
-    }
-}
-
-fn new_spy_invocation(plugin_id: &str, generation: u64, config_rev: u64) -> Invocation {
-    let mut inv = Invocation::new(plugin_id, Duration::from_secs(2));
-    inv.generation = generation;
-    inv.config_revision = config_rev;
-    inv
 }
 
 #[test]

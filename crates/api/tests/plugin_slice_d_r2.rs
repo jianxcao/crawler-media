@@ -400,7 +400,7 @@ fn replace_grants_and_enable(store: &Store, pid: &str, grants: &[PluginGrant]) {
     set_lifecycle(store, pid, g.revision, true);
 }
 
-fn assert_nexusphp_and_boost_scopes(env: &HttpEnv, site_a: SiteId, site_b: SiteId) -> String {
+async fn assert_nexusphp_and_boost_scopes(env: &HttpEnv, site_a: SiteId, site_b: SiteId) -> String {
     let store = env.state.store();
     let (nx_id, nx_prov) = (
         "builtin.nexusphp-maintenance",
@@ -456,25 +456,22 @@ fn assert_nexusphp_and_boost_scopes(env: &HttpEnv, site_a: SiteId, site_b: SiteI
             enabled: true,
         })
         .unwrap();
-    support::save_boost_config(
-        &env.state,
-        json!({ "downloader_id": dl_id.to_string(), "budget_bytes": 0, "enforce_budget_on_all": true }),
-    );
+    support::plugin_http_support::plugins_fixture::install_cm_boost(env, false, true, false).await;
     replace_grants_and_enable(
         &store,
-        "builtin.boost",
+        "cm.boost",
         &[grant(
             "hooks:download.before",
             PluginGrantScope::Site(site_a),
         )],
     );
     let pipe = api::build_hook_pipeline_for_test(&env.state, "download.before");
-    let (ga, _) = pipe
-        .gate_typed_with_trace("wf-a", &dl_before_input(Some(site_a), dl_id))
-        .unwrap();
-    let (gb, _) = pipe
-        .gate_typed_with_trace("wf-b", &dl_before_input(Some(site_b), dl_id))
-        .unwrap();
+    let mut in_a = dl_before_input(Some(site_a), dl_id);
+    in_a.handles = vec!["reject-me".into()];
+    let (ga, _) = pipe.gate_typed_with_trace("wf-a", &in_a).unwrap();
+    let mut in_b = dl_before_input(Some(site_b), dl_id);
+    in_b.handles = vec!["reject-me".into()];
+    let (gb, _) = pipe.gate_typed_with_trace("wf-b", &in_b).unwrap();
     assert!(matches!(ga, Gate::Reject(_)) && matches!(gb, Gate::Allow | Gate::Abstain));
     norm_id
 }
@@ -483,7 +480,7 @@ fn assert_nexusphp_and_boost_scopes(env: &HttpEnv, site_a: SiteId, site_b: SiteI
 async fn slice_d_r2_item2_provider_hook_and_port_grant_scopes() {
     let env = HttpEnv::new().await;
     let (site_a, site_b) = (env.insert_site("SiteA"), env.insert_site("SiteB"));
-    let norm_id = assert_nexusphp_and_boost_scopes(&env, site_a, site_b);
+    let norm_id = assert_nexusphp_and_boost_scopes(&env, site_a, site_b).await;
 
     env.enable_dev_mode().await;
     let p_zip = pkg::build_task_package_custom(

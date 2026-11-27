@@ -141,10 +141,13 @@ pub(super) fn boost_snapshot(
     sites: &[String],
     downloaders: &[String],
 ) -> Result<BoostSnapshotView, ApiError> {
-    if !matches!(inv.role, GuestRole::Task | GuestRole::Endpoint) {
+    if !matches!(
+        inv.role,
+        GuestRole::Task | GuestRole::Endpoint | GuestRole::Gate | GuestRole::Filter
+    ) {
         return Err(api_err(
             ErrorCode::WrongContext,
-            "boost.snapshot is restricted to task and endpoint contexts",
+            "boost.snapshot is restricted to task, endpoint, gate, and filter contexts",
         ));
     }
     let ctx = ports.lookup(inv)?;
@@ -445,4 +448,116 @@ pub(super) fn resolve_downloader_command(
             "unsupported command action",
         )),
     }
+}
+
+fn run_boost_cycle_off_guest_thread(
+    api_state: &crate::management::ApiState,
+    plugin: &store::plugins::PluginRecord,
+    cfg: &crate::plugins::boost::config::BoostConfig,
+    cause_id: &str,
+) -> Result<crate::plugins::boost::cycle::BoostCycleSummary, ApiError> {
+    let rt_handle = tokio::runtime::Handle::try_current().ok();
+    std::thread::scope(|s| {
+        s.spawn(move || {
+            let _enter = rt_handle.as_ref().map(tokio::runtime::Handle::enter);
+            crate::plugins::boost::cycle::execute_boost_cycle_from_task(
+                api_state, plugin, cfg, cause_id,
+            )
+        })
+        .join()
+    })
+    .map_err(|_| api_err(ErrorCode::UnknownOutcome, "boost.run-cycle worker panicked"))?
+    .map_err(|e| api_err(ErrorCode::Conflict, &e))
+}
+
+pub(super) fn boost_run_cycle(
+    ports: &StoreHostPorts,
+    inv: &Invocation,
+    override_json: &str,
+) -> Result<String, ApiError> {
+    if inv.role != GuestRole::Task {
+        return Err(api_err(
+            ErrorCode::WrongContext,
+            "boost.run-cycle is restricted to task context",
+        ));
+    }
+    let ctx = ports.lookup(inv)?;
+    ctx.deps.ensure_write_admitted()?;
+    let authority = ports.runtime_authority(&ctx)?;
+    ctx.deps
+        .store
+        .validate_plugin_state_authority(authority)
+        .map_err(map_store_error)?;
+    if !ports.authorized(inv, "command:boost.run") {
+        return Err(api_err(ErrorCode::PermissionDenied, "permission denied"));
+    }
+    let override_val: serde_json::Value = if override_json.trim().is_empty() {
+        json!({})
+    } else {
+        serde_json::from_str(override_json).map_err(|e| {
+            api_err(
+                ErrorCode::InvalidArgument,
+                &format!("invalid override json: {e}"),
+            )
+        })?
+    };
+    if !override_val.is_object() {
+        return Err(api_err(
+            ErrorCode::InvalidArgument,
+            "override-json must be a JSON object",
+        ));
+    }
+    let Some(api_state) = ports.lookup_task_state(inv.id()) else {
+        return Err(api_err(
+            ErrorCode::Unsupported,
+            "boost.run-cycle runtime state unavailable",
+        ));
+    };
+    let plugin = ctx
+        .deps
+        .store
+        .get_plugin(authority.plugin_id())
+        .map_err(map_store_error)?
+        .ok_or_else(|| api_err(ErrorCode::NotFound, "plugin not found"))?;
+    let stored_cfg = ctx
+        .deps
+        .store
+        .get_plugin_config(&plugin.plugin_id)
+        .map_err(map_store_error)?
+        .map(|c| c.values)
+        .unwrap_or_else(|| json!({}));
+    let cfg =
+        crate::plugins::boost::config::BoostConfig::from_layers(&[&stored_cfg, &override_val])
+            .map_err(|e| api_err(ErrorCode::InvalidArgument, &e))?;
+    let grants = ctx
+        .deps
+        .store
+        .get_plugin_grants(&plugin.plugin_id)
+        .map_err(map_store_error)?;
+    let boost_targets: Vec<store::plugins::PluginGrantScope> = grants
+        .iter()
+        .filter(|g| g.capability == "command:boost.run")
+        .map(|g| g.scope.clone())
+        .collect();
+    if !crate::plugins::boost::cycle::validate_exec_boost_run_targets(
+        &api_state,
+        &cfg,
+        &boost_targets,
+    ) {
+        return Err(api_err(
+            ErrorCode::PermissionDenied,
+            "command:boost.run targets do not cover downloader or sites",
+        ));
+    }
+    let summary = run_boost_cycle_off_guest_thread(&api_state, &plugin, &cfg, &ctx.cause.cause_id)?;
+    serde_json::to_string(&json!({
+        "dry_run": summary.dry_run,
+        "added": summary.added,
+        "skipped_disk": summary.skipped_disk,
+        "skipped_quota": summary.skipped_quota,
+        "reconciled_tasks": summary.reconciled_tasks,
+        "evicted_tasks": summary.evicted_tasks,
+        "cleaned_files_tasks": summary.cleaned_files_tasks,
+    }))
+    .map_err(|e| api_err(ErrorCode::Conflict, &e.to_string()))
 }

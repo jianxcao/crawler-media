@@ -98,6 +98,7 @@ impl Downloader for OwnedDownloads {
             upload_speed: 0,
             info_hash: "unrelated".into(),
             owned_tags: vec![],
+            ..Default::default()
         }])
     }
 }
@@ -140,6 +141,8 @@ fn pending(enclosure: &str, downloader_id: Option<DownloaderId>) -> api::store::
             detail_url: None,
             category: None,
             poster_url: None,
+            free_2x: false,
+            free_until: None,
         },
         release_override: None,
         downloader_id,

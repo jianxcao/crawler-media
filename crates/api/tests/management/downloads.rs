@@ -91,6 +91,8 @@ async fn list_tasks_matches_untagged_http_snapshot_via_persisted_info_hash() {
         detail_url: None,
         category: None,
         poster_url: None,
+        free_2x: false,
+        free_until: None,
     };
     let store = api_state.store();
     store
@@ -118,6 +120,7 @@ async fn list_tasks_matches_untagged_http_snapshot_via_persisted_info_hash() {
         upload_speed: 0,
         info_hash: hash.into(),
         owned_tags: vec![],
+        ..Default::default()
     });
 
     let listed = app

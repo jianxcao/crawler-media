@@ -250,11 +250,11 @@ def register_cases(registry: SuiteRegistry) -> None:
         qb = ctx.new_qbit(disk_free_bytes=10 * 1024 ** 3)
         dl = ensure_downloader(ctx, qb.url)
         site = ensure_site(ctx, pt.url, profile_id="demo")
-        ensure_plugin_enabled(ctx, "builtin.boost")
+        ensure_plugin_enabled(ctx, "cm.boost")
         try:
             op = ctx.call_phase1(
                 "POST",
-                "/api/v1/plugins/builtin.boost/commands",
+                "/api/v1/plugins/cm.boost/commands",
                 json_body={
                     "kind": "downloader.add",
                     "payload": {
@@ -384,12 +384,12 @@ def register_cases(registry: SuiteRegistry) -> None:
         qb = ctx.new_qbit()
         dl = ensure_downloader(ctx, qb.url)
         site = ensure_site(ctx, pt.url, profile_id="demo")
-        ensure_plugin_enabled(ctx, "builtin.boost")
+        ensure_plugin_enabled(ctx, "cm.boost")
         mag = build_magnet_uri("a" * 40, dn="UnknownSizeMagnet", xl=None)
         try:
             op = ctx.call_phase1(
                 "POST",
-                "/api/v1/plugins/builtin.boost/commands",
+                "/api/v1/plugins/cm.boost/commands",
                 json_body={
                     "kind": "downloader.add",
                     "payload": {
@@ -429,13 +429,13 @@ def register_cases(registry: SuiteRegistry) -> None:
         qb = ctx.new_qbit()
         dl = ensure_downloader(ctx, qb.url)
         site = ensure_site(ctx, pt.url, profile_id="demo")
-        ensure_plugin_enabled(ctx, "builtin.boost")
+        ensure_plugin_enabled(ctx, "cm.boost")
 
         def submit_one(tid: str) -> str:
             try:
                 res = ctx.call_phase1(
                     "POST",
-                    "/api/v1/plugins/builtin.boost/commands",
+                    "/api/v1/plugins/cm.boost/commands",
                     json_body={
                         "kind": "downloader.add",
                         "payload": {
@@ -480,11 +480,11 @@ def register_cases(registry: SuiteRegistry) -> None:
         qb.seed_foreign_torrent(tf.info_hash, name="Foreign.Protected", size=8192, tags="manual")
         dl = ensure_downloader(ctx, qb.url)
         site = ensure_site(ctx, pt.url, profile_id="demo")
-        ensure_plugin_enabled(ctx, "builtin.boost")
+        ensure_plugin_enabled(ctx, "cm.boost")
         try:
             op = ctx.call_phase1(
                 "POST",
-                "/api/v1/plugins/builtin.boost/commands",
+                "/api/v1/plugins/cm.boost/commands",
                 json_body={
                     "kind": "downloader.add",
                     "payload": {
@@ -518,7 +518,7 @@ def register_cases(registry: SuiteRegistry) -> None:
         qb.drop_response_on_next_add = True
         dl = ensure_downloader(ctx, qb.url)
         site = ensure_site(ctx, pt.url, profile_id="demo")
-        ensure_plugin_enabled(ctx, "builtin.boost")
+        ensure_plugin_enabled(ctx, "cm.boost")
         try:
             res = ctx.call_phase1(
                 "POST",
@@ -541,7 +541,7 @@ def register_cases(registry: SuiteRegistry) -> None:
         assert len(adds) == 1
         state = ctx.call_phase1(
             "GET",
-            f"/api/v1/plugins/builtin.boost/brush-state?site_id={site['id']}&downloader_id={dl['id']}",
+            f"/api/v1/plugins/cm.boost/brush-state?site_id={site['id']}&downloader_id={dl['id']}",
         )
         assert int(state.get("reserved_bytes", 0)) == 0
 
@@ -557,10 +557,10 @@ def register_cases(registry: SuiteRegistry) -> None:
         foreign_hash = "d" * 40
         qb.seed_foreign_torrent(foreign_hash, name="Spoofed.Tag", size=4096, tags="crawler-media,crawler-media-owned")
         ensure_downloader(ctx, qb.url)
-        ensure_plugin_enabled(ctx, "builtin.boost")
+        ensure_plugin_enabled(ctx, "cm.boost")
         err = assert_api_error(
             lambda: ctx.client.post(
-                "/api/v1/plugins/builtin.boost/commands",
+                "/api/v1/plugins/cm.boost/commands",
                 json_body={"kind": "downloader.delete-task", "payload": {"info_hash": foreign_hash}},
                 idempotency_key=uniq("spoof"),
             ),
@@ -640,7 +640,7 @@ def register_cases(registry: SuiteRegistry) -> None:
         lib = ensure_library(ctx)
         sub = create_subscribe(ctx, lib["id"], title="T2 Subscribe")
         ctx.call_phase1("GET", "/api/v1/plugin-hook-catalog")
-        ensure_plugin_enabled(ctx, "builtin.boost")
+        ensure_plugin_enabled(ctx, "cm.boost")
         for call in (
             lambda: ctx.call_phase1(
                 "POST",
@@ -663,7 +663,7 @@ def register_cases(registry: SuiteRegistry) -> None:
         try:
             bop = ctx.call_phase1(
                 "POST",
-                "/api/v1/plugins/builtin.boost/commands",
+                "/api/v1/plugins/cm.boost/commands",
                 json_body={
                     "kind": "downloader.add",
                     "payload": {
@@ -763,7 +763,7 @@ def register_cases(registry: SuiteRegistry) -> None:
         )
         assert_api_error(
             lambda: mc.post(
-                "/api/v1/plugins/builtin.boost/commands",
+                "/api/v1/plugins/cm.boost/commands",
                 json_body={"kind": "downloader.add", "payload": {}},
             ),
             (403,),
@@ -835,15 +835,15 @@ def register_cases(registry: SuiteRegistry) -> None:
         qb = ctx.new_qbit(disk_endpoint_error=True)
         dl = ensure_downloader(ctx, qb.url)
         site = ensure_site(ctx, pt.url, profile_id="demo")
-        ensure_plugin_enabled(ctx, "builtin.boost")
+        ensure_plugin_enabled(ctx, "cm.boost")
         state = ctx.call_phase1(
             "GET",
-            f"/api/v1/plugins/builtin.boost/brush-state?site_id={site['id']}&downloader_id={dl['id']}",
+            f"/api/v1/plugins/cm.boost/brush-state?site_id={site['id']}&downloader_id={dl['id']}",
         )
         assert state["disk"]["status"] == "unavailable"
         op = ctx.call_phase1(
             "POST",
-            "/api/v1/plugins/builtin.boost/commands",
+            "/api/v1/plugins/cm.boost/commands",
             json_body={"kind": "boost.run", "payload": {"site_id": site["id"], "downloader_id": dl["id"], "dry_run": False}},
             idempotency_key=uniq("unkdisk"),
         )
@@ -862,10 +862,10 @@ def register_cases(registry: SuiteRegistry) -> None:
         fh = "e" * 40
         qb.seed_foreign_torrent(fh, name="Foreign.Keep", size=4096)
         ensure_downloader(ctx, qb.url)
-        ensure_plugin_enabled(ctx, "builtin.boost")
+        ensure_plugin_enabled(ctx, "cm.boost")
         err = assert_api_error(
             lambda: ctx.client.post(
-                "/api/v1/plugins/builtin.boost/commands",
+                "/api/v1/plugins/cm.boost/commands",
                 json_body={"kind": "downloader.delete-task", "payload": {"info_hash": fh}},
                 idempotency_key=uniq("fcln"),
             ),
@@ -884,11 +884,11 @@ def register_cases(registry: SuiteRegistry) -> None:
         self_test=False,
     )
     def test_t2_f18_cleanup_preview_token_enforcement(ctx: TestContext) -> None:
-        ensure_plugin_enabled(ctx, "builtin.boost")
+        ensure_plugin_enabled(ctx, "cm.boost")
         assert_api_error(
             lambda: ctx.call_phase1(
                 "GET",
-                "/api/v1/plugins/builtin.boost/brush-cleanup-preview?task_ids=t1&plan_handle=p1",
+                "/api/v1/plugins/cm.boost/brush-cleanup-preview?task_ids=t1&plan_handle=p1",
             ),
             (400,),
             label="mutually exclusive task_ids and plan_handle",
@@ -896,7 +896,7 @@ def register_cases(registry: SuiteRegistry) -> None:
         assert_api_error(
             lambda: ctx.call_phase1(
                 "POST",
-                "/api/v1/plugins/builtin.boost/commands",
+                "/api/v1/plugins/cm.boost/commands",
                 json_body={
                     "kind": "downloader.delete-files",
                     "payload": {"host_file_plan_handle": "fake", "revision": 1, "reason": "no token"},
@@ -919,10 +919,10 @@ def register_cases(registry: SuiteRegistry) -> None:
         fh = "c" * 40
         qb.seed_foreign_torrent(fh, name="Foreign.Ctrl")
         dl = ensure_downloader(ctx, qb.url)
-        ensure_plugin_enabled(ctx, "builtin.boost")
+        ensure_plugin_enabled(ctx, "cm.boost")
         err = assert_api_error(
             lambda: ctx.client.post(
-                "/api/v1/plugins/builtin.boost/commands",
+                "/api/v1/plugins/cm.boost/commands",
                 json_body={
                     "kind": "downloader.control",
                     "payload": {"downloader_id": dl["id"], "action": "pause", "hashes": [fh]},

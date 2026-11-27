@@ -166,6 +166,8 @@ fn junk_titles_that_match_no_atom_are_rejected_with_score_zero() {
         detail_url: None,
         category: None,
         poster_url: None,
+        free_2x: false,
+        free_until: None,
     });
 
     let outcome = filter::admit(torrents, &quality_filter());
@@ -197,6 +199,8 @@ fn low_confidence_release_is_not_an_auto_download_candidate() {
         detail_url: None,
         category: None,
         poster_url: None,
+        free_2x: false,
+        free_until: None,
     });
 
     let outcome = filter::admit(torrents, &quality_filter());
@@ -243,6 +247,8 @@ fn torrent(title: &str, size_mb: Option<u64>, seeders: Option<u32>) -> Torrent {
         detail_url: None,
         category: None,
         poster_url: None,
+        free_2x: false,
+        free_until: None,
     }
 }
 

@@ -410,14 +410,16 @@ fn build_added_boost_task_fact(
     if plan.purpose != downloader::SubmissionPurpose::Boost && plan.budget_key.is_none() {
         return None;
     }
-    let plugin_id = op
-        .plugin_id
-        .clone()
-        .unwrap_or_else(|| crate::plugins::boost::BUILTIN_BOOST_PLUGIN_ID.to_string());
+    let plugin_id = op.plugin_id.clone().or_else(|| {
+        plan.budget_key
+            .as_deref()
+            .and_then(|k| k.rsplit_once(':').map(|(p, _)| p.to_string()))
+            .filter(|p| !p.trim().is_empty())
+    })?;
     let quota_key = plan
         .budget_key
         .clone()
-        .unwrap_or_else(|| format!("{plugin_id}:{frozen_dl_id}"));
+        .unwrap_or_else(|| crate::plugins::boost::config::quota_key(&plugin_id, frozen_dl_id));
     let cfg_val = state
         .store
         .get_plugin_config(&plugin_id)
@@ -425,9 +427,11 @@ fn build_added_boost_task_fact(
         .flatten()
         .map(|c| c.values)
         .unwrap_or_else(|| serde_json::json!({}));
-    let cfg = crate::plugins::boost::config::BuiltinBoostConfig::from_layers(&[&cfg_val])
-        .unwrap_or_default();
-    let hold_until = (cfg.hold_days > 0).then(|| done_now + cfg.hold_days * 86_400);
+    let cfg =
+        crate::plugins::boost::config::BoostConfig::from_layers(&[&cfg_val]).unwrap_or_default();
+    let site_id = (!plan.torrent.site_id.as_uuid().is_nil()).then_some(plan.torrent.site_id);
+    let hold_days = cfg.effective_hold_days(site_id);
+    let hold_until = (hold_days > 0).then(|| done_now + hold_days * 86_400);
     let hr_active = plan.torrent.hr;
     let (protection_state, protection_reason) = if hr_active == Some(true) {
         (BoostProtectionState::Protected, Some("hr-active".into()))
@@ -450,14 +454,14 @@ fn build_added_boost_task_fact(
         downloader_id: frozen_dl_id,
         ownership_tag: effective_ownership_tag.to_string(),
         info_hash: resolved_hash.to_string(),
-        site_id: (!plan.torrent.site_id.as_uuid().is_nil()).then_some(plan.torrent.site_id),
+        site_id,
         state: state_enum,
         occupied_bytes: verified_bytes.unwrap_or(0),
         retained_bytes: 0,
         hr_active,
         hr_until: None,
         hold_until,
-        free_until: None,
+        free_until: plan.torrent.free_until,
         protection_state,
         protection_reason,
         observed_at: done_now,

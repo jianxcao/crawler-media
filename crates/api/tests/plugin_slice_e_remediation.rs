@@ -22,9 +22,12 @@ use sha2::{Digest, Sha256};
 use store::plugins::{PluginGrant, PluginLifecycleObservation};
 use store::{BoostTaskState, PrepareBoostCleanupPlanInput};
 use support::plugin_http_support::{
-    ADMIN_PASS, HttpEnv, TOKEN, assert_err, assert_ok, pkg::TestSigningKey, req_json,
+    ADMIN_PASS, HttpEnv, TOKEN, assert_err, assert_ok,
+    pkg::TestSigningKey,
+    plugins_fixture::{install_cm_boost, seed_cm_boost_task},
+    req_json,
 };
-use support::{NoopFetcher, poll_op, seed_boost_task};
+use support::{NoopFetcher, poll_op};
 use tower::ServiceExt;
 use uuid::Uuid;
 
@@ -269,9 +272,10 @@ async fn symlinked_and_nfd_library_or_sibling_paths_block_boost_cleanup() {
 
     let dl = Arc::new(MemoryDownloader::new(stage.clone()));
     let store = Arc::new(Store::open(dir.path().join("data")).unwrap());
-    let state = ApiState::new_arc(
+    let state = ApiState::new_arc_with_admin_password(
         store,
         TOKEN.into(),
+        Some(ADMIN_PASS.into()),
         RegistrySnapshot::builtin().unwrap(),
         Arc::new(NoopFetcher),
         dl,
@@ -283,6 +287,7 @@ async fn symlinked_and_nfd_library_or_sibling_paths_block_boost_cleanup() {
         state,
         member_token: String::new(),
     };
+    install_cm_boost(&env, true, false, true).await;
     let (site_id, dl_id) = (env.insert_site("PT-Sym"), DownloaderId::new());
     env.state
         .store()
@@ -331,7 +336,7 @@ fn seed_symlinked_boost_tasks(
     sym_b: &Path,
 ) -> (String, String) {
     let nfd_sym_path = format!("{}/Cafe\u{0301}.mkv", sym_lib.display());
-    let tf_lib = seed_boost_task(
+    let tf_lib = seed_cm_boost_task(
         store,
         dl_id,
         site_id,
@@ -348,7 +353,7 @@ fn seed_symlinked_boost_tasks(
         .mark_boost_task_retained_with_paths(&tf_lib, 1, 128, Some(&lib_plan), 1_700_000_010)
         .unwrap();
 
-    let tf_sib_a = seed_boost_task(
+    let tf_sib_a = seed_cm_boost_task(
         store,
         dl_id,
         site_id,
@@ -370,7 +375,7 @@ fn seed_symlinked_boost_tasks(
         )
         .unwrap();
 
-    let tf_sib_b = seed_boost_task(
+    let tf_sib_b = seed_cm_boost_task(
         store,
         dl_id,
         site_id,
@@ -415,7 +420,7 @@ async fn assert_symlink_protections_enforced(
     let (st_bs, _, b_bs) = env
         .send(req_json(
             "GET",
-            "/api/v1/plugins/builtin.boost/brush-state",
+            "/api/v1/plugins/cm.boost/brush-state",
             Some(TOKEN),
             &[],
             None,
@@ -436,9 +441,7 @@ async fn assert_symlink_protections_enforced(
     let (st_prev, _, b_prev) = env
         .send(req_json(
             "GET",
-            &format!(
-                "/api/v1/plugins/builtin.boost/brush-cleanup-preview?task_ids={tf_lib},{tf_sib_b}"
-            ),
+            &format!("/api/v1/plugins/cm.boost/brush-cleanup-preview?task_ids={tf_lib},{tf_sib_b}"),
             Some(TOKEN),
             &[],
             None,
@@ -451,7 +454,7 @@ async fn assert_symlink_protections_enforced(
     let (st_plan, _, b_plan) = env
         .send(req_json(
             "GET",
-            "/api/v1/plugins/builtin.boost/brush-cleanup-preview?plan_handle=plan-sym-sib",
+            "/api/v1/plugins/cm.boost/brush-cleanup-preview?plan_handle=plan-sym-sib",
             Some(TOKEN),
             &[],
             None,
@@ -464,11 +467,11 @@ async fn assert_symlink_protections_enforced(
         "plugin.cleanup_blocked",
     );
 
-    let rev = env.get_plugin_rev("builtin.boost").await;
+    let rev = env.get_plugin_rev("cm.boost").await;
     let (st_prep, _, b_prep) = env
         .send(req_json(
             "POST",
-            "/api/v1/plugins/builtin.boost/commands",
+            "/api/v1/plugins/cm.boost/commands",
             Some(TOKEN),
             &[
                 ("If-Match", &format!("\"{rev}\"")),
@@ -509,6 +512,7 @@ async fn ui_attributed_indexer_search_rejects_site_ids_bypass_and_delete_files_a
         state,
         member_token: String::new(),
     };
+    install_cm_boost(&env, true, false, true).await;
     let (site_id, dl_id) = (env.insert_site("PT-Bypass"), DownloaderId::new());
     env.state
         .store()
@@ -587,7 +591,7 @@ async fn assert_delete_files_string_revision(
     stage: &Path,
     victim: &Path,
 ) {
-    let tf_id = seed_boost_task(
+    let tf_id = seed_cm_boost_task(
         env.state.store().as_ref(),
         dl_id,
         site_id,
@@ -621,7 +625,7 @@ async fn assert_delete_files_string_revision(
     let (st_prev, _, b_prev) = env
         .send(req_json(
             "GET",
-            "/api/v1/plugins/builtin.boost/brush-cleanup-preview?plan_handle=plan-str-rev",
+            "/api/v1/plugins/cm.boost/brush-cleanup-preview?plan_handle=plan-str-rev",
             Some(TOKEN),
             &[],
             None,
@@ -631,16 +635,11 @@ async fn assert_delete_files_string_revision(
         .as_str()
         .unwrap()
         .to_string();
-    let bp = env
-        .state
-        .store()
-        .get_plugin("builtin.boost")
-        .unwrap()
-        .unwrap();
+    let bp = env.state.store().get_plugin("cm.boost").unwrap().unwrap();
     let (st_df, _, b_df) = env
         .send(req_json(
             "POST",
-            "/api/v1/plugins/builtin.boost/commands",
+            "/api/v1/plugins/cm.boost/commands",
             Some(TOKEN),
             &[
                 ("Idempotency-Key", "df-string-rev"),

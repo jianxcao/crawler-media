@@ -203,17 +203,58 @@ struct DrainBoostOnFetch {
 
 impl Fetcher for DrainBoostOnFetch {
     fn fetch(&self, _req: &FetchRequest) -> Result<String, IndexerError> {
-        if let Ok(Some(rec)) = self.store.get_plugin("builtin.boost")
+        if let Ok(Some(rec)) = self.store.get_plugin("cm.boost")
             && rec.lifecycle == store::plugins::PluginLifecycle::Enabled
         {
-            let _ = self.store.begin_plugin_lifecycle(
-                "builtin.boost",
-                rec.revision,
-                Uuid::new_v4(),
-                false,
-            );
+            let _ =
+                self.store
+                    .begin_plugin_lifecycle("cm.boost", rec.revision, Uuid::new_v4(), false);
         }
         Err(IndexerError::Fetch("simulated empty search".into()))
+    }
+}
+
+struct DrainBoostOnDiskProbe {
+    inner: Arc<MemoryDownloader>,
+    store: Arc<Store>,
+}
+
+impl downloader::Downloader for DrainBoostOnDiskProbe {
+    fn submit_verified(
+        &self,
+        payload: &downloader::SubmitPayload,
+        options: &downloader::SubmitOptions,
+    ) -> Result<downloader::ClientSubmitResult, downloader::DownloaderError> {
+        self.inner.submit_verified(payload, options)
+    }
+
+    fn completed_files(
+        &self,
+        torrent: &domain::Torrent,
+    ) -> Result<Vec<std::path::PathBuf>, downloader::DownloaderError> {
+        self.inner.completed_files(torrent)
+    }
+
+    fn task_snapshots(&self) -> Result<Vec<downloader::TaskSnapshot>, downloader::DownloaderError> {
+        self.inner.task_snapshots()
+    }
+
+    fn task_files_by_hash(
+        &self,
+        info_hash: &str,
+    ) -> Result<Option<downloader::TaskFileSet>, downloader::DownloaderError> {
+        self.inner.task_files_by_hash(info_hash)
+    }
+
+    fn disk_free_space(&self) -> Result<downloader::DiskSpaceInfo, downloader::DownloaderError> {
+        if let Ok(Some(rec)) = self.store.get_plugin("cm.boost")
+            && rec.lifecycle == store::plugins::PluginLifecycle::Enabled
+        {
+            let _ =
+                self.store
+                    .begin_plugin_lifecycle("cm.boost", rec.revision, Uuid::new_v4(), false);
+        }
+        self.inner.disk_free_space()
     }
 }
 
@@ -282,7 +323,7 @@ fn seed_retained_boost_file(
             enabled: true,
         })
         .unwrap();
-    let tf_id = support::seed_boost_task(
+    let tf_id = support::plugin_http_support::plugins_fixture::seed_cm_boost_task(
         store,
         dl_id,
         site_id,
@@ -310,45 +351,14 @@ fn save_checkin_config_and_enable_task(
     store: &Store,
     site_id: SiteId,
 ) -> domain::PluginTaskBindingId {
-    let cur = store.get_plugin("builtin.checkin").unwrap().unwrap();
-    let dis = store
-        .begin_plugin_lifecycle("builtin.checkin", cur.revision, Uuid::new_v4(), false)
-        .unwrap();
-    let dis = store
-        .finalize_plugin_lifecycle(&store::plugins::PluginLifecycleObservation {
-            plugin_id: dis.plugin_id.clone(),
-            operation_id: dis.active_operation_id.unwrap(),
-            revision: dis.revision,
-            generation: dis.generation,
-            workers_exited: true,
-            unknown_effects_reconciled: true,
-            validation_succeeded: true,
-        })
-        .unwrap();
-    let saved = store
-        .save_plugin_config(
-            "builtin.checkin",
-            dis.revision,
-            "1",
-            &json!({ "site_id": site_id.to_string() }),
-        )
-        .unwrap();
-    let en = store
-        .begin_plugin_lifecycle("builtin.checkin", saved.revision, Uuid::new_v4(), true)
-        .unwrap();
-    let en = store
-        .finalize_plugin_lifecycle(&store::plugins::PluginLifecycleObservation {
-            plugin_id: en.plugin_id.clone(),
-            operation_id: en.active_operation_id.unwrap(),
-            revision: en.revision,
-            generation: en.generation,
-            workers_exited: true,
-            unknown_effects_reconciled: true,
-            validation_succeeded: true,
-        })
-        .unwrap();
+    support::plugin_http_support::plugins_fixture::save_plugin_config_store(
+        store,
+        "cm.checkin",
+        json!({ "site_id": site_id.to_string() }),
+    );
+    let en = store.get_plugin("cm.checkin").unwrap().unwrap();
     let cur_bind = store
-        .get_plugin_task_binding("builtin.checkin", "check-in")
+        .get_plugin_task_binding("cm.checkin", "check-in")
         .unwrap()
         .unwrap();
     let bind = store
@@ -359,7 +369,7 @@ fn save_checkin_config_and_enable_task(
             &store::plugins::PluginTaskDefinition {
                 enabled: true,
                 interval_secs: Some(86_400),
-                public_config: json!({}),
+                public_config: json!({ "site_id": site_id.to_string() }),
             },
         )
         .unwrap();
@@ -401,7 +411,7 @@ async fn assert_disabled_site_checkin_rejected(
         attempt: 1,
         payload: json!({
             "binding_id": b_id,
-            "plugin_id": "builtin.checkin",
+            "plugin_id": "cm.checkin",
             "task_id": "check-in",
             "input": {}
         })
@@ -414,14 +424,46 @@ async fn assert_disabled_site_checkin_rejected(
         concurrency_key: None,
         timeout_secs: Some(60),
     };
-    let task_err = tokio::task::spawn_blocking({
+    tokio::task::spawn_blocking({
         let st = env.state.clone();
         move || api::plugins::run_task_job(&st, &task_job)
     })
     .await
     .unwrap()
-    .expect_err("disabled site_id must fail builtin.checkin task");
-    assert!(task_err.contains("disabled"), "{task_err}");
+    .expect("scheduled task job targeting disabled site must skip cleanly");
+
+    let plugin = store.get_plugin("cm.checkin").unwrap().unwrap();
+    let site_obs = store.observe_site(disabled_site).unwrap();
+    let auth_err = store
+        .issue_plugin_state_authority(&plugin, site_obs.as_ref())
+        .expect_err("disabled site must not receive site-bound plugin authority");
+    assert!(matches!(
+        auth_err,
+        store::StoreError::Plugin(store::plugins::PluginError::StaleAuthority)
+    ));
+
+    let rev = env.get_plugin_rev("cm.checkin").await;
+    let (st_cmd, _, b_cmd) = env
+        .send(req_json(
+            "POST",
+            "/api/v1/plugins/cm.checkin/commands",
+            Some(TOKEN),
+            &[
+                ("if-match", &format!("\"{rev}\"")),
+                ("idempotency-key", "r12-dis-site-cmd"),
+            ],
+            Some(json!({
+                "kind": "site.check-in",
+                "payload": { "site_id": disabled_site.to_string() }
+            })),
+        ))
+        .await;
+    assert_err(
+        st_cmd,
+        &b_cmd,
+        StatusCode::CONFLICT,
+        "plugin.stale_authority",
+    );
 }
 
 #[tokio::test]
@@ -432,7 +474,10 @@ async fn boost_cycle_and_checkin_recheck_live_plugin_and_site_state() {
     let fetcher = Arc::new(DrainBoostOnFetch {
         store: store.clone(),
     });
-    let dl_mem = Arc::new(MemoryDownloader::new(dir.path().join("stage")));
+    let dl_mem: Arc<dyn downloader::Downloader> = Arc::new(DrainBoostOnDiskProbe {
+        inner: Arc::new(MemoryDownloader::new(dir.path().join("stage"))),
+        store: store.clone(),
+    });
     let state = api::ApiState::new_arc_with_admin_password(
         store.clone(),
         TOKEN.into(),
@@ -451,6 +496,12 @@ async fn boost_cycle_and_checkin_recheck_live_plugin_and_site_state() {
         state,
         member_token: String::new(),
     };
+    support::plugin_http_support::plugins_fixture::install_cm_checkin(
+        &env, false, true, true, false,
+    )
+    .await;
+    support::plugin_http_support::plugins_fixture::install_cm_boost(&env, false, false, false)
+        .await;
 
     assert_disabled_site_checkin_rejected(&env, &store, checkin_addr).await;
     stop_bg.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -468,8 +519,9 @@ async fn boost_cycle_and_checkin_recheck_live_plugin_and_site_state() {
         true,
     );
     let dl_id = seed_retained_boost_file(&store, ok_site, tmp.path(), &target_file);
-    support::save_boost_config(
+    support::plugin_http_support::plugins_fixture::save_plugin_config_direct(
         &env.state,
+        "cm.boost",
         json!({
             "downloader_id": dl_id.to_string(),
             "sites": [ok_site.to_string()],
@@ -477,11 +529,11 @@ async fn boost_cycle_and_checkin_recheck_live_plugin_and_site_state() {
             "dry_run": false
         }),
     );
-    let boost_rev = env.get_plugin_rev("builtin.boost").await;
+    let boost_rev = env.get_plugin_rev("cm.boost").await;
     let (st_b, _, b_b) = env
         .send(req_json(
             "POST",
-            "/api/v1/plugins/builtin.boost/commands",
+            "/api/v1/plugins/cm.boost/commands",
             Some(TOKEN),
             &[
                 ("if-match", &format!("\"{boost_rev}\"")),
@@ -517,6 +569,10 @@ async fn boost_cycle_and_checkin_recheck_live_plugin_and_site_state() {
         }
         tokio::time::sleep(Duration::from_millis(15)).await;
     }
+    assert_eq!(
+        store.get_plugin("cm.boost").unwrap().unwrap().lifecycle,
+        store::plugins::PluginLifecycle::Draining
+    );
     assert!(target_file.exists());
 }
 
@@ -559,39 +615,6 @@ fn build_r12_ui_dl_pkg(pid: &str) -> Vec<u8> {
     entries.insert("ui/asset-manifest.json".into(), asset_manifest);
     entries.insert("ui/assets/remoteEntry.js".into(), remote_js.to_vec());
     build_deterministic_cmplugin_zip(&entries).unwrap()
-}
-
-async fn grant_ui_trust(env: &HttpEnv, pid: &str) {
-    let (st_p, _, b_p) = env
-        .send(req_json(
-            "POST",
-            &format!("/api/v1/plugins/{pid}/ui-trust/prepare"),
-            Some(TOKEN),
-            &[],
-            Some(json!({})),
-        ))
-        .await;
-    let prep = assert_ok(st_p, &b_p, StatusCode::OK);
-    let rev = prep["trust_revision"].as_i64().unwrap_or(0);
-    let reauth = env.reauth("plugin-ui-trust").await;
-    let (st_g, _, b_g) = env
-        .send(req_json(
-            "POST",
-            &format!("/api/v1/plugins/{pid}/ui-trust/grant"),
-            Some(TOKEN),
-            &[
-                ("if-match", &format!("\"{rev}\"")),
-                ("idempotency-key", &format!("ug-{}", Uuid::new_v4())),
-            ],
-            Some(json!({
-                "preparation_id": prep["preparation_id"],
-                "package_hash": prep["package_hash"],
-                "consent_token": prep["consent_token"],
-                "reauth_token": reauth,
-            })),
-        ))
-        .await;
-    assert_ok(st_g, &b_g, StatusCode::OK);
 }
 
 fn seed_ui_owned_task(store: &Store, pid: &str, dl_id: DownloaderId, site_id: SiteId, hash: &str) {
@@ -686,7 +709,7 @@ async fn ui_attributed_commands_forbid_raw_targets_and_shadow_fields_and_infer_d
     .await;
     let rev = env.get_plugin_rev(pid).await;
     env.enable_plugin(pid, rev, "en-r12-uicmd").await;
-    grant_ui_trust(&env, pid).await;
+    support::plugin_http_support::plugins_fixture::grant_ui_trust(&env, pid).await;
 
     let info_hash = "b".repeat(40);
     seed_ui_owned_task(&store, pid, dl_id, site_id, &info_hash);

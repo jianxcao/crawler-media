@@ -114,6 +114,7 @@ struct WeakEventDispatchContext {
     plugins: Weak<super::PluginService>,
     jobs: Weak<crate::JobsWriter>,
     browser: Weak<indexer::Browser>,
+    indexer: Weak<indexer::Indexer>,
     downloader: Weak<dyn downloader::Downloader>,
     self_listen: Option<SocketAddr>,
     plugin_http_policy_override: Option<TargetPolicy>,
@@ -129,6 +130,7 @@ impl WeakEventDispatchContext {
             plugins: Arc::downgrade(&state.plugins),
             jobs: Arc::downgrade(&state.jobs),
             browser: Arc::downgrade(&state.browser),
+            indexer: Arc::downgrade(&state.indexer),
             downloader: Arc::downgrade(&state.downloader),
             self_listen: state.self_listen,
             plugin_http_policy_override: state.plugin_http_policy_override.clone(),
@@ -149,6 +151,7 @@ impl WeakEventDispatchContext {
         let plugins = self.plugins.upgrade()?;
         let jobs = self.jobs.upgrade()?;
         let browser = self.browser.upgrade()?;
+        drop(self.indexer.upgrade()?);
         let downloader = self.downloader.upgrade()?;
         let deps = HostDeps {
             store: store.clone(),
@@ -156,6 +159,7 @@ impl WeakEventDispatchContext {
             effects: plugins.effects().clone(),
             in_flight: plugins.in_flight().clone(),
             browser,
+            indexer: self.indexer.clone(),
             downloader,
             instance_writable: writable.clone(),
             write_gate: write_gate.clone(),

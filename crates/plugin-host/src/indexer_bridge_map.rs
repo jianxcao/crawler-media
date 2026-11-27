@@ -32,6 +32,8 @@ pub(crate) fn map_torrent(site: &Site, raw: TorrentRaw) -> Torrent {
         detail_url: None,
         category: raw.category,
         poster_url: None,
+        free_2x: false,
+        free_until: None,
     }
 }
 

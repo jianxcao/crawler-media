@@ -1,113 +1,203 @@
 pub(crate) mod config;
 pub(crate) mod cycle;
-pub(crate) mod gate;
+pub(crate) mod cycle_evict;
+pub(crate) mod cycle_filter;
+pub(crate) mod cycle_submit;
 pub(crate) mod preview;
 pub(crate) mod snapshot;
 
-pub(crate) use cycle::{execute_boost_run_command, run_builtin_boost_task};
-pub(crate) use gate::BuiltinBoostDownloadGate;
+pub(crate) use cycle::execute_boost_run_command;
 pub(crate) use preview::{CleanupPreviewQuery, compute_plan_digest, preview_brush_cleanup};
 pub(crate) use snapshot::{
     SnapshotQuery, collect_boost_snapshot_sync, expand_path_set_off_lock,
     expand_protection_sets_off_lock, extract_plan_paths, get_brush_state_http, path_is_in_set,
 };
 
-use plugin_package::{
-    ComponentManifest, HookManifest, PluginManifest, TaskManifest, TaskScheduleManifest,
-};
-use serde_json::json;
-use store::plugins::{PluginGrant, PluginGrantScope, PluginTaskDefinition, PluginVersionMetadata};
+#[cfg(test)]
+fn boost_rule_properties(include_site_id: bool) -> serde_json::Map<String, serde_json::Value> {
+    use serde_json::{Map, json};
+    let mut props = Map::new();
+    if include_site_id {
+        props.insert(
+            "site_id".into(),
+            json!({ "type": "string", "x-ui": { "widget": "site" } }),
+        );
+        props.insert(
+            "enabled".into(),
+            json!({ "type": "boolean", "default": true }),
+        );
+    }
+    let extra = json!({
+        "categories": {
+            "type": "array",
+            "items": { "type": "string" },
+            "uniqueItems": true,
+            "default": []
+        },
+        "free_mode": {
+            "type": "string",
+            "enum": ["2x_free", "free", "any"],
+            "default": "free"
+        },
+        "free_only": { "type": "boolean", "default": true },
+        "exclude_hr": { "type": "boolean", "default": true },
+        "min_seeders": { "type": "integer", "minimum": 0, "default": 1 },
+        "max_seeders": { "type": "integer", "minimum": 0 },
+        "min_leechers": { "type": "integer", "minimum": 0 },
+        "min_size_bytes": { "type": "integer", "minimum": 0, "x-ui": { "widget": "bytes" } },
+        "max_size_bytes": { "type": "integer", "minimum": 0, "x-ui": { "widget": "bytes" } },
+        "max_pub_age_minutes": { "type": "integer", "minimum": 0 },
+        "include_regex": { "type": "string", "maxLength": 512 },
+        "exclude_regex": { "type": "string", "maxLength": 512 },
+        "active_hours": { "type": "string" },
+        "target_site_ratio": { "type": "number", "minimum": 0 },
+        "hold_days": { "type": "integer", "minimum": 0, "maximum": 365, "default": 0 },
+        "max_adds_per_round": { "type": "integer", "minimum": 1, "maximum": 100, "default": 20 },
+        "delete_on_free_expired": { "type": "boolean", "default": false },
+        "max_seed_hours": { "type": "number", "minimum": 0 },
+        "target_task_ratio": { "type": "number", "minimum": 0 },
+        "target_uploaded_bytes": { "type": "integer", "minimum": 0, "x-ui": { "widget": "bytes" } },
+        "max_download_hours": { "type": "number", "minimum": 0 },
+        "min_avg_upspeed_bytes": { "type": "integer", "minimum": 0, "x-ui": { "widget": "bytes" } },
+        "max_inactive_minutes": { "type": "integer", "minimum": 0 },
+        "relative_directory": { "type": "string" },
+        "category": { "type": "string" },
+        "tags": {
+            "type": "array",
+            "items": { "type": "string" },
+            "uniqueItems": true,
+            "default": []
+        },
+        "upload_limit_bytes": { "type": "integer", "minimum": 0, "x-ui": { "widget": "bytes" } },
+        "download_limit_bytes": { "type": "integer", "minimum": 0, "x-ui": { "widget": "bytes" } },
+        "sequential": { "type": "boolean", "default": false },
+        "first_last_piece": { "type": "boolean", "default": false }
+    });
+    if let Some(map) = extra.as_object() {
+        for (k, v) in map {
+            if include_site_id {
+                let mut item = v.clone();
+                if let Some(obj) = item.as_object_mut() {
+                    obj.remove("default");
+                }
+                props.insert(k.clone(), item);
+            } else {
+                props.insert(k.clone(), v.clone());
+            }
+        }
+    }
+    props
+}
 
-use super::builtins::ensure_builtin_plugin;
-use super::tasks::sync_task_binding;
-use crate::management::ApiState;
-
-pub const BUILTIN_BOOST_PLUGIN_ID: &str = "builtin.boost";
-pub const BUILTIN_BOOST_TASK_ID: &str = "traffic-cycle";
-
+#[cfg(test)]
 fn boost_config_schema_json() -> String {
+    use serde_json::{Map, json};
+    let mut props = Map::new();
+    let global = json!({
+        "sites": {
+            "type": "array",
+            "items": { "type": "string", "x-ui": { "widget": "site" } },
+            "maxItems": 16,
+            "uniqueItems": true,
+            "default": []
+        },
+        "downloader_id": {
+            "type": "string",
+            "default": "",
+            "x-ui": { "widget": "downloader" }
+        },
+        "budget_bytes": {
+            "type": "integer",
+            "minimum": 0,
+            "x-ui": { "widget": "bytes" }
+        },
+        "min_free_disk_bytes": {
+            "type": "integer",
+            "minimum": 0,
+            "default": 0,
+            "x-ui": { "widget": "bytes" }
+        },
+        "watermark_low_bytes": {
+            "type": "integer",
+            "minimum": 0,
+            "x-ui": { "widget": "bytes" }
+        },
+        "dynamic_delete": {
+            "type": "boolean",
+            "default": false
+        },
+        "max_active": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 200,
+            "default": 20
+        },
+        "max_downloading": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 200
+        },
+        "max_adds_per_hour": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100,
+            "default": 10
+        },
+        "dry_run": {
+            "type": "boolean",
+            "default": true
+        },
+        "auto_cleanup_files": {
+            "type": "boolean",
+            "default": false
+        },
+        "enforce_budget_on_all": {
+            "type": "boolean",
+            "default": false
+        },
+        "global_max_upspeed_bytes": {
+            "type": "integer",
+            "minimum": 0,
+            "x-ui": { "widget": "bytes" }
+        },
+        "global_max_dlspeed_bytes": {
+            "type": "integer",
+            "minimum": 0,
+            "x-ui": { "widget": "bytes" }
+        }
+    });
+    if let Some(map) = global.as_object() {
+        for (k, v) in map {
+            props.insert(k.clone(), v.clone());
+        }
+    }
+    for (k, v) in boost_rule_properties(false) {
+        props.insert(k, v);
+    }
+    props.insert(
+        "rules".into(),
+        json!({
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": boost_rule_properties(true),
+                "required": ["site_id"],
+                "additionalProperties": false
+            },
+            "default": []
+        }),
+    );
     json!({
         "type": "object",
-        "properties": {
-            "sites": {
-                "type": "array",
-                "items": { "type": "string", "x-ui": { "widget": "site" } },
-                "maxItems": 16,
-                "uniqueItems": true,
-                "default": []
-            },
-            "downloader_id": {
-                "type": "string",
-                "default": "",
-                "x-ui": { "widget": "downloader" }
-            },
-            "budget_bytes": {
-                "type": "integer",
-                "minimum": 0,
-                "x-ui": { "widget": "bytes" }
-            },
-            "min_free_disk_bytes": {
-                "type": "integer",
-                "minimum": 0,
-                "default": 0,
-                "x-ui": { "widget": "bytes" }
-            },
-            "hold_days": {
-                "type": "integer",
-                "minimum": 0,
-                "maximum": 365,
-                "default": 0
-            },
-            "max_active": {
-                "type": "integer",
-                "minimum": 1,
-                "maximum": 200,
-                "default": 20
-            },
-            "max_adds_per_hour": {
-                "type": "integer",
-                "minimum": 1,
-                "maximum": 100,
-                "default": 10
-            },
-            "max_adds_per_round": {
-                "type": "integer",
-                "minimum": 1,
-                "maximum": 100,
-                "default": 20
-            },
-            "dry_run": {
-                "type": "boolean",
-                "default": true
-            },
-            "auto_cleanup_files": {
-                "type": "boolean",
-                "default": false
-            },
-            "min_seeders": {
-                "type": "integer",
-                "minimum": 0,
-                "default": 1
-            },
-            "free_only": {
-                "type": "boolean",
-                "default": true
-            },
-            "exclude_hr": {
-                "type": "boolean",
-                "default": true
-            },
-            "enforce_budget_on_all": {
-                "type": "boolean",
-                "default": false
-            }
-        },
+        "properties": props,
         "additionalProperties": false
     })
     .to_string()
 }
 
+#[cfg(test)]
 fn boost_task_input_schema_json() -> String {
+    use serde_json::json;
     json!({
         "type": "object",
         "properties": {
@@ -120,144 +210,25 @@ fn boost_task_input_schema_json() -> String {
     .to_string()
 }
 
-pub(crate) fn builtin_boost_manifest_json() -> String {
-    let manifest = PluginManifest {
-        manifest_version: 1,
-        id: BUILTIN_BOOST_PLUGIN_ID.into(),
-        name: "PT Boost Orchestrator".into(),
-        version: "1.0.0".into(),
-        api: plugin_api::API_VERSION.into(),
-        license: "Apache-2.0".into(),
-        authors: vec!["crawler-media".into()],
-        description: "Built-in PT ratio boost quota and cleanup orchestrator".into(),
-        config_schema: boost_config_schema_json(),
-        state_schema: 1,
-        credential_binding: None,
-        http: Vec::new(),
-        sites: Vec::new(),
-        limits: None,
-        components: vec![
-            ComponentManifest {
-                id: "builtin".into(),
-                entry: "builtin".into(),
-                world: plugin_host::TASK_WORLD.into(),
-                permissions: vec![
-                    "kv".into(),
-                    "read:sites".into(),
-                    "read:downloads".into(),
-                    "read:boost".into(),
-                    "command:indexer.search".into(),
-                    "command:indexer.rss".into(),
-                    "command:downloader.add".into(),
-                    "command:downloader.control".into(),
-                    "command:downloader.delete-task".into(),
-                    "command:downloader.prepare-cleanup".into(),
-                    "command:downloader.delete-files".into(),
-                    "command:boost.run".into(),
-                ],
-                hooks: Vec::new(),
-                tasks: vec![TaskManifest {
-                    id: BUILTIN_BOOST_TASK_ID.into(),
-                    input_schema: boost_task_input_schema_json(),
-                    schedule: TaskScheduleManifest {
-                        kind: "interval".into(),
-                        seconds: 1800,
-                    },
-                    concurrency_key: Some(BUILTIN_BOOST_TASK_ID.into()),
-                }],
-                indexers: Vec::new(),
-                maintenance: Vec::new(),
-                endpoints: Vec::new(),
-                lists: Vec::new(),
-                channels: Vec::new(),
-            },
-            ComponentManifest {
-                id: "builtin-gate".into(),
-                entry: "builtin".into(),
-                world: plugin_host::HOOK_WORLD.into(),
-                permissions: vec!["hooks:download.before".into()],
-                hooks: vec![HookManifest {
-                    id: "download.before".into(),
-                    priority: 100,
-                }],
-                tasks: Vec::new(),
-                indexers: Vec::new(),
-                maintenance: Vec::new(),
-                endpoints: Vec::new(),
-                lists: Vec::new(),
-                channels: Vec::new(),
-            },
-        ],
-        ui: Some(super::ui_builtins::boost_ui_manifest()),
-    };
-    serde_json::to_string(&manifest).unwrap_or_else(|_| "{}".into())
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::Value;
 
-pub(crate) fn bootstrap_builtin_boost(state: &ApiState) {
-    let boost_ver = PluginVersionMetadata {
-        plugin_id: BUILTIN_BOOST_PLUGIN_ID.into(),
-        package_hash: "builtin:boost:1.0.0".into(),
-        version: "1.0.0".into(),
-        manifest_json: builtin_boost_manifest_json(),
-        config_schema_json: boost_config_schema_json(),
-        state_schema: "1".into(),
-        artifact_path: String::new(),
-        signing_key_id: None,
-        signature_status: "builtin".into(),
-        ui_metadata_ref: Some("ui/asset-manifest.json".into()),
-        credential_bound: false,
-    };
-    let mut grants = Vec::new();
-    for cap in [
-        "kv",
-        "read:sites",
-        "read:downloads",
-        "read:boost",
-        "hooks:download.before",
-        "command:indexer.search",
-        "command:indexer.rss",
-        "command:downloader.add",
-        "command:downloader.control",
-        "command:downloader.delete-task",
-        "command:downloader.prepare-cleanup",
-        "command:downloader.delete-files",
-        "command:boost.run",
-    ] {
-        grants.push(PluginGrant {
-            capability: cap.into(),
-            scope: PluginGrantScope::Global,
-            sensitive: matches!(cap, "command:downloader.delete-files"),
-        });
-    }
-    if let Err(err) = ensure_builtin_plugin(&state.store, boost_ver, grants) {
-        tracing::error!(error = %err, "Failed to bootstrap builtin.boost plugin");
-        return;
-    }
-    super::ui_builtins::ensure_builtin_ui_trust(
-        &state.store,
-        BUILTIN_BOOST_PLUGIN_ID,
-        "builtin:boost:1.0.0",
-    );
-
-    if let Ok(Some(plugin)) = state.store.get_plugin(BUILTIN_BOOST_PLUGIN_ID)
-        && state
-            .store
-            .get_plugin_task_binding(BUILTIN_BOOST_PLUGIN_ID, BUILTIN_BOOST_TASK_ID)
-            .ok()
-            .flatten()
-            .is_none()
-        && let Ok(binding) = state.store.save_plugin_task_binding(
-            &plugin,
-            BUILTIN_BOOST_TASK_ID,
-            0,
-            &PluginTaskDefinition {
-                enabled: false,
-                interval_secs: Some(1800),
-                public_config: json!({}),
-            },
-        )
-        && let Err(err) = sync_task_binding(state, &binding)
-    {
-        tracing::warn!(error = %err, "Failed to project builtin.boost task binding on startup");
+    #[test]
+    fn boost_config_and_input_schemas_are_valid() {
+        let cfg_val: Value = serde_json::from_str(&boost_config_schema_json()).unwrap();
+        let cfg_schema = plugin_package::validate_config_schema(&cfg_val)
+            .expect("boost_config_schema_json must validate cleanly");
+        assert!(
+            cfg_schema
+                .root_json()
+                .get("properties")
+                .and_then(|p| p.get("rules"))
+                .is_some()
+        );
+        let input_val: Value = serde_json::from_str(&boost_task_input_schema_json()).unwrap();
+        plugin_package::validate_config_schema(&input_val)
+            .expect("boost_task_input_schema_json must validate cleanly");
     }
 }

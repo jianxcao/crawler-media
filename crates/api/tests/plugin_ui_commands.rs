@@ -610,11 +610,12 @@ async fn assert_owned_download_and_browser_availability(
 #[tokio::test]
 async fn enabled_config_not_editable_put_409_and_checkin_invalid_config_400() {
     let env = HttpEnv::new().await;
+    plugin_http_support::plugins_fixture::install_cm_checkin(&env, true, false, false, true).await;
 
     let (st_ui, _, b_ui) = env
         .send(req_json(
             "GET",
-            "/api/v1/plugins/builtin.checkin/ui",
+            "/api/v1/plugins/cm.checkin/ui",
             Some(TOKEN),
             &[],
             None,
@@ -635,7 +636,7 @@ async fn enabled_config_not_editable_put_409_and_checkin_invalid_config_400() {
     let (st_cfg, _, b_cfg) = env
         .send(req_json(
             "GET",
-            "/api/v1/plugins/builtin.checkin/config",
+            "/api/v1/plugins/cm.checkin/config",
             Some(TOKEN),
             &[],
             None,
@@ -648,7 +649,7 @@ async fn enabled_config_not_editable_put_409_and_checkin_invalid_config_400() {
     let (st_locked, _, b_locked) = env
         .send(req_json(
             "PUT",
-            "/api/v1/plugins/builtin.checkin/config",
+            "/api/v1/plugins/cm.checkin/config",
             Some(TOKEN),
             &[
                 ("if-match", &format!("\"{rev}\"")),
@@ -663,12 +664,12 @@ async fn enabled_config_not_editable_put_409_and_checkin_invalid_config_400() {
         .await;
     assert_eq!(st_locked, StatusCode::CONFLICT, "got {b_locked}");
 
-    env.disable_plugin("builtin.checkin", rev, "chk-dis").await;
-    let rev_dis = env.get_plugin_rev("builtin.checkin").await;
+    env.disable_plugin("cm.checkin", rev, "chk-dis").await;
+    let rev_dis = env.get_plugin_rev("cm.checkin").await;
     let (st_ui_dis, _, b_ui_dis) = env
         .send(req_json(
             "GET",
-            "/api/v1/plugins/builtin.checkin/ui",
+            "/api/v1/plugins/cm.checkin/ui",
             Some(TOKEN),
             &[],
             None,
@@ -686,7 +687,7 @@ async fn enabled_config_not_editable_put_409_and_checkin_invalid_config_400() {
     let (st_bad, _, b_bad) = env
         .send(req_json(
             "PUT",
-            "/api/v1/plugins/builtin.checkin/config",
+            "/api/v1/plugins/cm.checkin/config",
             Some(TOKEN),
             &[
                 ("if-match", &format!("\"{rev_dis}\"")),

@@ -690,7 +690,7 @@ def register_cases(registry: SuiteRegistry) -> None:
             )
             ensure_site(ctx, pt.url, profile_id=f"plugin:{yaml_pid}/e2e-demo")
             ensure_site(ctx, pt.url, profile_id=f"plugin:{idx_pid}/fixture")
-            ensure_plugin_enabled(ctx, "builtin.boost")
+            ensure_plugin_enabled(ctx, "cm.boost")
 
             search_res = ctx.call_phase1("GET", "/api/v1/search/torrents?keyword=E2E+Demo+Movie")
             items = search_res.get("items") if isinstance(search_res, dict) else search_res
@@ -753,13 +753,13 @@ def register_cases(registry: SuiteRegistry) -> None:
 
         dl = ensure_downloader(ctx, qb.url)
         site = ensure_site(ctx, pt.url, profile_id="pterclub")
-        ensure_plugin_enabled(ctx, "builtin.boost")
+        ensure_plugin_enabled(ctx, "cm.boost")
 
         # 1. Dishonest 1 TiB vs 1B advertised
         try:
             op_dis = ctx.call_phase1(
                 "POST",
-                "/api/v1/plugins/builtin.boost/commands",
+                "/api/v1/plugins/cm.boost/commands",
                 json_body={
                     "kind": "downloader.add",
                     "payload": {
@@ -783,7 +783,7 @@ def register_cases(registry: SuiteRegistry) -> None:
         try:
             op_for = ctx.call_phase1(
                 "POST",
-                "/api/v1/plugins/builtin.boost/commands",
+                "/api/v1/plugins/cm.boost/commands",
                 json_body={
                     "kind": "downloader.add",
                     "payload": {
@@ -846,7 +846,7 @@ def register_cases(registry: SuiteRegistry) -> None:
     def test_t4_scen06_checkin_window_dedup_and_cookie_cas(ctx: TestContext) -> None:
         pt = ctx.new_pt_site(expected_cookie="uid=42; pass=v1")
         pt.checkin_rotate_cookie = "pass=v2"
-        checkin = _find_first_party_plugin(ctx, ("builtin.checkin", "org.example.checkin"), "checkin")
+        checkin = _find_first_party_plugin(ctx, ("cm.checkin", "org.example.checkin"), "checkin")
         checkin_id = checkin["id"]
         ensure_plugin_enabled(ctx, checkin_id)
 
@@ -988,8 +988,8 @@ def register_cases(registry: SuiteRegistry) -> None:
                 )
             assert len(cdp.rpc_log) == 0
 
-            ensure_plugin_enabled(ctx, "builtin.checkin")
-            grant_site_browser_permission(ctx, "builtin.checkin", site1["id"], "browser:maintenance")
+            ensure_plugin_enabled(ctx, "builtin.nexusphp-maintenance")
+            grant_site_browser_permission(ctx, "builtin.nexusphp-maintenance", site1["id"], "browser:maintenance")
             r_ok = ctx.call_phase1("POST", f"/api/v1/sites/{site1['id']}/check-in", json_body={})
             if isinstance(r_ok, dict) and r_ok.get("operation_id"):
                 assert poll_operation(ctx, r_ok["operation_id"])["state"] == "succeeded"
@@ -1000,7 +1000,7 @@ def register_cases(registry: SuiteRegistry) -> None:
             put_browser_settings(ctx, True, cdp_to.url)
             site2 = ensure_site(ctx, pt2.url, profile_id="pterclub")
             ctx.call_phase1("PATCH", f"/api/v1/sites/{site2['id']}", json_body={"maintenance_via": "browser"})
-            grant_site_browser_permission(ctx, "builtin.checkin", site2["id"], "browser:maintenance")
+            grant_site_browser_permission(ctx, "builtin.nexusphp-maintenance", site2["id"], "browser:maintenance")
             try:
                 r_to = ctx.call_phase1("POST", f"/api/v1/sites/{site2['id']}/check-in", json_body={})
                 if isinstance(r_to, dict) and r_to.get("operation_id"):
@@ -1129,7 +1129,7 @@ def register_cases(registry: SuiteRegistry) -> None:
         qb.seed_foreign_torrent(fh, name="Foreign.HR.Protect", size=4096, tags="manual")
         dl = ensure_downloader(ctx, qb.url)
         site = ensure_site(ctx, pt.url, profile_id="pterclub")
-        boost = _find_first_party_plugin(ctx, ("builtin.boost", "org.example.boost"), "boost")
+        boost = _find_first_party_plugin(ctx, ("cm.boost", "org.example.boost"), "boost")
         boost_id = boost["id"]
         ensure_plugin_enabled(ctx, boost_id)
 
@@ -1423,8 +1423,8 @@ def register_cases(registry: SuiteRegistry) -> None:
         related_features=(22, 24, 25, 26),
     )
     def test_t4_scen12_first_party_uis_jellyfin_and_trust_lifecycle(ctx: TestContext) -> None:
-        checkin = _find_first_party_plugin(ctx, ("builtin.checkin", "org.example.checkin"), "checkin")
-        boost = _find_first_party_plugin(ctx, ("builtin.boost", "org.example.boost"), "boost")
+        checkin = _find_first_party_plugin(ctx, ("cm.checkin", "org.example.checkin"), "checkin")
+        boost = _find_first_party_plugin(ctx, ("cm.boost", "org.example.boost"), "boost")
         checkin_id = checkin["id"]
         boost_id = boost["id"]
         ensure_plugin_enabled(ctx, checkin_id)

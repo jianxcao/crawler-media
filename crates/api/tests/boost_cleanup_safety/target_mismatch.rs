@@ -617,7 +617,7 @@ async fn execution_rejects_ctx_targets_mismatch_if_command_queued_with_mismatche
 }
 
 fn narrow_builtin_boost_grants(store: &Store, dl_1: DownloaderId, site_1: SiteId) {
-    let p = store.get_plugin("builtin.boost").unwrap().unwrap();
+    let p = store.get_plugin("cm.boost").unwrap().unwrap();
     let dis = store
         .begin_plugin_lifecycle(&p.plugin_id, p.revision, uuid::Uuid::new_v4(), false)
         .unwrap();
@@ -634,7 +634,7 @@ fn narrow_builtin_boost_grants(store: &Store, dl_1: DownloaderId, site_1: SiteId
         .unwrap();
     let narrow = store
         .replace_plugin_grants(
-            "builtin.boost",
+            "cm.boost",
             &dis.package_hash,
             dis.revision,
             &[
@@ -705,7 +705,7 @@ async fn boost_run_rejects_mismatched_narrow_targets() {
     ] {
         let (st, b) = post_cmd(
             &env,
-            "builtin.boost",
+            "cm.boost",
             rev,
             idem,
             "boost.run",
@@ -718,7 +718,7 @@ async fn boost_run_rejects_mismatched_narrow_targets() {
 
     let (st_ok, b_ok) = post_cmd(
         &env,
-        "builtin.boost",
+        "cm.boost",
         rev,
         "br-ok",
         "boost.run",

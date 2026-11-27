@@ -33,6 +33,7 @@ mod recovery;
 mod recovery_lifecycle;
 mod recovery_rollforward;
 mod registry_sync;
+pub(crate) mod repositories;
 mod service;
 mod service_exec;
 mod staging;
@@ -42,8 +43,6 @@ mod tasks;
 pub(crate) mod transfer_rename;
 mod types;
 mod ui_asset_io;
-mod ui_builtins;
-mod ui_builtins_assets;
 mod ui_handles;
 mod ui_indexer;
 mod ui_ops;
@@ -69,6 +68,10 @@ pub use reconcile::{reconcile_operation, reconcile_pending, recover_startup, run
 #[doc(hidden)]
 pub use registry_sync::sync_registry_snapshot;
 pub(crate) use registry_sync::sync_registry_snapshot_on_startup;
+pub use repositories::{
+    PluginCatalogItemView, PluginRepositoryCatalogView, PluginRepositoryInput,
+    PluginRepositoryListView, PluginRepositoryView, SavePluginRepositoriesInput,
+};
 pub use service::{PluginService, SubmitPluginCommand};
 pub use tasks::run_task_job;
 pub use types::*;

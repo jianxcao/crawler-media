@@ -8,7 +8,6 @@ use super::service::{PluginService, run_app_read};
 use super::types::PluginServiceError;
 use super::ui_asset_io::{read_external_ui_asset_off_lock, resolve_ui_styles};
 pub(crate) use super::ui_asset_io::{resolve_bundle_sha256, validate_asset_request_path};
-use super::ui_builtins::builtin_ui_asset;
 use crate::management::ApiState;
 
 #[derive(Clone, Debug, Serialize)]
@@ -403,10 +402,10 @@ impl PluginService {
             ));
         }
         if version.signature_status == "builtin" {
-            let (bytes, mime) = builtin_ui_asset(plugin_id, asset_path).ok_or_else(|| {
-                PluginServiceError::not_found("plugin.asset_not_found", "UI asset not found")
-            })?;
-            return Ok((bytes.to_vec(), mime.to_string()));
+            return Err(PluginServiceError::not_found(
+                "plugin.asset_not_found",
+                "UI asset not found",
+            ));
         }
         let expected_bundle_sha = trust_row
             .as_ref()

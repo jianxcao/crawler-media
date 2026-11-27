@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 plugin-api.workspace = true
 plugin-package.workspace = true
+ring = "0.17"
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml = "0.9"
@@ -18,5 +19,4 @@ wasmparser.workspace = true
 [dev-dependencies]
 blake2 = "0.10"
 base64.workspace = true
-ring = "0.17"
 tempfile.workspace = true

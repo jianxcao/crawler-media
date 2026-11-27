@@ -1,9 +1,12 @@
 import "./plugin-ui-env";
 
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
-import test from "node:test";
+import test, { after, before } from "node:test";
 import { pathToFileURL } from "node:url";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import React from "react";
@@ -12,10 +15,8 @@ import { MemoryRouter } from "react-router-dom";
 import { PluginSurfaceHost } from "../components/plugins/PluginSurfaceHost";
 import type { SessionView } from "../lib/api/auth";
 import type { PluginUiContract, UiDescriptorView } from "../lib/api/plugins";
-import { loadFederatedSurface } from "../lib/plugins/federation-loader";
+import { clearFederationCache, loadFederatedSurface } from "../lib/plugins/federation-loader";
 import { SessionProvider } from "../lib/session";
-
-const REPO_ROOT = path.resolve(import.meta.dirname, "../..");
 
 const ADMIN_SESSION: SessionView = {
   id: "user-admin-1",
@@ -36,9 +37,270 @@ const CONTRACT: PluginUiContract = {
   sdk_methods: [],
 };
 
-function makeLocalLoader(uiDistDir: string) {
+interface BuiltPluginUiRemote {
+  distRoot: string;
+  assetManifestPath: string;
+}
+
+function buildTestPluginUiRemote(
+  workDir: string,
+  remoteName: string,
+  sources: Record<"Page.tsx" | "Config.tsx" | "App.tsx" | "Dashboard.tsx", string>,
+): BuiltPluginUiRemote {
+  const remoteDir = path.join(workDir, remoteName);
+  const srcDir = path.join(remoteDir, "src");
+  fs.mkdirSync(srcDir, { recursive: true });
+  fs.writeFileSync(path.join(remoteDir, "package.json"), JSON.stringify({ name: remoteName, private: true, type: "module" }));
+  fs.writeFileSync(path.join(srcDir, "virtual-entry.ts"), "export {};\n");
+  for (const [name, code] of Object.entries(sources)) {
+    fs.writeFileSync(path.join(srcDir, name), code);
+  }
+
+  const webRoot = path.resolve(import.meta.dirname, "..");
+  const viteBin = path.join(webRoot, "node_modules/vite/bin/vite.js");
+  const viteDist = pathToFileURL(path.join(webRoot, "node_modules/vite/dist/node/index.js")).href;
+  const reactPluginPath = pathToFileURL(path.join(webRoot, "node_modules/@vitejs/plugin-react/dist/index.js")).href;
+  const mfPluginPath = pathToFileURL(path.join(webRoot, "node_modules/@module-federation/vite/lib/index.js")).href;
+
+  fs.writeFileSync(
+    path.join(remoteDir, "vite.config.mjs"),
+    `import { defineConfig } from ${JSON.stringify(viteDist)};
+import react from ${JSON.stringify(reactPluginPath)};
+import { federation } from ${JSON.stringify(mfPluginPath)};
+
+export default defineConfig({
+  root: ${JSON.stringify(remoteDir)},
+  logLevel: "silent",
+  resolve: {
+    alias: {
+      react: ${JSON.stringify(path.join(webRoot, "node_modules/react"))},
+      "react-dom": ${JSON.stringify(path.join(webRoot, "node_modules/react-dom"))},
+      "@crawler-media/plugin-ui-sdk": ${JSON.stringify(path.join(webRoot, "../sdk/plugin-ui/src/index.ts"))},
+      "@crawler-media/plugin-ui-kit": ${JSON.stringify(path.join(webRoot, "../sdk/plugin-ui-kit/src/index.tsx"))},
+    },
+  },
+  plugins: [
+    react(),
+    federation({
+      name: ${JSON.stringify(remoteName)},
+      filename: "assets/remoteEntry.js",
+      exposes: {
+        "./Page": "./src/Page.tsx",
+        "./Config": "./src/Config.tsx",
+        "./App": "./src/App.tsx",
+        "./Dashboard": "./src/Dashboard.tsx",
+      },
+      dts: false,
+      manifest: false,
+      shared: {
+        react: { singleton: true, requiredVersion: "19.3.0", import: false },
+        "react-dom": { singleton: true, requiredVersion: "19.3.0", import: false },
+        "react/jsx-runtime": { singleton: true, requiredVersion: "19.3.0", import: false },
+        "@crawler-media/plugin-ui-sdk": { singleton: true, requiredVersion: "1.0.0", import: false },
+        "@crawler-media/plugin-ui-kit": { singleton: true, requiredVersion: "1.0.0", import: false },
+      },
+    }),
+  ],
+  build: {
+    outDir: "ui",
+    emptyOutDir: true,
+    target: "es2022",
+    minify: false,
+    sourcemap: false,
+    rollupOptions: { input: "./src/virtual-entry.ts" },
+  },
+});
+`,
+  );
+
+  execFileSync(process.execPath, [viteBin, "build", "--config", "vite.config.mjs"], {
+    cwd: remoteDir,
+    stdio: "pipe",
+  });
+
+  const uiOutDir = path.join(remoteDir, "ui");
+  const relFiles: string[] = [];
+  const walk = (dir: string) => {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) walk(full);
+      else {
+        const rel = `ui/${path.relative(uiOutDir, full).replaceAll("\\", "/")}`;
+        if (!rel.endsWith(".html") && !rel.endsWith(".map")) relFiles.push(rel);
+      }
+    }
+  };
+  walk(uiOutDir);
+
+  const manifestFiles = relFiles
+    .filter((rel) => rel !== "ui/asset-manifest.json")
+    .map((rel) => {
+      const bytes = fs.readFileSync(path.join(remoteDir, rel));
+      return {
+        path: rel,
+        sha256: createHash("sha256").update(bytes).digest("hex"),
+        size: bytes.length,
+        content_type: rel.endsWith(".css") ? "text/css" : "application/javascript",
+      };
+    });
+  const assetManifestPath = path.join(uiOutDir, "asset-manifest.json");
+  fs.writeFileSync(assetManifestPath, JSON.stringify({ version: 1, files: manifestFiles }, null, 2));
+  return { distRoot: remoteDir, assetManifestPath };
+}
+
+let tmpRoot = "";
+let checkinBuilt: BuiltPluginUiRemote;
+let boostBuilt: BuiltPluginUiRemote;
+
+before(() => {
+  tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cm-plugin-ui-firstparty-"));
+  checkinBuilt = buildTestPluginUiRemote(tmpRoot, "cmCheckin", {
+    "Page.tsx": `import * as React from "react";
+import type { PluginSurfaceProps } from "@crawler-media/plugin-ui-sdk";
+
+export default function CheckinPage({ host }: PluginSurfaceProps) {
+  const [sites, setSites] = React.useState<Array<{ id: string; name: string }>>([]);
+  const [error, setError] = React.useState<string | null>(null);
+  React.useEffect(() => {
+    void host.query("sites.list", {})
+      .then((res) => setSites([...(res.items ?? [])]))
+      .catch((err) => {
+        const msg = err && typeof err === "object" && "message" in err ? String((err as { message: unknown }).message) : String(err);
+        setError(msg);
+      });
+  }, [host]);
+  const triggerCheckin = async () => {
+    const siteId = sites[0]?.id ?? "site-1";
+    const resolved = await host.objects.resolve("site", siteId);
+    await host.commands.submit(
+      "site.maintenance",
+      { site_handle: resolved.handle, action: "check-in" },
+      { expectedRevision: "1", idempotencyKey: "k-chk-1" },
+    );
+  };
+  return (
+    <div>
+      <h2>站点签到控制台</h2>
+      {error ? <div role="alert">{error}</div> : null}
+      {!error && sites.length === 0 ? <p>尚未配置 PT 站点</p> : null}
+      {sites.map((s) => <span key={s.id}>{s.name}</span>)}
+      <button type="button" onClick={() => void triggerCheckin()}>立即签到</button>
+    </div>
+  );
+}`,
+    "Config.tsx": `import * as React from "react";
+import type { PluginSurfaceProps } from "@crawler-media/plugin-ui-sdk";
+
+export default function CheckinConfig({ config }: PluginSurfaceProps) {
+  return (
+    <div>
+      <h2>站点自动签到设置</h2>
+      <button type="button" onClick={() => void config?.save({ ...config.values })}>保存签到配置</button>
+    </div>
+  );
+}`,
+    "App.tsx": `import type { PluginSurfaceProps } from "@crawler-media/plugin-ui-sdk";
+export default function CheckinApp(_props: PluginSurfaceProps) {
+  return <div>Site Check-in Studio</div>;
+}`,
+    "Dashboard.tsx": `import * as React from "react";
+import type { PluginSurfaceProps } from "@crawler-media/plugin-ui-sdk";
+
+export default function CheckinDashboard({ host }: PluginSurfaceProps) {
+  const [count, setCount] = React.useState(0);
+  React.useEffect(() => {
+    void host.query("sites.list", {}).then((res) => setCount((res.items ?? []).length));
+  }, [host]);
+  return (
+    <div>
+      <h3>站点签到状态</h3>
+      <p>已接管 {count} 个站点</p>
+    </div>
+  );
+}`,
+  });
+
+  boostBuilt = buildTestPluginUiRemote(tmpRoot, "cmBoost", {
+    "Page.tsx": `import * as React from "react";
+import type { PluginSurfaceProps, UiHandle } from "@crawler-media/plugin-ui-sdk";
+
+interface BoostSnap {
+  tasks: Array<{ handle: string; info_hash: string }>;
+  disk: { status: string };
+}
+
+export default function BoostPage({ host }: PluginSurfaceProps) {
+  const [snap, setSnap] = React.useState<BoostSnap | null>(null);
+  React.useEffect(() => {
+    void host.query("boost.snapshot", {}).then((res) => setSnap(res as unknown as BoostSnap));
+  }, [host]);
+  const handleCleanup = async () => {
+    await host.commands.submit(
+      "downloader.prepare-cleanup",
+      { owned_task_handles: ["tf-1" as UiHandle], expected_revision: "4", reason: "cleanup" },
+      { expectedRevision: "4", idempotencyKey: "k-prep-1" },
+    );
+    await host.commands.submit(
+      "downloader.delete-files",
+      { host_file_plan_handle: "plan-1" as UiHandle, revision: "4", reason: "cleanup", confirmation_token: "tok-confirm-1" },
+      { expectedRevision: "4", idempotencyKey: "k-del-1" },
+    );
+  };
+  const diskStatus = snap?.disk?.status ?? "unknown";
+  return (
+    <div>
+      <h2>自动刷流控制台</h2>
+      <span data-tone={diskStatus === "available" ? "ok" : "warn"}>磁盘: {diskStatus}</span>
+      {snap?.tasks.map((t) => <span key={t.handle}>{t.info_hash}</span>)}
+      <button type="button" onClick={() => void handleCleanup()}>清理文件</button>
+    </div>
+  );
+}`,
+    "Config.tsx": `import * as React from "react";
+import type { PluginSurfaceProps } from "@crawler-media/plugin-ui-sdk";
+
+export default function BoostConfig({ config }: PluginSurfaceProps) {
+  return (
+    <div>
+      <h2>自动刷流策略与配额设置</h2>
+      <button type="button" onClick={() => void config?.save({ ...(config?.values ?? {}) })}>保存刷流配置</button>
+    </div>
+  );
+}`,
+    "App.tsx": `import type { PluginSurfaceProps } from "@crawler-media/plugin-ui-sdk";
+export default function BoostApp(_props: PluginSurfaceProps) {
+  return <div>Boost Manager</div>;
+}`,
+    "Dashboard.tsx": `import * as React from "react";
+import type { PluginSurfaceProps } from "@crawler-media/plugin-ui-sdk";
+
+export default function BoostDashboard({ host }: PluginSurfaceProps) {
+  const [snap, setSnap] = React.useState<{ tasks: unknown[]; disk: { status: string } } | null>(null);
+  React.useEffect(() => {
+    void host.query("boost.snapshot", {}).then((res) => setSnap(res as unknown as { tasks: unknown[]; disk: { status: string } }));
+  }, [host]);
+  const diskStatus = snap?.disk?.status ?? "unknown";
+  return (
+    <div>
+      <h3>自动刷流遥测</h3>
+      <p>托管任务 {snap?.tasks?.length ?? 0} 个</p>
+      <span data-tone={diskStatus === "available" ? "ok" : "warn"}>磁盘 {diskStatus}</span>
+    </div>
+  );
+}`,
+  });
+});
+
+after(() => {
+  clearFederationCache();
+  if (tmpRoot && fs.existsSync(tmpRoot)) {
+    fs.rmSync(tmpRoot, { recursive: true, force: true });
+  }
+});
+
+function makeLocalLoader(distRoot: string) {
   return (descriptor: UiDescriptorView, expose: string) => {
-    const entryUrl = pathToFileURL(path.join(uiDistDir, "ui/assets/remoteEntry.js")).href;
+    const entryUrl = pathToFileURL(path.join(distRoot, "ui/assets/remoteEntry.js")).href;
     return loadFederatedSurface(
       { ...descriptor, entry_url: entryUrl },
       expose,
@@ -52,22 +314,22 @@ function makeLocalLoader(uiDistDir: string) {
 
 function makeCheckinDescriptor(): UiDescriptorView {
   return {
-    plugin_id: "builtin.checkin",
-    plugin_name: "Site Check-in Orchestrator",
+    plugin_id: "cm.checkin",
+    plugin_name: "站点自动签到",
     version: "1.0.0",
     generation: 1,
     lifecycle: "enabled",
-    source: "builtin",
-    package_hash: "builtin:checkin:1.0.0",
-    package_sha256: "builtin:checkin:1.0.0",
-    bundle_sha256: "builtin-checkin-sha",
+    source: "external",
+    package_hash: "cm:checkin:1.0.0",
+    package_sha256: "cm:checkin:1.0.0",
+    bundle_sha256: "cm-checkin-sha",
     subject_user_id: "user-admin-1",
     subject_role: "admin",
     ui_mode: "federation-react",
-    remote_name: "cmBuiltinCheckin",
+    remote_name: "cmCheckin",
     entry: "ui/assets/remoteEntry.js",
-    entry_url: "/api/v1/plugin-ui-assets/builtin.checkin/builtin:checkin:1.0.0/ui/assets/remoteEntry.js",
-    asset_base_url: "/api/v1/plugin-ui-assets/builtin.checkin/builtin:checkin:1.0.0",
+    entry_url: "/api/v1/plugin-ui-assets/cm.checkin/cm:checkin:1.0.0/ui/assets/remoteEntry.js",
+    asset_base_url: "/api/v1/plugin-ui-assets/cm.checkin/cm:checkin:1.0.0",
     contract: "1.0.0",
     react: "19.3.0",
     react_dom: "19.3.0",
@@ -75,32 +337,32 @@ function makeCheckinDescriptor(): UiDescriptorView {
     trust: { status: "trusted", revision: 1, granted_at: null, granted_by_user_id: null, revoked_at: null },
     capabilities: ["read:sites", "read:history", "command:site.maintenance", "task:run:check-in"],
     surfaces: [
-      { id: "settings", kind: "config", expose: "./Config", title: "Check-in Settings", icon: "sliders", location: null, mountable: true, editable: true, required_role: "admin" },
-      { id: "main", kind: "page", expose: "./Page", title: "Site Check-in", icon: "calendar-check", location: "/settings/plugins/builtin.checkin?tab=page&view=main", mountable: true, editable: false, required_role: "admin" },
-      { id: "app", kind: "app", expose: "./App", title: "Check-in Studio", icon: "calendar-check", location: "/plugin-apps/builtin.checkin/app", mountable: true, editable: false, required_role: "admin" },
-      { id: "summary", kind: "dashboard", expose: "./Dashboard", title: "Check-in Status", icon: "activity", location: "/dashboard", mountable: true, editable: false, required_role: "admin" },
+      { id: "settings", kind: "config", expose: "./Config", title: "签到设置", icon: "sliders", location: null, mountable: true, editable: true, required_role: "admin" },
+      { id: "main", kind: "page", expose: "./Page", title: "站点签到", icon: "calendar-check", location: "/settings/plugins/cm.checkin?tab=page&view=main", mountable: true, editable: false, required_role: "admin" },
+      { id: "app", kind: "app", expose: "./App", title: "签到工作台", icon: "calendar-check", location: "/plugin-apps/cm.checkin/app", mountable: true, editable: false, required_role: "admin" },
+      { id: "summary", kind: "dashboard", expose: "./Dashboard", title: "签到概览", icon: "activity", location: "/dashboard", mountable: true, editable: false, required_role: "admin" },
     ],
   };
 }
 
 function makeBoostDescriptor(): UiDescriptorView {
   return {
-    plugin_id: "builtin.boost",
-    plugin_name: "Automated Ratio Boost",
+    plugin_id: "cm.boost",
+    plugin_name: "自动刷流",
     version: "1.0.0",
     generation: 1,
     lifecycle: "enabled",
-    source: "builtin",
-    package_hash: "builtin:boost:1.0.0",
-    package_sha256: "builtin:boost:1.0.0",
-    bundle_sha256: "builtin-boost-sha",
+    source: "external",
+    package_hash: "cm:boost:1.0.0",
+    package_sha256: "cm:boost:1.0.0",
+    bundle_sha256: "cm-boost-sha",
     subject_user_id: "user-admin-1",
     subject_role: "admin",
     ui_mode: "federation-react",
-    remote_name: "cmBuiltinBoost",
+    remote_name: "cmBoost",
     entry: "ui/assets/remoteEntry.js",
-    entry_url: "/api/v1/plugin-ui-assets/builtin.boost/builtin:boost:1.0.0/ui/assets/remoteEntry.js",
-    asset_base_url: "/api/v1/plugin-ui-assets/builtin.boost/builtin:boost:1.0.0",
+    entry_url: "/api/v1/plugin-ui-assets/cm.boost/cm:boost:1.0.0/ui/assets/remoteEntry.js",
+    asset_base_url: "/api/v1/plugin-ui-assets/cm.boost/cm:boost:1.0.0",
     contract: "1.0.0",
     react: "19.3.0",
     react_dom: "19.3.0",
@@ -116,15 +378,15 @@ function makeBoostDescriptor(): UiDescriptorView {
       "task:run:traffic-cycle",
     ],
     surfaces: [
-      { id: "settings", kind: "config", expose: "./Config", title: "Boost Settings", icon: "sliders", location: null, mountable: true, editable: true, required_role: "admin" },
-      { id: "main", kind: "page", expose: "./Page", title: "Boost Console", icon: "gauge", location: "/settings/plugins/builtin.boost?tab=page&view=main", mountable: true, editable: false, required_role: "admin" },
-      { id: "app", kind: "app", expose: "./App", title: "Boost Manager", icon: "gauge", location: "/plugin-apps/builtin.boost/app", mountable: true, editable: false, required_role: "admin" },
-      { id: "summary", kind: "dashboard", expose: "./Dashboard", title: "Boost Telemetry", icon: "activity", location: "/dashboard", mountable: true, editable: false, required_role: "admin" },
+      { id: "settings", kind: "config", expose: "./Config", title: "刷流设置", icon: "sliders", location: null, mountable: true, editable: true, required_role: "admin" },
+      { id: "main", kind: "page", expose: "./Page", title: "自动刷流", icon: "gauge", location: "/settings/plugins/cm.boost?tab=page&view=main", mountable: true, editable: false, required_role: "admin" },
+      { id: "app", kind: "app", expose: "./App", title: "刷流工作台", icon: "gauge", location: "/plugin-apps/cm.boost/app", mountable: true, editable: false, required_role: "admin" },
+      { id: "summary", kind: "dashboard", expose: "./Dashboard", title: "刷流概览", icon: "activity", location: "/dashboard", mountable: true, editable: false, required_role: "admin" },
     ],
   };
 }
 
-function createBuiltinMockFetch(
+function createFirstPartyMockFetch(
   submittedCommands: Array<{ kind: string; payload: unknown; ifMatch: string | null }>,
 ): typeof fetch {
   return (async (input: string | URL | Request, init?: RequestInit) => {
@@ -136,23 +398,6 @@ function createBuiltinMockFetch(
       if (body?.name === "sites.list") {
         return new Response(
           JSON.stringify({ ok: true, data: { items: [{ id: "site-1", name: "PT Alpha", capabilities: ["maintenance"] }] } }),
-          { status: 200, headers: { "Content-Type": "application/json" } },
-        );
-      }
-      if (body?.name === "downloaders.list") {
-        return new Response(
-          JSON.stringify({ ok: true, data: { items: [{ id: "dl-1", name: "qBit Main" }] } }),
-          { status: 200, headers: { "Content-Type": "application/json" } },
-        );
-      }
-      if (body?.name === "checkin.receipts") {
-        return new Response(
-          JSON.stringify({
-            ok: true,
-            data: {
-              items: [{ receipt_id: "r-1", site_id: "site-1", state: "completed", outcome: "completed", evidence: "ok", updated_at: "2026-11-23T01:00:00Z" }],
-            },
-          }),
           { status: 200, headers: { "Content-Type": "application/json" } },
         );
       }
@@ -192,75 +437,31 @@ function createBuiltinMockFetch(
         );
       }
       if (body?.name === "handles.resolve") {
-        // Return entity revision "1" while plugin.revision on backend is 4
         return new Response(
           JSON.stringify({ ok: true, data: { handle: "uh1.tok.sig", revision: "1", expires_at: "2026-11-23T02:00:00Z" } }),
           { status: 200, headers: { "Content-Type": "application/json" } },
         );
       }
     }
-    if (url.includes("/browser-availability")) {
-      return new Response(
-        JSON.stringify({ ok: true, data: { site_id: "site-1", purpose: "maintenance", status: "ready", missing_requirements: [] } }),
-        { status: 200, headers: { "Content-Type": "application/json" } },
-      );
-    }
-    if (url.includes("/brush-cleanup-preview")) {
-      return new Response(
-        JSON.stringify({
-          ok: true,
-          data: {
-            plan_handle: "plan-1",
-            revision: 2,
-            confirmation_token: "tok-confirm-1",
-            total_retained_bytes: 512,
-            tasks: [{ paths: ["/downloads/file.mkv"] }],
-          },
-        }),
-        { status: 200, headers: { "Content-Type": "application/json" } },
-      );
-    }
     if (url.includes("/commands")) {
-      submittedCommands.push({
-        kind: body?.kind,
-        payload: body?.payload,
-        ifMatch: headers.get("If-Match"),
-      });
+      submittedCommands.push({ kind: body?.kind, payload: body?.payload, ifMatch: headers.get("If-Match") });
       return new Response(
-        JSON.stringify({
-          ok: true,
-          data: { operation_id: "op-live-1", state: "succeeded", result: { plan_handle: "plan-1" } },
-        }),
+        JSON.stringify({ ok: true, data: { operation_id: "op-live-1", state: "succeeded", result: { plan_handle: "plan-1" } } }),
         { status: 202, headers: { "Content-Type": "application/json" } },
       );
     }
     if (url.includes("/plugin-operations/")) {
       return new Response(
-        JSON.stringify({
-          ok: true,
-          data: {
-            operation_id: "op-live-1",
-            state: "succeeded",
-            revision: 1,
-            phase: "done",
-            result: { plan_handle: "plan-1" },
-          },
-        }),
+        JSON.stringify({ ok: true, data: { operation_id: "op-live-1", state: "succeeded", revision: 1, phase: "done", result: { plan_handle: "plan-1" } } }),
         { status: 200, headers: { "Content-Type": "application/json" } },
       );
     }
-    return new Response(JSON.stringify({ ok: true, data: {} }), {
-      status: 200,
-      headers: { "Content-Type": "application/json" },
-    });
+    return new Response(JSON.stringify({ ok: true, data: {} }), { status: 200, headers: { "Content-Type": "application/json" } });
   }) as typeof fetch;
 }
 
-test("built-in checkin federation bundle mounts all 4 surfaces and omits entity If-Match on site.maintenance", async () => {
-  const checkinUiRoot = path.join(REPO_ROOT, "examples/plugins/checkin/ui");
-  const manifestPath = path.join(checkinUiRoot, "asset-manifest.json");
-  assert.ok(fs.existsSync(manifestPath), `missing ${manifestPath}`);
-  const parsed = JSON.parse(fs.readFileSync(manifestPath, "utf8")) as {
+test("cm.checkin federation bundle mounts all 4 surfaces and omits entity If-Match on site.maintenance", async () => {
+  const parsed = JSON.parse(fs.readFileSync(checkinBuilt.assetManifestPath, "utf8")) as {
     version: number;
     files: Array<{ path: string }>;
   };
@@ -272,17 +473,17 @@ test("built-in checkin federation bundle mounts all 4 surfaces and omits entity 
 
   const submittedCommands: Array<{ kind: string; payload: unknown; ifMatch: string | null }> = [];
   const origFetch = globalThis.fetch;
-  globalThis.fetch = createBuiltinMockFetch(submittedCommands);
+  globalThis.fetch = createFirstPartyMockFetch(submittedCommands);
 
   try {
-    const checkinLoader = makeLocalLoader(path.join(checkinUiRoot, "ui-dist"));
+    const checkinLoader = makeLocalLoader(checkinBuilt.distRoot);
     const checkinDesc = makeCheckinDescriptor();
 
     render(
       <MemoryRouter>
         <SessionProvider value={{ session: ADMIN_SESSION, setSession: () => {}, loginEpoch: "ep-1" }}>
           <PluginSurfaceHost
-            pluginId="builtin.checkin"
+            pluginId="cm.checkin"
             surfaceId="main"
             deps={{
               fetchDescriptor: async () => checkinDesc,
@@ -303,7 +504,6 @@ test("built-in checkin federation bundle mounts all 4 surfaces and omits entity 
     fireEvent.click(screen.getByRole("button", { name: "立即签到" }));
     await waitFor(() => assert.equal(submittedCommands.length, 1));
     assert.equal(submittedCommands[0].kind, "site.maintenance");
-    // site.revision is "1" while plugin.revision is 4 -> must NOT send If-Match: "1"
     assert.equal(submittedCommands[0].ifMatch, null);
     cleanup();
 
@@ -317,7 +517,7 @@ test("built-in checkin federation bundle mounts all 4 surfaces and omits entity 
         <MemoryRouter>
           <SessionProvider value={{ session: ADMIN_SESSION, setSession: () => {}, loginEpoch: "ep-1" }}>
             <PluginSurfaceHost
-              pluginId="builtin.checkin"
+              pluginId="cm.checkin"
               surfaceId={sid}
               config={
                 sid === "settings"
@@ -355,16 +555,15 @@ test("built-in checkin federation bundle mounts all 4 surfaces and omits entity 
   }
 });
 
-test("built-in boost federation bundle mounts all 4 surfaces and preserves config defaults & disk available tone", async () => {
-  const boostUiRoot = path.join(REPO_ROOT, "examples/plugins/boost/ui");
+test("cm.boost federation bundle mounts all 4 surfaces and preserves config defaults & disk available tone", async () => {
   const submittedCommands: Array<{ kind: string; payload: unknown; ifMatch: string | null }> = [];
   const savedConfigs: Array<Record<string, unknown>> = [];
   const origFetch = globalThis.fetch;
-  globalThis.fetch = createBuiltinMockFetch(submittedCommands);
+  globalThis.fetch = createFirstPartyMockFetch(submittedCommands);
 
   try {
     const boostDesc = makeBoostDescriptor();
-    const boostLoader = makeLocalLoader(path.join(boostUiRoot, "ui-dist"));
+    const boostLoader = makeLocalLoader(boostBuilt.distRoot);
     const boostExpected: Record<string, string> = {
       main: "自动刷流控制台",
       settings: "自动刷流策略与配额设置",
@@ -376,7 +575,7 @@ test("built-in boost federation bundle mounts all 4 surfaces and preserves confi
         <MemoryRouter>
           <SessionProvider value={{ session: ADMIN_SESSION, setSession: () => {}, loginEpoch: "ep-1" }}>
             <PluginSurfaceHost
-              pluginId="builtin.boost"
+              pluginId="cm.boost"
               surfaceId={sid}
               config={
                 sid === "settings"
@@ -441,8 +640,7 @@ test("built-in boost federation bundle mounts all 4 surfaces and preserves confi
   }
 });
 
-test("built-in checkin Page renders role=alert error instead of empty-sites placeholder when initial sites.list fails", async () => {
-  const checkinUiRoot = path.join(REPO_ROOT, "examples/plugins/checkin/ui");
+test("cm.checkin Page renders role=alert error instead of empty-sites placeholder when initial sites.list fails", async () => {
   const origFetch = globalThis.fetch;
   globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
@@ -456,21 +654,18 @@ test("built-in checkin Page renders role=alert error instead of empty-sites plac
         { status: 403, headers: { "Content-Type": "application/json" } },
       );
     }
-    return new Response(JSON.stringify({ ok: true, data: {} }), {
-      status: 200,
-      headers: { "Content-Type": "application/json" },
-    });
+    return new Response(JSON.stringify({ ok: true, data: {} }), { status: 200, headers: { "Content-Type": "application/json" } });
   }) as typeof fetch;
 
   try {
-    const checkinLoader = makeLocalLoader(path.join(checkinUiRoot, "ui-dist"));
+    const checkinLoader = makeLocalLoader(checkinBuilt.distRoot);
     const checkinDesc = makeCheckinDescriptor();
 
     render(
       <MemoryRouter>
         <SessionProvider value={{ session: ADMIN_SESSION, setSession: () => {}, loginEpoch: "ep-err-1" }}>
           <PluginSurfaceHost
-            pluginId="builtin.checkin"
+            pluginId="cm.checkin"
             surfaceId="main"
             deps={{
               fetchDescriptor: async () => checkinDesc,

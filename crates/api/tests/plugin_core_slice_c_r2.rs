@@ -532,6 +532,8 @@ fn build_manual_plan_and_ctx(
         imdb_id: None,
         detail_url: None,
         category: None,
+        free_2x: false,
+        free_until: None,
     };
     let plan = FrozenDownloadPlan {
         torrent,

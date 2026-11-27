@@ -56,7 +56,7 @@ world reads {
   import download; import history; import catalog; import operations;
 }
 world hook-plugin {
-  include base; include reads; import http; import notify;
+  include base; include reads; import http; import notify; import boost;
   export lifecycle; export hooks;
 }
 world indexer-plugin {

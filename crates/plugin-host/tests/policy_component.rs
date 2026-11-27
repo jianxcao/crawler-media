@@ -184,6 +184,8 @@ fn real_component_filters_native_torrents_without_changing_their_origins() {
         detail_url: None,
         category: None,
         poster_url: None,
+        free_2x: false,
+        free_until: None,
     };
     let retained = torrent("B", "https://example.test/?passkey=private");
     let result = pipeline

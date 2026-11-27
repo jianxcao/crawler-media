@@ -24,6 +24,120 @@ use store::{
     DownloadProvenanceKind, RecordDownloadOwnershipInput, UpsertBoostTaskFactInput,
 };
 
+pub const BOOST_PLUGIN_ID: &str = "cm.boost";
+
+const BOOST_TASK_WASM: &[u8] =
+    include_bytes!("../../../plugin-host/tests/fixtures/task_fixture.wasm");
+
+pub fn boost_test_config_schema_json() -> String {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "sites": { "type": "array", "items": { "type": "string" }, "default": [] },
+            "downloader_id": { "type": "string", "default": "" },
+            "budget_bytes": { "type": "integer", "minimum": 0 },
+            "min_free_disk_bytes": { "type": "integer", "minimum": 0, "default": 0 },
+            "watermark_low_bytes": { "type": "integer", "minimum": 0 },
+            "dynamic_delete": { "type": "boolean", "default": false },
+            "hold_days": { "type": "integer", "minimum": 0, "default": 0 },
+            "max_active": { "type": "integer", "minimum": 1, "default": 20 },
+            "max_adds_per_hour": { "type": "integer", "minimum": 1, "default": 10 },
+            "max_adds_per_round": { "type": "integer", "minimum": 1, "default": 20 },
+            "dry_run": { "type": "boolean", "default": true },
+            "auto_cleanup_files": { "type": "boolean", "default": false },
+            "min_seeders": { "type": "integer", "minimum": 0, "default": 1 },
+            "free_only": { "type": "boolean", "default": true },
+            "free_mode": { "type": "string", "enum": ["2x_free", "free", "any"], "default": "free" },
+            "exclude_hr": { "type": "boolean", "default": true },
+            "enforce_budget_on_all": { "type": "boolean", "default": false }
+        },
+        "additionalProperties": false
+    })
+    .to_string()
+}
+
+pub fn install_cm_boost_plugin(store: &Store) -> i64 {
+    use store::plugins::{
+        PluginGrant, PluginGrantScope, PluginLifecycle, PluginLifecycleObservation,
+        PluginVersionMetadata,
+    };
+
+    if let Some(existing) = store.get_plugin(BOOST_PLUGIN_ID).unwrap() {
+        return existing.revision;
+    }
+    let dev = store.plugin_developer_mode().unwrap();
+    if !dev.enabled {
+        store
+            .set_plugin_developer_mode(true, dev.revision, "test-setup")
+            .unwrap();
+    }
+    let rel = "plugins/pkg/cm.boost/v1/task.wasm";
+    let wasm_path = store.data_dir().join(rel);
+    std::fs::create_dir_all(wasm_path.parent().unwrap()).unwrap();
+    std::fs::write(&wasm_path, BOOST_TASK_WASM).unwrap();
+    let schema_json = boost_test_config_schema_json();
+    let p = store
+        .register_plugin_version(
+            &PluginVersionMetadata {
+                plugin_id: BOOST_PLUGIN_ID.into(),
+                package_hash: "cm.boost:test:1.0.0".into(),
+                version: "1.0.0".into(),
+                manifest_json: "{}".into(),
+                config_schema_json: schema_json,
+                state_schema: "1".into(),
+                artifact_path: rel.into(),
+                signing_key_id: None,
+                signature_status: "development".into(),
+                ui_metadata_ref: None,
+                credential_bound: false,
+            },
+            0,
+        )
+        .unwrap();
+    let grants: Vec<PluginGrant> = [
+        "kv",
+        "read:sites",
+        "read:downloads",
+        "read:boost",
+        "command:indexer.search",
+        "command:indexer.rss",
+        "command:downloader.add",
+        "command:downloader.control",
+        "command:downloader.delete-task",
+        "command:downloader.prepare-cleanup",
+        "command:downloader.delete-files",
+        "command:boost.run",
+    ]
+    .into_iter()
+    .map(|cap| PluginGrant {
+        capability: cap.into(),
+        scope: PluginGrantScope::Global,
+        sensitive: cap == "command:downloader.delete-files",
+    })
+    .collect();
+    let p = store
+        .replace_plugin_grants(&p.plugin_id, &p.package_hash, p.revision, &grants)
+        .unwrap();
+    if p.lifecycle == PluginLifecycle::Enabled {
+        return p.revision;
+    }
+    let en = store
+        .begin_plugin_lifecycle(&p.plugin_id, p.revision, uuid::Uuid::new_v4(), true)
+        .unwrap();
+    store
+        .finalize_plugin_lifecycle(&PluginLifecycleObservation {
+            plugin_id: en.plugin_id,
+            operation_id: en.active_operation_id.unwrap(),
+            revision: en.revision,
+            generation: en.generation,
+            workers_exited: true,
+            unknown_effects_reconciled: true,
+            validation_succeeded: true,
+        })
+        .unwrap()
+        .revision
+}
+
 pub struct NoopFetcher;
 impl Fetcher for NoopFetcher {
     fn fetch(&self, _req: &FetchRequest) -> Result<String, IndexerError> {
@@ -267,14 +381,15 @@ pub fn setup_state(
             enabled: true,
         })
         .unwrap();
+    install_cm_boost_plugin(state.store().as_ref());
     (state, site_id, dl_id)
 }
 
 pub fn save_boost_config(state: &ApiState, values: Value) {
     let store = state.store();
-    let p = store.get_plugin("builtin.boost").unwrap().unwrap();
+    let p = store.get_plugin(BOOST_PLUGIN_ID).unwrap().unwrap();
     let schema = store
-        .get_plugin_config_summary("builtin.boost")
+        .get_plugin_config_summary(BOOST_PLUGIN_ID)
         .unwrap()
         .config
         .map(|c| c.schema_revision)
@@ -297,7 +412,7 @@ pub fn save_boost_config(state: &ApiState, values: Value) {
             .unwrap();
     }
     let saved = store
-        .save_plugin_config("builtin.boost", cur.revision, &schema, &values)
+        .save_plugin_config(BOOST_PLUGIN_ID, cur.revision, &schema, &values)
         .unwrap();
     let en = store
         .begin_plugin_lifecycle(&saved.plugin_id, saved.revision, uuid::Uuid::new_v4(), true)
@@ -338,6 +453,8 @@ pub fn boost_plan(
             imdb_id: None,
             detail_url: None,
             category: None,
+            free_2x: false,
+            free_until: None,
         },
         source: TorrentSource::from_url(url).unwrap(),
         purpose: SubmissionPurpose::Boost,
@@ -352,13 +469,13 @@ pub fn boost_plan(
         force: false,
         save_path: None,
         category: None,
-        tags: vec!["plugin:builtin.boost:auto".into()],
+        tags: vec![format!("plugin:{BOOST_PLUGIN_ID}:auto")],
         paused: false,
         upload_limit: None,
         download_limit: None,
         sequential: false,
         first_last_piece: false,
-        budget_key: Some(format!("builtin.boost:{dl_id}")),
+        budget_key: Some(format!("{BOOST_PLUGIN_ID}:{dl_id}")),
         plan_digest: None,
     }
 }
@@ -367,9 +484,9 @@ pub fn boost_ctx(key: &str) -> api::DownloadOpContext {
     api::DownloadOpContext {
         operation_id: PluginOperationId::new(),
         cause_id: format!("cause-{key}"),
-        subject: "builtin.boost".into(),
+        subject: BOOST_PLUGIN_ID.into(),
         idempotency_key: key.into(),
-        plugin_id: Some("builtin.boost".into()),
+        plugin_id: Some(BOOST_PLUGIN_ID.into()),
         generation: Some(1),
         config_revision: None,
         dry_run: false,
@@ -397,8 +514,8 @@ pub fn seed_boost_task(
             idempotency_key: format!("ik-{tag}"),
             source_kind: "boost".into(),
             subscribe_id: None,
-            plugin_id: Some("builtin.boost".into()),
-            subject: "builtin.boost".into(),
+            plugin_id: Some(BOOST_PLUGIN_ID.into()),
+            subject: BOOST_PLUGIN_ID.into(),
             cause_id: "seed".into(),
             site_id: Some(site_id),
             downloader_id: Some(dl_id),
@@ -419,8 +536,8 @@ pub fn seed_boost_task(
             info_hash: Some(hash.into()),
             operation_id: op_id,
             subscribe_id: None,
-            plugin_id: Some("builtin.boost".into()),
-            subject: "builtin.boost".into(),
+            plugin_id: Some(BOOST_PLUGIN_ID.into()),
+            subject: BOOST_PLUGIN_ID.into(),
             site_id: Some(site_id),
             enclosure: format!("https://pt.example/{tag}.torrent"),
             ownership_state: DownloadOwnershipState::Owned,
@@ -433,8 +550,8 @@ pub fn seed_boost_task(
     store
         .upsert_boost_task_fact(&UpsertBoostTaskFactInput {
             task_fact_id: format!("tf-{tag}"),
-            plugin_id: "builtin.boost".into(),
-            quota_key: format!("builtin.boost:{dl_id}"),
+            plugin_id: BOOST_PLUGIN_ID.into(),
+            quota_key: format!("{BOOST_PLUGIN_ID}:{dl_id}"),
             downloader_id: dl_id,
             site_id: Some(site_id),
             ownership_tag: tag.into(),

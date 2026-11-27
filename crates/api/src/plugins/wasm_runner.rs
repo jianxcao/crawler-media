@@ -157,41 +157,6 @@ fn resolve_endpoint_component(
     ))
 }
 
-fn try_run_builtin_task(
-    state: &ApiState,
-    invocation: &PluginTaskInvocation,
-    version: Option<&PluginVersionMetadata>,
-) -> Option<Result<(), String>> {
-    let is_builtin = version.is_some_and(|v| v.signature_status == "builtin");
-    if !is_builtin {
-        return None;
-    }
-    let builtin_inv =
-        plugin_host::Invocation::new(invocation.plugin.plugin_id.clone(), Duration::from_secs(60));
-    let enter_flight = || {
-        state
-            .plugins
-            .in_flight()
-            .try_enter(
-                &invocation.plugin.plugin_id,
-                invocation.authority.generation(),
-                &builtin_inv,
-            )
-            .map_err(|e| e.to_string())
-    };
-    match invocation.plugin.plugin_id.as_str() {
-        super::builtins::BUILTIN_CHECKIN_PLUGIN_ID => Some(
-            enter_flight()
-                .and_then(|_flight| super::builtins::run_builtin_checkin_task(state, invocation)),
-        ),
-        super::boost::BUILTIN_BOOST_PLUGIN_ID => Some(
-            enter_flight()
-                .and_then(|_flight| super::boost::run_builtin_boost_task(state, invocation)),
-        ),
-        _ => None,
-    }
-}
-
 fn register_task_invocation(
     state: &ApiState,
     invocation: &PluginTaskInvocation,
@@ -247,9 +212,6 @@ impl PluginTaskRunner for WasmTaskRunner {
                 &invocation.plugin.package_hash,
             )
             .map_err(|e| e.to_string())?;
-        if let Some(res) = try_run_builtin_task(state, invocation, version.as_ref()) {
-            return res;
-        }
         let (comp_entry, comp_perms) = resolve_task_component(
             &invocation.plugin.plugin_id,
             version.as_ref(),
@@ -303,6 +265,10 @@ impl PluginTaskRunner for WasmTaskRunner {
             .map_err(|e| e.to_string())?;
         let _guard =
             register_task_invocation(state, invocation, &guest_inv, subject, comp_perms.as_ref())?;
+        let _task_state_guard = state
+            .plugins
+            .ports()
+            .register_task_state(guest_inv.id().to_string(), state.clone());
         let input = TaskInput {
             task_id: invocation.binding.task_id.clone(),
             validated_input,

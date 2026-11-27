@@ -23,6 +23,7 @@ pub mod task_world {
             "crawler:plugin/catalog@1.0.0": crate::bindings::crawler::plugin::catalog,
             "crawler:plugin/operations@1.0.0": crate::bindings::crawler::plugin::operations,
             "crawler:plugin/http@1.0.0": crate::bindings::crawler::plugin::http,
+            "crawler:plugin/boost@1.0.0": crate::bindings::crawler::plugin::boost,
         },
     });
 }
@@ -48,7 +49,7 @@ pub mod endpoint_world {
             "crawler:plugin/operations@1.0.0": crate::bindings::crawler::plugin::operations,
             "crawler:plugin/http@1.0.0": crate::bindings::crawler::plugin::http,
             "crawler:plugin/commands@1.0.0": crate::bindings::task_world::crawler::plugin::commands,
-            "crawler:plugin/boost@1.0.0": crate::bindings::task_world::crawler::plugin::boost,
+            "crawler:plugin/boost@1.0.0": crate::bindings::crawler::plugin::boost,
             "crawler:plugin/indexer-cache@1.0.0": crate::bindings::task_world::crawler::plugin::indexer_cache,
         },
     });

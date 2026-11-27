@@ -1,10 +1,9 @@
 import "./plugin-ui-env";
 
 import assert from "node:assert/strict";
-import path from "node:path";
 import test from "node:test";
-import { pathToFileURL } from "node:url";
 
+import type { PluginSurfaceProps } from "@crawler-media/plugin-ui-sdk";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import React from "react";
 import { MemoryRouter } from "react-router-dom";
@@ -18,12 +17,11 @@ import {
   clearFederationCache,
   descriptorCacheKey,
   loadFederatedSurface,
+  type FederatedContainer,
 } from "../lib/plugins/federation-loader";
 import { extractSchemaDefs, mergeSchemaNode } from "../lib/plugins/schema-helpers";
 import { validateAndNormalizeObject } from "../lib/plugins/schema-validation";
 import { SessionProvider } from "../lib/session";
-
-const REPO_ROOT = path.resolve(import.meta.dirname, "../..");
 
 const ADMIN_SESSION = {
   id: "user-admin",
@@ -426,21 +424,73 @@ test("R12-F3: PluginSchemaForm, BoostConfig, and CheckinConfig render stale save
     assert.deepEqual(schemaSaves[0], { sites: [] });
     r1.unmount();
 
-    // 2) BoostConfig federated bundle with empty catalogs and stale sites + downloader_id
+    // 2) cm.boost Config federated surface with empty catalogs and stale sites + downloader_id
     clearFederationCache();
-    const boostEntry = pathToFileURL(
-      path.join(REPO_ROOT, "examples/plugins/boost/ui/ui-dist/ui/assets/remoteEntry.js"),
-    ).href;
+    const BoostStaleStub: React.FC<PluginSurfaceProps> = ({ host, config }) => {
+      const vals = config?.values ?? {};
+      const initialSites = Array.isArray(vals.sites) ? vals.sites.map(String) : [];
+      const [sites, setSites] = React.useState<string[]>(initialSites);
+      const [dlId, setDlId] = React.useState(typeof vals.downloader_id === "string" ? vals.downloader_id : "");
+      const [catalogSites, setCatalogSites] = React.useState<string[]>([]);
+      const [catalogDls, setCatalogDls] = React.useState<string[]>([]);
+      React.useEffect(() => {
+        const cats = (host as unknown as { catalogs?: { list: (k: string) => Promise<{ items: Array<{ id: string }> }> } }).catalogs;
+        void cats?.list("sites").then((r) => setCatalogSites(r.items.map((x) => x.id)));
+        void cats?.list("downloaders").then((r) => setCatalogDls(r.items.map((x) => x.id)));
+      }, [host]);
+      const allSites = Array.from(new Set([...catalogSites, ...initialSites]));
+      const allDls = Array.from(new Set([...catalogDls, ...(dlId ? [dlId] : [])]));
+      return (
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            const out: Record<string, unknown> = { ...vals, sites };
+            if (dlId) out.downloader_id = dlId;
+            else delete out.downloader_id;
+            void config?.save(out);
+          }}
+        >
+          {allSites.map((sid) => (
+            <label key={sid}>
+              <input
+                type="checkbox"
+                checked={sites.includes(sid)}
+                onChange={(e) =>
+                  setSites((prev) => (e.target.checked ? [...prev, sid] : prev.filter((x) => x !== sid)))
+                }
+              />
+              {sid}
+            </label>
+          ))}
+          <label>
+            目标下载器
+            <select value={dlId} onChange={(e) => setDlId(e.target.value)}>
+              <option value="">默认</option>
+              {allDls.map((id) => (
+                <option key={id} value={id}>
+                  {id}
+                </option>
+              ))}
+            </select>
+          </label>
+          <button type="submit">保存刷流配置</button>
+        </form>
+      );
+    };
+    const boostContainer: FederatedContainer = {
+      init: () => {},
+      get: async () => () => ({ default: BoostStaleStub }),
+    };
     const BoostConfig = await loadFederatedSurface(
       makeDescriptor({
-        plugin_id: "builtin.boost",
-        remote_name: "cmBuiltinBoost",
-        package_hash: "builtin:boost:1.0.0",
-        entry_url: boostEntry,
+        plugin_id: "cm.boost",
+        remote_name: "cmBoost",
+        package_hash: "cm:boost:1.0.0",
+        entry_url: "/api/v1/plugin-ui-assets/cm.boost/cm:boost:1.0.0/ui/assets/remoteEntry.js",
         styles: [],
       }),
       "./Config",
-      { fetchManifest: async () => [], importRemote: (url) => import(url) },
+      { fetchManifest: async () => [], importRemote: async () => boostContainer },
     );
     const stubHost = {
       catalogs: {
@@ -476,20 +526,55 @@ test("R12-F3: PluginSchemaForm, BoostConfig, and CheckinConfig render stale save
     assert.equal("downloader_id" in boostSaves[0], false);
     r2.unmount();
 
-    // 3) CheckinConfig federated bundle with empty catalogs and stale site_id
-    const checkinEntry = pathToFileURL(
-      path.join(REPO_ROOT, "examples/plugins/checkin/ui/ui-dist/ui/assets/remoteEntry.js"),
-    ).href;
+    // 3) cm.checkin Config federated surface with empty catalogs and stale site_id
+    const CheckinStaleStub: React.FC<PluginSurfaceProps> = ({ host, config }) => {
+      const vals = config?.values ?? {};
+      const [siteId, setSiteId] = React.useState(typeof vals.site_id === "string" ? vals.site_id : "");
+      const [catalogSites, setCatalogSites] = React.useState<string[]>([]);
+      React.useEffect(() => {
+        const cats = (host as unknown as { catalogs?: { list: (k: string) => Promise<{ items: Array<{ id: string }> }> } }).catalogs;
+        void cats?.list("sites").then((r) => setCatalogSites(r.items.map((x) => x.id)));
+      }, [host]);
+      const allSites = Array.from(new Set([...catalogSites, ...(siteId ? [siteId] : [])]));
+      return (
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            const out: Record<string, unknown> = { ...vals };
+            if (siteId) out.site_id = siteId;
+            else delete out.site_id;
+            void config?.save(out);
+          }}
+        >
+          <label>
+            默认站点
+            <select value={siteId} onChange={(e) => setSiteId(e.target.value)}>
+              <option value="">全部站点</option>
+              {allSites.map((id) => (
+                <option key={id} value={id}>
+                  {id}
+                </option>
+              ))}
+            </select>
+          </label>
+          <button type="submit">保存签到设置</button>
+        </form>
+      );
+    };
+    const checkinContainer: FederatedContainer = {
+      init: () => {},
+      get: async () => () => ({ default: CheckinStaleStub }),
+    };
     const CheckinConfig = await loadFederatedSurface(
       makeDescriptor({
-        plugin_id: "builtin.checkin",
-        remote_name: "cmBuiltinCheckin",
-        package_hash: "builtin:checkin:1.0.0",
-        entry_url: checkinEntry,
+        plugin_id: "cm.checkin",
+        remote_name: "cmCheckin",
+        package_hash: "cm:checkin:1.0.0",
+        entry_url: "/api/v1/plugin-ui-assets/cm.checkin/cm:checkin:1.0.0/ui/assets/remoteEntry.js",
         styles: [],
       }),
       "./Config",
-      { fetchManifest: async () => [], importRemote: (url) => import(url) },
+      { fetchManifest: async () => [], importRemote: async () => checkinContainer },
     );
     const checkinSaves: Array<Record<string, unknown>> = [];
     render(

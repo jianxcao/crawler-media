@@ -149,6 +149,8 @@ fn subscribe_filter_after_and_score_share_budget_and_retry_uses_distinct_idempot
         imdb_id: None,
         detail_url: None,
         category: None,
+        free_2x: false,
+        free_until: None,
     };
     let dl = MemoryDownloader::new(Path::new("/tmp/cm-sub-test"));
     let order = Arc::new(Mutex::new(Vec::new()));
@@ -296,6 +298,8 @@ fn subscribe_policy_hooks_receive_parsed_published_at_ms_across_timestamp_format
         imdb_id: None,
         detail_url: None,
         category: None,
+        free_2x: false,
+        free_until: None,
     };
     let captured = Arc::new(Mutex::new(Vec::new()));
     let hooks = CapturePublished(Arc::clone(&captured));
@@ -427,6 +431,8 @@ fn subscribe_select_defer_drops_filtered_handles_and_populates_select_deferred()
         imdb_id: None,
         detail_url: None,
         category: None,
+        free_2x: false,
+        free_until: None,
     };
     let dl = MemoryDownloader::new(Path::new("/tmp/cm-sub-select-defer"));
     let policy = SelectFilterThenDeferPolicy;
@@ -602,6 +608,8 @@ fn subscribe_select_defer_after_source_fallback_populates_select_deferred() {
         imdb_id: None,
         detail_url: None,
         category: None,
+        free_2x: false,
+        free_until: None,
     };
     let dl = MemoryDownloader::new(Path::new("/tmp/cm-sub-fallback-defer"));
     let policy = DeferOnSecondRoundPolicy(Mutex::new(0));

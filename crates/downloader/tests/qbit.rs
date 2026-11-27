@@ -167,6 +167,8 @@ fn torrent_at(enclosure: &str) -> Torrent {
         detail_url: None,
         category: None,
         poster_url: None,
+        free_2x: false,
+        free_until: None,
     }
 }
 
@@ -369,6 +371,28 @@ fn task_snapshots_extract_our_tag_and_live_state() {
         )]
     );
     assert_eq!(snapshot.state, "stalledDL");
+
+    // Detailed telemetry fields from qBittorrent /api/v2/torrents/info
+    *capture.injected_infos.lock() = Some(
+        r#"[{"hash":"aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111","name":"Show.S01","progress":1.0,"save_path":"/downloads/boost","state":"uploading","category":"boost","tags":"crawler-media,cm-op:op1,plugin:cm.boost:auto,站点-Audiences","size":2000,"downloaded":2000,"uploaded":6000,"dlspeed":0,"upspeed":4096,"ratio":3.0,"seeding_time":7200,"added_on":1700000000,"completion_on":1700000600,"last_activity":1700007800}]"#
+            .into(),
+    );
+    let rich = dl.task_snapshots().unwrap();
+    assert_eq!(rich.len(), 1);
+    let item = &rich[0];
+    assert!((item.ratio - 3.0).abs() < f64::EPSILON);
+    assert_eq!(item.seeding_secs, 7200);
+    assert_eq!(item.added_at, Some(1_700_000_000));
+    assert_eq!(item.completed_at, Some(1_700_000_600));
+    assert_eq!(item.last_activity_at, Some(1_700_007_800));
+    assert_eq!(item.category.as_deref(), Some("boost"));
+    assert_eq!(
+        item.user_tags,
+        vec![
+            "plugin:cm.boost:auto".to_string(),
+            "站点-Audiences".to_string()
+        ]
+    );
 }
 
 #[test]

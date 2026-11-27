@@ -68,6 +68,17 @@ interface boost {
   record task-fact-view {
     handle: string, quota-key: string, downloader-id: string,
     site-id: option<string>, info-hash: string, state: string,
+    title: string,
+    progress-permille: u32,
+    downloaded-bytes: u64,
+    upload-speed: u64,
+    download-speed: u64,
+    seeding-secs: u64,
+    added-at: option<u64>,
+    completed-at: option<u64>,
+    last-activity-at: option<u64>,
+    category: option<string>,
+    tags: list<string>,
     task-bytes: u64, retained-bytes: u64, uploaded-bytes: u64,
     hr-protected: option<bool>, hold-until: option<u64>, free-until: option<u64>,
     protection-state: string, transfer-active: bool, library-referenced: bool,
@@ -78,6 +89,7 @@ interface boost {
     reservations: list<reservation-view>, tasks: list<task-fact-view>, disk: disk,
   }
   snapshot: func(sites: list<string>, downloaders: list<string>) -> result<snapshot-view, api-error>;
+  run-cycle: func(override-json: string) -> result<string, api-error>;
 }
 interface history {
   use types.{api-error, entity-page, page-request};

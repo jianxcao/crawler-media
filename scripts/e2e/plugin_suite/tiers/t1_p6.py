@@ -21,6 +21,7 @@ from ._helpers import (
     ensure_plugin_enabled,
     ensure_site,
     grant_ui_trust,
+    install_first_party_cm_plugin,
     make_temp_web_dir,
     obtain_reauth,
     pin_trust_key,
@@ -44,6 +45,8 @@ def _find_first_party_plugin(ctx: TestContext, preferred_ids: tuple, keyword: st
     for p in plugins:
         if keyword in str(p.get("id", "")).lower():
             return p
+    if preferred_ids and preferred_ids[0] in ("cm.checkin", "cm.boost"):
+        return install_first_party_cm_plugin(ctx, str(preferred_ids[0]))
     raise UnimplementedFeatureError(f"First-party plugin ({keyword})", "not installed in /api/v1/plugins")
 
 
@@ -624,7 +627,7 @@ def register_cases(registry: SuiteRegistry) -> None:
         self_test=False,
     )
     def test_f26_checkin_ui_discovery(ctx: TestContext) -> None:
-        p = _find_first_party_plugin(ctx, ("builtin.checkin", "org.example.checkin"), "checkin")
+        p = _find_first_party_plugin(ctx, ("cm.checkin", "org.example.checkin"), "checkin")
         pid = p["id"]
         desc = ctx.call_phase1("GET", f"/api/v1/plugins/{pid}/ui")
         kinds = {s["kind"] for s in desc["surfaces"]}
@@ -649,7 +652,7 @@ def register_cases(registry: SuiteRegistry) -> None:
     def test_f26_checkin_ui_readonly_then_run(ctx: TestContext) -> None:
         pt = ctx.new_pt_site(expected_cookie="uid=42; pass=valid")
         site = ensure_site(ctx, pt.url, profile_id="pterclub")
-        p = _find_first_party_plugin(ctx, ("builtin.checkin", "org.example.checkin"), "checkin")
+        p = _find_first_party_plugin(ctx, ("cm.checkin", "org.example.checkin"), "checkin")
         pid = p["id"]
         if p.get("lifecycle") != "enabled":
             enable_plugin(ctx, pid, revision=int(p["revision"]))
@@ -682,7 +685,7 @@ def register_cases(registry: SuiteRegistry) -> None:
         qb = ctx.new_qbit()
         dl = ensure_downloader(ctx, qb.url)
         site = ensure_site(ctx, pt.url, profile_id="pterclub")
-        p = _find_first_party_plugin(ctx, ("builtin.boost", "org.example.boost"), "boost")
+        p = _find_first_party_plugin(ctx, ("cm.boost", "org.example.boost"), "boost")
         pid = p["id"]
         if p.get("lifecycle") != "enabled":
             enable_plugin(ctx, pid, revision=int(p["revision"]))
@@ -720,7 +723,7 @@ def register_cases(registry: SuiteRegistry) -> None:
         qb = ctx.new_qbit(real_save_dir=save_dir)
         dl = ensure_downloader(ctx, qb.url)
         site = ensure_site(ctx, pt.url, profile_id="pterclub")
-        p = _find_first_party_plugin(ctx, ("builtin.boost", "org.example.boost"), "boost")
+        p = _find_first_party_plugin(ctx, ("cm.boost", "org.example.boost"), "boost")
         pid = p["id"]
         ensure_plugin_enabled(ctx, pid)
         add_op = ctx.call_phase1(

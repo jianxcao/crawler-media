@@ -58,6 +58,7 @@ pub const DEFAULT_ALLOWED_COMMANDS: &[&str] = &[
     "downloader.delete-task",
     "downloader.prepare-cleanup",
     "downloader.delete-files",
+    "boost.run",
     "notify.send",
     "schedule.set",
     "schedule.disable",

@@ -511,6 +511,8 @@ async fn transfer_does_not_ledger_a_stale_mismatched_pending_torrent() {
                         detail_url: None,
                         category: None,
                         poster_url: None,
+                        free_2x: false,
+                        free_until: None,
                     },
                     release_override: None,
                     downloader_id: None,
@@ -671,6 +673,8 @@ fn make_test_delivery_torrent() -> domain::Torrent {
         detail_url: None,
         category: None,
         poster_url: None,
+        free_2x: false,
+        free_until: None,
     }
 }
 

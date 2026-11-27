@@ -18,7 +18,6 @@ use uuid::Uuid;
 use crate::support::plugin_http_support::{
     HttpEnv, TOKEN, admin_id, assert_err, assert_ok, pkg, req_json,
 };
-use crate::support::seed_boost_task;
 use crate::{env_with_dl_maps, http_canon_req};
 
 fn dummy_req(tag: u8) -> CanonicalPluginRequest {
@@ -218,9 +217,13 @@ async fn slice_e_r5_item1b_non_staged_resume_projects_job_and_cleanup_token_repl
     std::fs::write(&victim, b"payload").unwrap();
     let dl = Arc::new(MemoryDownloader::new(stage.clone()));
     let (env, site_id, dl_id) = env_with_dl_maps(dir, dl, vec![]);
+    crate::support::plugin_http_support::plugins_fixture::install_cm_boost(
+        &env, false, false, false,
+    )
+    .await;
     let store = env.state.store();
 
-    let boost_rec = store.get_plugin("builtin.boost").unwrap().unwrap();
+    let boost_rec = store.get_plugin("cm.boost").unwrap().unwrap();
     let auth = store
         .issue_plugin_state_authority(&boost_rec, None)
         .unwrap();
@@ -235,7 +238,7 @@ async fn slice_e_r5_item1b_non_staged_resume_projects_job_and_cleanup_token_repl
         .accept_plugin_command(
             &cmd_auth,
             &AcceptPluginOperation {
-                plugin_id: Some("builtin.boost".into()),
+                plugin_id: Some("cm.boost".into()),
                 subject: PluginSubject::User(admin_id()),
                 idempotency_key: "r5-blocked-cmd".into(),
                 request: dummy_req(20),
@@ -311,7 +314,7 @@ async fn assert_cleanup_token_consumed_wal_replay(
     victim: &std::path::Path,
 ) {
     let store = env.state.store();
-    let tf_id = seed_boost_task(
+    let tf_id = crate::support::plugin_http_support::plugins_fixture::seed_cm_boost_task(
         store.as_ref(),
         dl_id,
         site_id,
@@ -341,7 +344,7 @@ async fn assert_cleanup_token_consumed_wal_replay(
     let (st_p, _, b_p) = env
         .send(req_json(
             "GET",
-            "/api/v1/plugins/builtin.boost/brush-cleanup-preview?plan_handle=r5-plan-replay",
+            "/api/v1/plugins/cm.boost/brush-cleanup-preview?plan_handle=r5-plan-replay",
             Some(TOKEN),
             &[],
             None,
@@ -352,7 +355,7 @@ async fn assert_cleanup_token_consumed_wal_replay(
         .unwrap()
         .to_string();
 
-    let rev = env.get_plugin_rev("builtin.boost").await;
+    let rev = env.get_plugin_rev("cm.boost").await;
     let idem = "r5-df-wal-replay";
     let cmd_body = json!({
         "kind": "downloader.delete-files",
@@ -365,7 +368,7 @@ async fn assert_cleanup_token_consumed_wal_replay(
     let mk_req = || {
         req_json(
             "POST",
-            "/api/v1/plugins/builtin.boost/commands",
+            "/api/v1/plugins/cm.boost/commands",
             Some(TOKEN),
             &[
                 ("if-match", &format!("\"{rev}\"")),
@@ -374,7 +377,7 @@ async fn assert_cleanup_token_consumed_wal_replay(
             Some(cmd_body.clone()),
         )
     };
-    let _ = http_canon_req("POST", "/plugins/builtin.boost/commands", &cmd_body);
+    let _ = http_canon_req("POST", "/plugins/cm.boost/commands", &cmd_body);
     let ((st1, _, b1), (st2, _, b2)) = tokio::join!(env.send(mk_req()), env.send(mk_req()));
     let op1 = assert_ok(st1, &b1, StatusCode::ACCEPTED);
     let op2 = assert_ok(st2, &b2, StatusCode::ACCEPTED);

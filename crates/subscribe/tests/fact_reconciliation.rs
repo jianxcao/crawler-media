@@ -82,6 +82,8 @@ fn tv_fixtures() -> (Media, domain::Subscribe, domain::Filter, Torrent) {
         detail_url: None,
         category: None,
         poster_url: None,
+        free_2x: false,
+        free_until: None,
     };
     (media, sub, filter, torrent)
 }

@@ -200,6 +200,8 @@ async fn http_subscription_task_deduplicates_with_ownership_and_turns_missing_af
         detail_url: None,
         category: None,
         poster_url: None,
+        free_2x: false,
+        free_until: None,
     };
 
     dl_mem

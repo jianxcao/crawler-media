@@ -19,8 +19,8 @@ use super::plugin_command_ops::{
 };
 use crate::management::ApiState;
 use crate::plugins::boost::{
-    BUILTIN_BOOST_TASK_ID, compute_plan_digest, expand_path_set_off_lock,
-    expand_protection_sets_off_lock, extract_plan_paths,
+    compute_plan_digest, expand_path_set_off_lock, expand_protection_sets_off_lock,
+    extract_plan_paths,
 };
 use crate::plugins::command_targets::grant_scopes_cover_downloader;
 use crate::plugins::{ExternalEffectStep, PluginEffectContext};
@@ -624,7 +624,7 @@ pub(crate) fn auto_cleanup_retained_task(
     .map_err(|e| e.to_string())?;
     let subject = PluginSubject::Task {
         plugin_id: plugin.plugin_id.clone(),
-        task_id: BUILTIN_BOOST_TASK_ID.into(),
+        task_id: "boost.cycle".into(),
     };
     let cause = PluginCommandCause::root("auto-cleanup");
     let ctx = PluginEffectContext {

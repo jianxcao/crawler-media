@@ -365,21 +365,13 @@ pub(crate) fn resolve_hook_invoker(
     state: &ApiState,
     host: &plugin_host::PluginHost,
     plugin: &PluginRecord,
-    version: &PluginVersionMetadata,
+    _version: &PluginVersionMetadata,
     comp: &plugin_package::ComponentManifest,
     hook_id: &str,
     authority_mode: PolicyAuthority,
     trust: plugin_api::PluginTrust,
     timeout_ms: u64,
 ) -> Option<Arc<dyn hooks::PluginInvoker>> {
-    if version.signature_status == "builtin" && comp.entry == "builtin" {
-        return match (plugin.plugin_id.as_str(), hook_id) {
-            (crate::plugins::boost::BUILTIN_BOOST_PLUGIN_ID, "download.before") => Some(Arc::new(
-                crate::plugins::boost::BuiltinBoostDownloadGate::new(state.clone(), plugin.clone()),
-            )),
-            _ => None,
-        };
-    }
     let deps = HostDeps::from_state(state);
     resolve_wasm_hook_invoker(
         &state.plugins,

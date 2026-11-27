@@ -109,7 +109,7 @@ fn seed_owned_task(
             idempotency_key: format!("ik-{op_id}"),
             source_kind: "plugin".into(),
             subscribe_id: None,
-            plugin_id: Some("builtin.boost".into()),
+            plugin_id: Some("cm.boost".into()),
             subject: "system".into(),
             cause_id: format!("c-{op_id}"),
             site_id: Some(site_id),
@@ -131,7 +131,7 @@ fn seed_owned_task(
             info_hash: info_hash.map(str::to_string),
             operation_id: op_id.into(),
             subscribe_id: None,
-            plugin_id: Some("builtin.boost".into()),
+            plugin_id: Some("cm.boost".into()),
             subject: "system".into(),
             site_id: Some(site_id),
             enclosure: enclosure.into(),
@@ -206,6 +206,8 @@ async fn seed_subscribe_pending(
         imdb_id: None,
         detail_url: None,
         category: None,
+        free_2x: false,
+        free_until: None,
     };
     env.state
         .store()
@@ -246,6 +248,7 @@ async fn member_tasks_endpoint_redacts_enclosure_secrets_matches_ownership_tag_a
         upload_speed: 0,
         info_hash: shared_hash.into(),
         owned_tags: vec![downloader::ownership_tag("https://pt.example/sub.torrent")],
+        ..Default::default()
     });
     dl_mem.push_snapshot(TaskSnapshot {
         tag: String::new(),
@@ -259,6 +262,7 @@ async fn member_tasks_endpoint_redacts_enclosure_secrets_matches_ownership_tag_a
         upload_speed: 0,
         info_hash: tagonly_hash.into(),
         owned_tags: vec!["cm-op:op-r8-tagonly".into()],
+        ..Default::default()
     });
     seed_subscribe_pending(&env, site_id, dl_a, shared_hash).await;
 

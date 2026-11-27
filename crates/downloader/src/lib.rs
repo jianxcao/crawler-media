@@ -22,7 +22,7 @@ pub(crate) use http::agent_for_url;
 pub use identity::{
     core_titles_compatible, has_sample_mismatch, release_units_agree, torrent_matches_snapshot,
 };
-pub use memory::MemoryDownloader;
+pub use memory::{MemoryDownloader, MemoryTaskMetrics};
 pub(crate) use name_matching::{extract_name_tokens, size_matches};
 pub use name_matching::{names_match, normalize_name};
 pub use owned::{magnet_info_hash, ownership_tag, unproven};
@@ -33,7 +33,7 @@ pub(crate) use selection::selection_drops_all_videos;
 pub(crate) use snapshot::is_instance_owned_tag;
 pub use snapshot::{
     CLAIMED_TAG, OWNED_TAG_PREFIX, TASK_TAG, TaskSnapshot, is_reserved_system_tag, owned_tags_from,
-    validate_category_name,
+    user_tags_from, validate_category_name,
 };
 pub use submit::{
     DownloadOpContext, DownloadOutcome, DownloadSubmitError, DownloadSubmitter, FrozenDownloadPlan,

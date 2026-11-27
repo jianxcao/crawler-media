@@ -24,6 +24,10 @@ pub enum CliCommand {
         package: PathBuf,
         key: PathBuf,
     },
+    Keygen {
+        key: PathBuf,
+        pubkey: PathBuf,
+    },
     Dev(DevArgs),
 }
 
@@ -55,6 +59,7 @@ Subcommands:
   build      Build WASM component and React federation UI assets
   pack       Package a built plugin project into a .cmplugin archive
   sign       Sign a .cmplugin package using an Ed25519 seed or minisign key
+  keygen     Generate an Ed25519 signing seed and minisign public key
   dev        Build and sideload a development package onto a running instance";
 
 pub fn parse_args(args: &[String]) -> Result<CliCommand, CliError> {
@@ -72,6 +77,7 @@ pub fn parse_args(args: &[String]) -> Result<CliCommand, CliError> {
         "build" => parse_build(rest),
         "pack" => parse_pack(rest),
         "sign" => parse_sign(rest),
+        "keygen" => parse_keygen(rest),
         "dev" => parse_dev(rest),
         other => Err(CliError::Usage(format!(
             "unknown plugin subcommand `{other}`\n\n{MAIN_USAGE}"
@@ -282,6 +288,47 @@ fn parse_sign(args: &[String]) -> Result<CliCommand, CliError> {
     }
     match (package, key) {
         (Some(p), Some(k)) => Ok(CliCommand::Sign { package: p, key: k }),
+        _ => Err(CliError::Usage(HELP.to_string())),
+    }
+}
+
+fn parse_keygen(args: &[String]) -> Result<CliCommand, CliError> {
+    const HELP: &str =
+        "Usage: crawler-media plugin keygen --key <secret_path> --pubkey <pubkey_path>";
+    if has_help_flag(args) {
+        return Ok(CliCommand::Help(HELP.to_string()));
+    }
+    let mut key: Option<PathBuf> = None;
+    let mut pubkey: Option<PathBuf> = None;
+    let mut i = 0;
+    while i < args.len() {
+        let arg = &args[i];
+        match arg.as_str() {
+            "--key" | "-k" => {
+                if key.is_some() {
+                    return Err(CliError::Usage(format!("duplicate --key flag\n{HELP}")));
+                }
+                key = Some(PathBuf::from(next_val(args, &mut i, "--key")?));
+            }
+            "--pubkey" => {
+                if pubkey.is_some() {
+                    return Err(CliError::Usage(format!("duplicate --pubkey flag\n{HELP}")));
+                }
+                pubkey = Some(PathBuf::from(next_val(args, &mut i, "--pubkey")?));
+            }
+            other if other.starts_with('-') => {
+                return Err(CliError::Usage(format!("unknown flag `{other}`\n{HELP}")));
+            }
+            positional => {
+                return Err(CliError::Usage(format!(
+                    "unexpected argument `{positional}`\n{HELP}"
+                )));
+            }
+        }
+        i += 1;
+    }
+    match (key, pubkey) {
+        (Some(k), Some(p)) => Ok(CliCommand::Keygen { key: k, pubkey: p }),
         _ => Err(CliError::Usage(HELP.to_string())),
     }
 }

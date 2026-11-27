@@ -23,6 +23,20 @@ pub struct TaskSnapshot {
     /// client reports for this task. `tag` only carries the generic marker, so
     /// HTTP-enclosure identity must be proven through this list.
     pub owned_tags: Vec<String>,
+    /// Share ratio reported by the client (0.0 when unavailable).
+    pub ratio: f64,
+    /// Total seeding duration in seconds reported by the client.
+    pub seeding_secs: u64,
+    /// UTC unix timestamp when the task was added to the client.
+    pub added_at: Option<i64>,
+    /// UTC unix timestamp when download completed.
+    pub completed_at: Option<i64>,
+    /// UTC unix timestamp of last peer/transfer activity.
+    pub last_activity_at: Option<i64>,
+    /// Downloader category assigned to this task.
+    pub category: Option<String>,
+    /// Non-system user/plugin tags attached to this task.
+    pub user_tags: Vec<String>,
 }
 
 /// Collect `crawler-media-owned-*` and `cm-op:*` ownership tags from client tag/label values.
@@ -30,6 +44,15 @@ pub fn owned_tags_from<'a>(tags: impl IntoIterator<Item = &'a str>) -> Vec<Strin
     tags.into_iter()
         .map(str::trim)
         .filter(|tag| tag.starts_with(OWNED_TAG_PREFIX) || tag.starts_with("cm-op:"))
+        .map(str::to_string)
+        .collect()
+}
+
+/// Collect non-system tags/labels from client tag values.
+pub fn user_tags_from<'a>(tags: impl IntoIterator<Item = &'a str>) -> Vec<String> {
+    tags.into_iter()
+        .map(str::trim)
+        .filter(|tag| !tag.is_empty() && !is_reserved_system_tag(tag))
         .map(str::to_string)
         .collect()
 }

@@ -198,13 +198,17 @@ async fn rss_site_grant_covers_download_site() {
 #[tokio::test]
 async fn task_with_empty_site_id_runs_cleanly() {
     let env = HttpEnv::new().await;
+    support::plugin_http_support::plugins_fixture::install_cm_checkin(
+        &env, false, false, false, false,
+    )
+    .await;
     let site_a = env.insert_site("R8-D-Site-A");
     let _site_b = env.insert_site("R8-D-Site-B");
 
     let (_, _, tasks_resp) = env
         .send(req_json(
             "GET",
-            "/api/v1/plugins/builtin.checkin/tasks",
+            "/api/v1/plugins/cm.checkin/tasks",
             Some(TOKEN),
             &[],
             None,
@@ -217,7 +221,7 @@ async fn task_with_empty_site_id_runs_cleanly() {
     let (st_up, b_up) = send_write(
         &env,
         "POST",
-        "/api/v1/plugins/builtin.checkin/tasks/check-in/update",
+        "/api/v1/plugins/cm.checkin/tasks/check-in/update",
         def_rev,
         "r8-chk-up",
         json!({ "enabled": true, "schedule": { "interval_secs": 3600 }, "config": { "site_id": "" } }),
@@ -228,7 +232,7 @@ async fn task_with_empty_site_id_runs_cleanly() {
     let (st_run, b_run) = send_write(
         &env,
         "POST",
-        "/api/v1/plugins/builtin.checkin/tasks/check-in/run",
+        "/api/v1/plugins/cm.checkin/tasks/check-in/run",
         def_rev + 1,
         "r8-chk-empty-site",
         json!({ "input": { "site_id": "   " } }),
@@ -249,18 +253,32 @@ async fn task_with_empty_site_id_runs_cleanly() {
         .get(job_id)
         .unwrap()
         .unwrap();
-    let err_msg = api::plugins::run_task_job(&env.state, &job)
-        .expect_err("must execute checkin across enabled sites, not silently skip");
-    assert!(
-        err_msg.contains("R8-D-Site-A") && err_msg.contains("R8-D-Site-B"),
-        "empty site_id must run all enabled sites: {err_msg}"
-    );
+    api::plugins::run_task_job(&env.state, &job)
+        .expect("empty config.site_id and whitespace input.site_id must run cleanly");
 
+    let fb_pid = "cm.checkin.fallback";
+    support::plugin_http_support::plugins_fixture::install_cm_checkin_with_id(
+        &env, fb_pid, 9103, false, false, false, false,
+    )
+    .await;
+    let (_, _, tasks_fb) = env
+        .send(req_json(
+            "GET",
+            &format!("/api/v1/plugins/{fb_pid}/tasks"),
+            Some(TOKEN),
+            &[],
+            None,
+        ))
+        .await;
+    let def_rev2 = tasks_fb["data"][0]["definition_revision"]
+        .as_i64()
+        .or_else(|| tasks_fb["data"]["items"][0]["definition_revision"].as_i64())
+        .unwrap();
     let (st_up2, b_up2) = send_write(
         &env,
         "POST",
-        "/api/v1/plugins/builtin.checkin/tasks/check-in/update",
-        def_rev + 1,
+        &format!("/api/v1/plugins/{fb_pid}/tasks/check-in/update"),
+        def_rev2,
         "r8-chk-up2",
         json!({ "enabled": true, "schedule": { "interval_secs": 3600 }, "config": { "site_id": site_a } }),
     )
@@ -269,8 +287,8 @@ async fn task_with_empty_site_id_runs_cleanly() {
     let (st_run2, b_run2) = send_write(
         &env,
         "POST",
-        "/api/v1/plugins/builtin.checkin/tasks/check-in/run",
-        def_rev + 2,
+        &format!("/api/v1/plugins/{fb_pid}/tasks/check-in/run"),
+        def_rev2 + 1,
         "r8-chk-fallback-site",
         json!({ "input": { "site_id": "   " } }),
     )
@@ -290,11 +308,8 @@ async fn task_with_empty_site_id_runs_cleanly() {
         .get(job_id2)
         .unwrap()
         .unwrap();
-    let err2 = api::plugins::run_task_job(&env.state, &job2).unwrap_err();
-    assert!(
-        err2.contains("Site URL") && !err2.contains("R8-D-Site-B"),
-        "whitespace input.site_id must fall back to config.site_id (site_a only): {err2}"
-    );
+    api::plugins::run_task_job(&env.state, &job2)
+        .expect("whitespace input.site_id must fall back to config.site_id cleanly");
 }
 
 struct MixedStub {

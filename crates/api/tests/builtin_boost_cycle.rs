@@ -50,6 +50,8 @@ impl indexer::IndexerProvider for StubBoostProvider {
                 imdb_id: None,
                 detail_url: None,
                 category: None,
+                free_2x: false,
+                free_until: None,
             })
             .collect())
     }
@@ -112,6 +114,7 @@ fn setup_multi_candidate_env(
     .with_plugin_http_policy_override(
         net_guard::TargetPolicy::production().with_test_loopback_socket(srv.addr()),
     );
+    support::install_cm_boost_plugin(state.store().as_ref());
     state.indexer().publish(reg).unwrap();
     let site_id = domain::SiteId::new();
     state
@@ -170,14 +173,14 @@ async fn run_boost_cycle_cmd(
     let rev = env
         .state
         .store()
-        .get_plugin("builtin.boost")
+        .get_plugin(BOOST_PLUGIN_ID)
         .unwrap()
         .unwrap()
         .revision;
     let (st, _, b) = env
         .send(req_json(
             "POST",
-            "/api/v1/plugins/builtin.boost/commands",
+            &format!("/api/v1/plugins/{BOOST_PLUGIN_ID}/commands"),
             Some(TOKEN),
             &[("If-Match", &format!("\"{rev}\"")), ("Idempotency-Key", idem)],
             Some(json!({
@@ -211,7 +214,7 @@ async fn repeated_boost_cycles_and_post_cleanup_readd_do_not_collide_or_leak_res
     let snap = env
         .state
         .store()
-        .get_boost_snapshot_for_plugin("builtin.boost", &[], &[])
+        .get_boost_snapshot_for_plugin(BOOST_PLUGIN_ID, &[], &[])
         .unwrap();
     assert_eq!(snap.reserved_bytes, 0);
     assert_eq!(snap.tasks.len(), 2);
@@ -258,7 +261,7 @@ async fn repeated_boost_cycles_and_post_cleanup_readd_do_not_collide_or_leak_res
     let snap3 = env
         .state
         .store()
-        .get_boost_snapshot_for_plugin("builtin.boost", &[], &[])
+        .get_boost_snapshot_for_plugin(BOOST_PLUGIN_ID, &[], &[])
         .unwrap();
     assert_eq!(snap3.reserved_bytes, 0);
     assert_eq!(snap3.tasks.len(), 2);
@@ -301,13 +304,13 @@ async fn active_duplicate_info_hash_and_unknown_outcome_preserve_hold_and_hr_unk
     assert_eq!(
         state
             .store()
-            .count_boost_adds_since("builtin.boost", 0)
+            .count_boost_adds_since(BOOST_PLUGIN_ID, 0)
             .unwrap(),
         1
     );
     let snap = state
         .store()
-        .get_boost_snapshot_for_plugin("builtin.boost", &[], &[])
+        .get_boost_snapshot_for_plugin(BOOST_PLUGIN_ID, &[], &[])
         .unwrap();
     assert_eq!(snap.reserved_bytes, 0);
 
@@ -334,7 +337,7 @@ async fn active_duplicate_info_hash_and_unknown_outcome_preserve_hold_and_hr_unk
         .info_hash;
     let op_id = st_u
         .store()
-        .get_boost_snapshot_for_plugin("builtin.boost", &[], &[])
+        .get_boost_snapshot_for_plugin(BOOST_PLUGIN_ID, &[], &[])
         .unwrap()
         .reservations[0]
         .operation_id
@@ -362,7 +365,7 @@ async fn active_duplicate_info_hash_and_unknown_outcome_preserve_hold_and_hr_unk
     api::recover_plugin_startup_for_test(&st_u).unwrap();
     let tf = &st_u
         .store()
-        .get_boost_snapshot_for_plugin("builtin.boost", &[], &[])
+        .get_boost_snapshot_for_plugin(BOOST_PLUGIN_ID, &[], &[])
         .unwrap()
         .tasks[0];
     assert_eq!(tf.hr_active, None);
@@ -545,14 +548,14 @@ async fn sequential_duplicate_active_info_hash_does_not_double_charge_budget_or_
     );
     let snap = state
         .store()
-        .get_boost_snapshot_for_plugin("builtin.boost", &[], &[])
+        .get_boost_snapshot_for_plugin(BOOST_PLUGIN_ID, &[], &[])
         .unwrap();
     assert_eq!(snap.used_bytes, 4096);
     assert_eq!(snap.reserved_bytes, 0);
     assert_eq!(
         state
             .store()
-            .count_boost_adds_since("builtin.boost", 0)
+            .count_boost_adds_since(BOOST_PLUGIN_ID, 0)
             .unwrap(),
         1
     );

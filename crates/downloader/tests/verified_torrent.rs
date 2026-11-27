@@ -355,6 +355,8 @@ fn fetch_verified_torrent_follows_validated_redirect_strips_cross_origin_creds_a
         detail_url: None,
         category: None,
         poster_url: None,
+        free_2x: false,
+        free_until: None,
     };
     let mut source = TorrentHttpSource::get(untrusted_torrent.enclosure.clone());
     source.creds = Some(CredentialSlot::new(
@@ -633,6 +635,8 @@ async fn download_submitter_trait_is_object_safe_and_models_all_four_outcomes() 
                 detail_url: None,
                 category: None,
                 poster_url: None,
+                free_2x: false,
+                free_until: None,
             },
             source: TorrentSource::Http(TorrentHttpSource::get("https://pt.example/1.torrent")),
             purpose: SubmissionPurpose::Subscribe,

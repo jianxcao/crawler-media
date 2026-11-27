@@ -676,7 +676,7 @@ fn persist_retained_task(
     }
 }
 
-fn execute_delete_task(
+pub(crate) fn execute_delete_task(
     state: &ApiState,
     plugin_id: &str,
     targets: &[PluginGrantScope],

@@ -42,6 +42,7 @@ const HOOK_IMPORTS: &[&str] = &[
     "operations",
     "http",
     "notify",
+    "boost",
 ];
 const ACTION_IMPORTS: &[&str] = &[
     "types",
@@ -172,8 +173,8 @@ impl PluginHost {
         plugin::history::add_to_linker::<_, HasSelf<_>>(&mut linker, |s| s)?;
         plugin::catalog::add_to_linker::<_, HasSelf<_>>(&mut linker, |s| s)?;
         plugin::notify::add_to_linker::<_, HasSelf<_>>(&mut linker, |s| s)?;
+        plugin::boost::add_to_linker::<_, HasSelf<_>>(&mut linker, |s| s)?;
         task_world::crawler::plugin::commands::add_to_linker::<_, HasSelf<_>>(&mut linker, |s| s)?;
-        task_world::crawler::plugin::boost::add_to_linker::<_, HasSelf<_>>(&mut linker, |s| s)?;
         task_world::crawler::plugin::indexer_cache::add_to_linker::<_, HasSelf<_>>(
             &mut linker,
             |s| s,

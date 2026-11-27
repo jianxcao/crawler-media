@@ -68,7 +68,7 @@ impl CategoryMapping {
     pub(crate) fn ids(&self, requested: &[String]) -> Vec<serde_json::Value> {
         let mut ids = Vec::new();
         for name in requested {
-            let values = match name.as_str() {
+            let values = match name.trim().to_ascii_lowercase().as_str() {
                 "movie" => &self.movie,
                 "tv" => &self.tv,
                 "anime" => &self.anime,
@@ -87,6 +87,81 @@ impl CategoryMapping {
         }
         ids
     }
+
+    pub fn canonical_for_value(&self, raw: &str) -> Option<&'static str> {
+        let cat_id = extract_category_id(raw)?;
+        let lists: [(&'static str, &[serde_json::Value]); 8] = [
+            ("movie", &self.movie),
+            ("tv", &self.tv),
+            ("documentary", &self.documentary),
+            ("anime", &self.anime),
+            ("music", &self.music),
+            ("game", &self.game),
+            ("av", &self.av),
+            ("other", &self.other),
+        ];
+        for (canonical, values) in lists {
+            if values.iter().any(|v| match v {
+                serde_json::Value::String(s) => s.trim() == cat_id,
+                serde_json::Value::Number(n) => n.to_string() == cat_id,
+                _ => false,
+            }) {
+                return Some(canonical);
+            }
+        }
+        None
+    }
+}
+
+fn extract_category_id(raw: &str) -> Option<&str> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if trimmed.bytes().all(|b| b.is_ascii_digit()) {
+        return Some(trimmed);
+    }
+    if let Some((_, tail)) = trimmed.split_once("cat=") {
+        let id = tail.split(['&', '#', '=']).next()?.trim();
+        if !id.is_empty() {
+            return Some(id);
+        }
+    }
+    if let Some(tail) = trimmed.strip_prefix("cat")
+        && !tail.is_empty()
+        && tail.bytes().all(|b| b.is_ascii_digit())
+    {
+        return Some(tail);
+    }
+    None
+}
+
+/// Normalize a site-specific category value (`?cat=402`, `"402"`, `"剧集"`, `"TV Shows"`) into
+/// the canonical category vocabulary when recognized, otherwise preserve the trimmed string.
+pub fn normalize_category(raw: &str, mapping: Option<&CategoryMapping>) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Some(m) = mapping
+        && let Some(canonical) = m.canonical_for_value(trimmed)
+    {
+        return Some(canonical.to_string());
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    let canonical = match lower.as_str() {
+        "movie" | "movies" | "film" | "films" | "电影" | "影片" => Some("movie"),
+        "tv" | "tv series" | "tv show" | "tv shows" | "series" | "剧集" | "电视剧" | "连续剧"
+        | "美剧" | "日剧" | "韩剧" | "剧" | "综艺" => Some("tv"),
+        "documentary" | "documentaries" | "doc" | "纪录" | "纪录片" => Some("documentary"),
+        "anime" | "animation" | "cartoon" | "动漫" | "动画" => Some("anime"),
+        "music" | "audio" | "lossless" | "音乐" | "无损音乐" | "演唱会" => Some("music"),
+        "game" | "games" | "游戏" => Some("game"),
+        "av" | "adult" | "xxx" | "成人" => Some("av"),
+        "other" | "misc" | "其他" | "其它" => Some("other"),
+        _ => None,
+    };
+    Some(canonical.unwrap_or(trimmed).to_string())
 }
 
 #[derive(Clone, Debug, Deserialize, Default)]

@@ -173,6 +173,60 @@ impl Indexer {
         self.run(snapshot, sites, Mode::Rss)
     }
 
+    pub fn fetch_user_stats(&self, site: &Site) -> Result<Option<(u64, u64)>, IndexerError> {
+        let snapshot = self.snapshot();
+        let entry = snapshot
+            .indexer(&site.profile_id)
+            .ok_or_else(|| IndexerError::UnknownProfile(site.profile_id.clone()))?;
+        if let ProviderAvailability::Disabled { reason } = &entry.descriptor().availability {
+            return Err(IndexerError::ProviderDisabled {
+                provider_id: entry.descriptor().id.clone(),
+                reason: reason.clone(),
+            });
+        }
+        let ctx = ProviderCallContext {
+            generation: snapshot.generation(),
+            fetcher: self,
+        };
+        if entry
+            .descriptor()
+            .capabilities
+            .contains(&ProviderCapability::UserStats)
+        {
+            let stats = entry.provider().user_stats(&ctx, site)?;
+            return Ok(match (stats.uploaded, stats.downloaded) {
+                (Some(u), Some(d)) => Some((u, d)),
+                _ => None,
+            });
+        }
+        let profile = entry
+            .profile()
+            .ok_or_else(|| IndexerError::UnsupportedCapability {
+                provider_id: entry.descriptor().id.clone(),
+                capability: ProviderCapability::UserStats.as_str().into(),
+            })?;
+        let html_fallback = crate::fetch::uses_html_cookie_fallback(site, profile);
+        if profile.framework != crate::Framework::Nexusphp && !html_fallback {
+            return Ok(None);
+        }
+        if site.cookie.as_deref().is_none_or(|c| c.trim().is_empty()) {
+            return Ok(None);
+        }
+        let base = crate::fetch::effective_base_url(site, profile);
+        let req = FetchRequest {
+            key: format!("user_stats:{}", site.id),
+            url: format!("{}/index.php", base.trim_end_matches('/')),
+            method: crate::FetchMethod::Get,
+            body: None,
+            cookie: site.cookie.clone(),
+            api_key: None,
+            proxy: site.proxy.clone(),
+            cdp_url: site.cdp_url.clone(),
+        };
+        let body = self.fetch(site, &req)?;
+        crate::user_stats::parse_nexusphp_user_stats(&body)
+    }
+
     pub fn resolve_torrent_download(
         &self,
         site: &Site,

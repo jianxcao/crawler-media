@@ -1275,7 +1275,7 @@ def register_cases(registry: SuiteRegistry) -> None:
         maint_pid = f"org.example.{uniq('t3p11m')}"
         idx_pid = f"org.example.{uniq('t3p11i')}"
         try:
-            ensure_plugin_enabled(ctx, "builtin.checkin")
+            ensure_plugin_enabled(ctx, "builtin.nexusphp-maintenance")
             setup_signed_plugin_ready(ctx, plugin_id=maint_pid, kind="maintenance", enable=True)
             setup_signed_plugin_ready(ctx, plugin_id=idx_pid, kind="indexer", enable=True)
             site = ensure_site(
@@ -1344,7 +1344,7 @@ def register_cases(registry: SuiteRegistry) -> None:
         cdp = ctx.new_cdp()
         pid_3p = f"org.example.{uniq('t3p12')}"
         try:
-            ensure_plugin_enabled(ctx, "builtin.checkin")
+            ensure_plugin_enabled(ctx, "builtin.nexusphp-maintenance")
             put_browser_settings(ctx, True, cdp.url)
             _, _, p_3p = setup_signed_plugin_ready(ctx, plugin_id=pid_3p, kind="maintenance", enable=True)
             site1 = ensure_site(ctx, pt1.url, profile_id="demo")
@@ -1381,22 +1381,22 @@ def register_cases(registry: SuiteRegistry) -> None:
 
             avail_no_perm = ctx.call_phase1(
                 "GET",
-                f"/api/v1/plugins/builtin.checkin/browser-availability?site_id={site2['id']}&purpose=maintenance",
+                f"/api/v1/plugins/builtin.nexusphp-maintenance/browser-availability?site_id={site2['id']}&purpose=maintenance",
             )
             assert avail_no_perm.get("status") != "ready"
             assert avail_no_perm.get("missing_requirements")
 
-            grant_site_browser_permission(ctx, "builtin.checkin", site1["id"], "browser:maintenance")
+            grant_site_browser_permission(ctx, "builtin.nexusphp-maintenance", site1["id"], "browser:maintenance")
             avail_ok = ctx.call_phase1(
                 "GET",
-                f"/api/v1/plugins/builtin.checkin/browser-availability?site_id={site1['id']}&purpose=maintenance",
+                f"/api/v1/plugins/builtin.nexusphp-maintenance/browser-availability?site_id={site1['id']}&purpose=maintenance",
             )
             assert avail_ok.get("status") == "ready", f"Expected ready, got {avail_ok!r}"
             assert cdp.url not in str(avail_ok)
-            p_chk = ctx.call_phase1("GET", "/api/v1/plugins/builtin.checkin")
+            p_chk = ctx.call_phase1("GET", "/api/v1/plugins/builtin.nexusphp-maintenance")
             chk_op = ctx.call_phase1(
                 "POST",
-                "/api/v1/plugins/builtin.checkin/browser-checks",
+                "/api/v1/plugins/builtin.nexusphp-maintenance/browser-checks",
                 json_body={"site_id": site1["id"], "purpose": "maintenance"},
                 if_match=str(p_chk["revision"]),
                 idempotency_key=uniq("t3p12ok"),
@@ -1420,7 +1420,7 @@ def register_cases(registry: SuiteRegistry) -> None:
         cdp = ctx.new_cdp()
         hook_pid = f"org.example.{uniq('t3p13')}"
         try:
-            ensure_plugin_enabled(ctx, "builtin.checkin")
+            ensure_plugin_enabled(ctx, "builtin.nexusphp-maintenance")
             put_browser_settings(ctx, True, cdp.url)
             setup_signed_plugin_ready(
                 ctx,
@@ -1433,7 +1433,7 @@ def register_cases(registry: SuiteRegistry) -> None:
             )
             site = ensure_site(ctx, pt.url, profile_id="pterclub")
             ctx.call_phase1("PATCH", f"/api/v1/sites/{site['id']}", json_body={"maintenance_via": "browser"})
-            grant_site_browser_permission(ctx, "builtin.checkin", site["id"], "browser:maintenance")
+            grant_site_browser_permission(ctx, "builtin.nexusphp-maintenance", site["id"], "browser:maintenance")
 
             r1 = ctx.call_phase1("POST", f"/api/v1/sites/{site['id']}/check-in", json_body={})
             if isinstance(r1, dict) and r1.get("operation_id"):
@@ -1556,7 +1556,7 @@ def register_cases(registry: SuiteRegistry) -> None:
             site = ensure_site(ctx, pt.url, profile_id="demo")
             lib = ensure_library(ctx)
             sub = create_subscribe(ctx, lib["id"])
-            ensure_plugin_enabled(ctx, "builtin.boost")
+            ensure_plugin_enabled(ctx, "cm.boost")
             for hid in ("filter.after", "subscribe.score", "subscribe.select"):
                 hpid = f"org.example.{uniq('t3p15')}"
                 setup_signed_plugin_ready(
@@ -1576,7 +1576,7 @@ def register_cases(registry: SuiteRegistry) -> None:
 
             boost_op = ctx.call_phase1(
                 "POST",
-                "/api/v1/plugins/builtin.boost/commands",
+                "/api/v1/plugins/cm.boost/commands",
                 json_body={
                     "kind": "downloader.add",
                     "payload": {
@@ -1591,14 +1591,14 @@ def register_cases(registry: SuiteRegistry) -> None:
             assert poll_operation(ctx, boost_op["operation_id"])["state"] == "succeeded"
             state = ctx.call_phase1(
                 "GET",
-                f"/api/v1/plugins/builtin.boost/brush-state?site_id={site['id']}&downloader_id={dl['id']}",
+                f"/api/v1/plugins/cm.boost/brush-state?site_id={site['id']}&downloader_id={dl['id']}",
             )
             assert int(_require_dict_key(state, "used_bytes", "brush-state")) >= 2500000
 
             try:
                 bad_op = ctx.call_phase1(
                     "POST",
-                    "/api/v1/plugins/builtin.boost/commands",
+                    "/api/v1/plugins/cm.boost/commands",
                     json_body={
                         "kind": "downloader.add",
                         "payload": {
@@ -1619,7 +1619,7 @@ def register_cases(registry: SuiteRegistry) -> None:
             assert len(qb.torrents) == 2
             state2 = ctx.call_phase1(
                 "GET",
-                f"/api/v1/plugins/builtin.boost/brush-state?site_id={site['id']}&downloader_id={dl['id']}",
+                f"/api/v1/plugins/cm.boost/brush-state?site_id={site['id']}&downloader_id={dl['id']}",
             )
             assert int(_require_dict_key(state2, "reserved_bytes", "brush-state")) == 0
         finally:
@@ -1641,7 +1641,7 @@ def register_cases(registry: SuiteRegistry) -> None:
         qb = ctx.new_qbit()
         dl = ensure_downloader(ctx, qb.url)
         site = ensure_site(ctx, pt.url, profile_id="demo")
-        ensure_plugin_enabled(ctx, "builtin.boost")
+        ensure_plugin_enabled(ctx, "cm.boost")
         hook_pid = f"org.example.{uniq('t3p16')}"
         try:
             setup_signed_plugin_ready(
@@ -1681,7 +1681,7 @@ def register_cases(registry: SuiteRegistry) -> None:
             assert [r for r in qb.request_log if r["path"] == "/api/v2/torrents/add"] == []
             st_rej = ctx.call_phase1(
                 "GET",
-                f"/api/v1/plugins/builtin.boost/brush-state?site_id={site['id']}&downloader_id={dl['id']}",
+                f"/api/v1/plugins/cm.boost/brush-state?site_id={site['id']}&downloader_id={dl['id']}",
             )
             assert int(_require_dict_key(st_rej, "reserved_bytes", "brush-state")) == 0
             audit = unwrap_list(ctx.call_phase1("GET", f"/api/v1/plugins/{hook_pid}/audit?limit=50"), "audit")
@@ -1689,7 +1689,7 @@ def register_cases(registry: SuiteRegistry) -> None:
 
             r_ok = ctx.call_phase1(
                 "POST",
-                "/api/v1/plugins/builtin.boost/commands",
+                "/api/v1/plugins/cm.boost/commands",
                 json_body={
                     "kind": "downloader.add",
                     "payload": {
@@ -1707,7 +1707,7 @@ def register_cases(registry: SuiteRegistry) -> None:
             assert qb.torrents[tf.info_hash]["size"] == 4194304
             st_ok = ctx.call_phase1(
                 "GET",
-                f"/api/v1/plugins/builtin.boost/brush-state?site_id={site['id']}&downloader_id={dl['id']}",
+                f"/api/v1/plugins/cm.boost/brush-state?site_id={site['id']}&downloader_id={dl['id']}",
             )
             assert int(st_ok["reserved_bytes"]) == 0
             assert int(st_ok["used_bytes"]) >= 4194304
@@ -1730,7 +1730,7 @@ def register_cases(registry: SuiteRegistry) -> None:
         qb.drop_response_on_next_add = True
         dl = ensure_downloader(ctx, qb.url)
         site = ensure_site(ctx, pt.url, profile_id="demo")
-        ensure_plugin_enabled(ctx, "builtin.boost")
+        ensure_plugin_enabled(ctx, "cm.boost")
         hook_pid = f"org.example.{uniq('t3p17')}"
         try:
             setup_signed_plugin_ready(
@@ -1745,7 +1745,7 @@ def register_cases(registry: SuiteRegistry) -> None:
             try:
                 res = ctx.call_phase1(
                     "POST",
-                    "/api/v1/plugins/builtin.boost/commands",
+                    "/api/v1/plugins/cm.boost/commands",
                     json_body={
                         "kind": "downloader.add",
                         "payload": {
@@ -1769,7 +1769,7 @@ def register_cases(registry: SuiteRegistry) -> None:
             assert len(adds) == 1 and len(qb.torrents) == 1
             st = ctx.call_phase1(
                 "GET",
-                f"/api/v1/plugins/builtin.boost/brush-state?site_id={site['id']}&downloader_id={dl['id']}",
+                f"/api/v1/plugins/cm.boost/brush-state?site_id={site['id']}&downloader_id={dl['id']}",
             )
             assert int(_require_dict_key(st, "reserved_bytes", "brush-state")) == 0
             assert int(_require_dict_key(st, "used_bytes", "brush-state")) >= pt.default_torrent.verified_total_bytes
@@ -1794,14 +1794,14 @@ def register_cases(registry: SuiteRegistry) -> None:
         qb.seed_foreign_torrent(fh, name="foreign.keep", size=4096, tags="manual")
         dl = ensure_downloader(ctx, qb.url)
         site = ensure_site(ctx, pt.url, profile_id="pterclub")
-        ensure_plugin_enabled(ctx, "builtin.boost")
+        ensure_plugin_enabled(ctx, "cm.boost")
 
         r_leg = ctx.client.raw_request("GET", "/api/v1/sites/boost-stats")
         assert r_leg.status == 404, f"Legacy /sites/boost-stats must be 404, got {r_leg.status}"
 
         add_op = ctx.call_phase1(
             "POST",
-            "/api/v1/plugins/builtin.boost/commands",
+            "/api/v1/plugins/cm.boost/commands",
             json_body={
                 "kind": "downloader.add",
                 "payload": {
@@ -1828,7 +1828,7 @@ def register_cases(registry: SuiteRegistry) -> None:
 
         del_op = ctx.call_phase1(
             "POST",
-            "/api/v1/plugins/builtin.boost/commands",
+            "/api/v1/plugins/cm.boost/commands",
             json_body={"kind": "downloader.delete-task", "payload": {"task_id": tid}},
             idempotency_key=uniq("t3p18del"),
         )
@@ -1837,13 +1837,13 @@ def register_cases(registry: SuiteRegistry) -> None:
         assert list(save_dir.glob("**/*.mkv"))
         st1 = ctx.call_phase1(
             "GET",
-            f"/api/v1/plugins/builtin.boost/brush-state?site_id={site['id']}&downloader_id={dl['id']}",
+            f"/api/v1/plugins/cm.boost/brush-state?site_id={site['id']}&downloader_id={dl['id']}",
         )
         assert int(_require_dict_key(st1, "retained_file_bytes", "brush-state")) > 0
 
         prep_op = ctx.call_phase1(
             "POST",
-            "/api/v1/plugins/builtin.boost/commands",
+            "/api/v1/plugins/cm.boost/commands",
             json_body={
                 "kind": "downloader.prepare-cleanup",
                 "payload": {"site_id": site["id"], "downloader_id": dl["id"], "task_ids": [tid]},
@@ -1857,12 +1857,12 @@ def register_cases(registry: SuiteRegistry) -> None:
 
         prev = ctx.call_phase1(
             "GET",
-            f"/api/v1/plugins/builtin.boost/brush-cleanup-preview?plan_handle={plan_handle}",
+            f"/api/v1/plugins/cm.boost/brush-cleanup-preview?plan_handle={plan_handle}",
         )
         assert prev.get("mode") == "plan" and prev.get("confirmation_token")
         df_op = ctx.call_phase1(
             "POST",
-            "/api/v1/plugins/builtin.boost/commands",
+            "/api/v1/plugins/cm.boost/commands",
             json_body={
                 "kind": "downloader.delete-files",
                 "payload": {
@@ -1877,7 +1877,7 @@ def register_cases(registry: SuiteRegistry) -> None:
         assert poll_operation(ctx, _require_dict_key(df_op, "operation_id", "delete-files"))["state"] == "succeeded"
         st2 = ctx.call_phase1(
             "GET",
-            f"/api/v1/plugins/builtin.boost/brush-state?site_id={site['id']}&downloader_id={dl['id']}",
+            f"/api/v1/plugins/cm.boost/brush-state?site_id={site['id']}&downloader_id={dl['id']}",
         )
         assert int(st2["retained_file_bytes"]) == 0
         assert not list(save_dir.glob("**/*.mkv"))
@@ -2432,8 +2432,8 @@ def register_cases(registry: SuiteRegistry) -> None:
         qb = ctx.new_qbit()
         dl = ensure_downloader(ctx, qb.url)
         site = ensure_site(ctx, pt.url, profile_id="pterclub")
-        checkin = _find_first_party_plugin(ctx, ("builtin.checkin", "org.example.checkin"), "checkin")
-        boost = _find_first_party_plugin(ctx, ("builtin.boost", "org.example.boost"), "boost")
+        checkin = _find_first_party_plugin(ctx, ("cm.checkin", "org.example.checkin"), "checkin")
+        boost = _find_first_party_plugin(ctx, ("cm.boost", "org.example.boost"), "boost")
         checkin_id = checkin["id"]
         boost_id = boost["id"]
 
@@ -2609,7 +2609,7 @@ def register_cases(registry: SuiteRegistry) -> None:
         qb = ctx.new_qbit(real_save_dir=save_dir)
         dl = ensure_downloader(ctx, qb.url)
         site = ensure_site(ctx, pt.url, profile_id="pterclub")
-        boost = _find_first_party_plugin(ctx, ("builtin.boost", "org.example.boost"), "boost")
+        boost = _find_first_party_plugin(ctx, ("cm.boost", "org.example.boost"), "boost")
         boost_id = boost["id"]
         ensure_plugin_enabled(ctx, boost_id)
 
@@ -2758,7 +2758,7 @@ def register_cases(registry: SuiteRegistry) -> None:
         dl = ensure_downloader(ctx, qb.url)
         site = ensure_site(ctx, pt.url, profile_id="demo")
         sub = create_subscribe(ctx, del_lib["id"])
-        boost_plugin = ensure_plugin_enabled(ctx, "builtin.boost")
+        boost_plugin = ensure_plugin_enabled(ctx, "cm.boost")
 
         boost_tf = build_torrent_bytes(name="T3P29.Boost.Item", length=4096)
         pt.torrent_payloads["boost"] = boost_tf.bytes
@@ -2775,7 +2775,7 @@ def register_cases(registry: SuiteRegistry) -> None:
 
         boost_op = ctx.call_phase1(
             "POST",
-            "/api/v1/plugins/builtin.boost/commands",
+            "/api/v1/plugins/cm.boost/commands",
             json_body={
                 "kind": "downloader.add",
                 "payload": {
@@ -2805,6 +2805,6 @@ def register_cases(registry: SuiteRegistry) -> None:
         )
         state = ctx.call_phase1(
             "GET",
-            f"/api/v1/plugins/builtin.boost/brush-state?site_id={site['id']}&downloader_id={dl['id']}",
+            f"/api/v1/plugins/cm.boost/brush-state?site_id={site['id']}&downloader_id={dl['id']}",
         )
         assert int(_require_dict_key(state, "used_bytes", "brush-state")) >= boost_tf.verified_total_bytes

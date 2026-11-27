@@ -85,6 +85,8 @@ fn attachments_are_not_treated_as_video() {
         detail_url: None,
         category: None,
         poster_url: None,
+        free_2x: false,
+        free_until: None,
     };
     let nfo = tmp.path().join("The.Matrix.1999.2160p.nfo");
     let poster = tmp.path().join("poster.jpg");

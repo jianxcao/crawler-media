@@ -248,7 +248,11 @@ async fn reconcile_aborts_orphaned_running_enabling_operation() {
 #[tokio::test]
 async fn builtin_task_runner_enforces_live_authority_and_in_flight_dispatch_fence() {
     let env = HttpEnv::new().await;
-    let pid = "builtin.checkin";
+    support::plugin_http_support::plugins_fixture::install_cm_checkin(
+        &env, false, false, false, false,
+    )
+    .await;
+    let pid = "cm.checkin";
     let mut enabled = env.state.store().get_plugin(pid).unwrap().unwrap();
     if enabled.lifecycle != PluginLifecycle::Enabled {
         env.state
@@ -295,7 +299,7 @@ async fn builtin_task_runner_enforces_live_authority_and_in_flight_dispatch_fenc
         input_override: None,
     };
 
-    // Transition builtin.checkin to Draining after authority was issued
+    // Transition cm.checkin to Draining after authority was issued
     env.state
         .store()
         .begin_plugin_lifecycle(pid, enabled.revision, Uuid::new_v4(), false)

@@ -165,6 +165,8 @@ fn build_plan_and_ctx(
         imdb_id: None,
         detail_url: None,
         category: None,
+        free_2x: false,
+        free_until: None,
     };
     let plan = FrozenDownloadPlan {
         torrent,
@@ -234,7 +236,7 @@ fn download_service_and_set_task_tags_reject_reserved_system_tags_and_unsafe_plu
             &srv.url(&format!("bad-tag-{idx}.torrent")),
             "TagGuard.One.2026.1080p",
             SubmissionPurpose::Boost,
-            Some("builtin.boost"),
+            Some("cm.boost"),
             &format!("bad-tag-{idx}"),
         );
         plan.tags = vec![bad_tag.into()];
@@ -268,7 +270,7 @@ fn download_service_and_set_task_tags_reject_reserved_system_tags_and_unsafe_plu
         &srv.url("bad-cat.torrent"),
         "TagGuard.One.2026.1080p",
         SubmissionPurpose::Boost,
-        Some("builtin.boost"),
+        Some("cm.boost"),
         "bad-cat",
     );
     bad_cat.category = Some("bad\ncat".into());
@@ -281,10 +283,10 @@ fn download_service_and_set_task_tags_reject_reserved_system_tags_and_unsafe_plu
         &srv.url("ok.torrent"),
         "TagGuard.One.2026.1080p",
         SubmissionPurpose::Boost,
-        Some("builtin.boost"),
+        Some("cm.boost"),
         "ok-plan",
     );
-    ok_plan.tags = vec!["plugin:builtin.boost:slot1".into()];
+    ok_plan.tags = vec!["plugin:cm.boost:slot1".into()];
     assert!(matches!(
         svc.submit_sync(ok_plan, ok_ctx).unwrap(),
         DownloadOutcome::Submitted { .. }
@@ -322,11 +324,11 @@ fn boost_unknown_outcome_reconcile_preserves_paused_state() {
         &srv.url("unk-paused.torrent"),
         "BoostUnknownPaused.2026.1080p",
         SubmissionPurpose::Boost,
-        Some("builtin.boost"),
+        Some("cm.boost"),
         "unk-paused-1",
     );
     plan.paused = true;
-    plan.budget_key = Some("builtin.boost:default".into());
+    plan.budget_key = Some("cm.boost:default".into());
 
     let out = svc.submit_sync(plan, ctx).unwrap();
     assert!(matches!(out, DownloadOutcome::Unknown { .. }), "{out:?}");

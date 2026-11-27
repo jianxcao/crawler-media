@@ -22,9 +22,10 @@ use store::{AcceptDownloadOperationInput, BoostTaskState, Db};
 use support::plugin_http_support::{
     ADMIN_PASS, HttpEnv, TOKEN, admin_id, assert_err, assert_ok,
     pkg::{self, TestSigningKey},
+    plugins_fixture::{install_cm_boost, save_plugin_config_direct, seed_cm_boost_task},
     req_json,
 };
-use support::{BoostTestDownloader, NoopFetcher, StubTorrentServer, poll_op, seed_boost_task};
+use support::{BoostTestDownloader, NoopFetcher, StubTorrentServer, poll_op};
 use uuid::Uuid;
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -386,6 +387,8 @@ impl indexer::IndexerProvider for StubIdx {
             imdb_id: None,
             detail_url: None,
             category: None,
+            free_2x: false,
+            free_until: None,
         }])
     }
     fn rss(
@@ -425,9 +428,10 @@ fn setup_item8_boost_env() -> (HttpEnv, SiteId, SiteId, DownloaderId, StubTorren
         .unwrap()
         .add_indexer_provider(Arc::new(StubIdx(srv.url("cand-a.torrent"), desc)))
         .unwrap();
-    let state = ApiState::new_arc(
+    let state = ApiState::new_arc_with_admin_password(
         store,
         TOKEN.into(),
+        Some(ADMIN_PASS.into()),
         RegistrySnapshot::builtin().unwrap(),
         Arc::new(NoopFetcher),
         dl,
@@ -458,7 +462,8 @@ fn setup_item8_boost_env() -> (HttpEnv, SiteId, SiteId, DownloaderId, StubTorren
 #[tokio::test]
 async fn slice_e_r2_item8_boost_cycle_uses_downloader_wide_snapshot() {
     let (env, site_a, site_b, dl_id, _srv) = setup_item8_boost_env();
-    seed_boost_task(
+    install_cm_boost(&env, false, false, false).await;
+    seed_cm_boost_task(
         env.state.store().as_ref(),
         dl_id,
         site_b,
@@ -470,29 +475,21 @@ async fn slice_e_r2_item8_boost_cycle_uses_downloader_wide_snapshot() {
         None,
         None,
     );
-    support::save_boost_config(
-        &env.state,
-        json!({
-            "sites": [site_a.to_string()],
-            "downloader_id": dl_id.to_string(),
-            "max_active": 1,
-            "max_adds_per_round": 2,
-            "min_free_disk_bytes": 0,
-            "dry_run": false,
-        }),
-    );
-    let rev = env.get_plugin_rev("builtin.boost").await;
-
+    let cfg = json!({
+        "sites": [site_a.to_string()], "downloader_id": dl_id.to_string(),
+        "max_active": 1, "max_adds_per_round": 2, "min_free_disk_bytes": 0, "dry_run": false,
+    });
+    save_plugin_config_direct(&env.state, "cm.boost", cfg);
+    let rev = env.get_plugin_rev("cm.boost").await;
+    let payload = json!({ "kind": "boost.run", "payload": { "site_id": site_a.to_string(), "downloader_id": dl_id.to_string(), "dry_run": false } });
+    let hdr = format!("\"{rev}\"");
     let (st_run, _, b_run) = env
         .send(req_json(
             "POST",
-            "/api/v1/plugins/builtin.boost/commands",
+            "/api/v1/plugins/cm.boost/commands",
             Some(TOKEN),
-            &[("if-match", &format!("\"{rev}\"")), ("idempotency-key", "b8-run")],
-            Some(json!({
-                "kind": "boost.run",
-                "payload": { "site_id": site_a.to_string(), "downloader_id": dl_id.to_string(), "dry_run": false }
-            })),
+            &[("if-match", &hdr), ("idempotency-key", "b8-run")],
+            Some(payload),
         ))
         .await;
     let op_id = assert_ok(st_run, &b_run, StatusCode::ACCEPTED)["operation_id"]
@@ -503,12 +500,12 @@ async fn slice_e_r2_item8_boost_cycle_uses_downloader_wide_snapshot() {
     let snap = env
         .state
         .store()
-        .get_boost_snapshot_for_plugin("builtin.boost", &[], &[dl_id])
+        .get_boost_snapshot_for_plugin("cm.boost", &[], &[dl_id])
         .unwrap();
     assert_eq!(
         snap.tasks.len(),
         1,
-        "must not add when downloader-wide max_active=1 is full"
+        "must not add when max_active=1 is full"
     );
 }
 

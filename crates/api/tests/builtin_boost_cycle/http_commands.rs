@@ -6,22 +6,22 @@ use serde_json::{Value, json};
 
 use super::support::plugin_http_support::{HttpEnv, TOKEN, assert_ok, req_json};
 use super::support::{
-    BoostTestDownloader, StubTorrentServer, minimal_torrent_bytes, poll_op, save_boost_config,
-    setup_state,
+    BOOST_PLUGIN_ID, BoostTestDownloader, StubTorrentServer, minimal_torrent_bytes, poll_op,
+    save_boost_config, setup_state,
 };
 
 async fn submit_boost_http_cmd(env: &HttpEnv, kind: &str, payload: Value, idem: &str) -> String {
     let rev = env
         .state
         .store()
-        .get_plugin("builtin.boost")
+        .get_plugin(BOOST_PLUGIN_ID)
         .unwrap()
         .unwrap()
         .revision;
     let (st, _, b) = env
         .send(req_json(
             "POST",
-            "/api/v1/plugins/builtin.boost/commands",
+            &format!("/api/v1/plugins/{BOOST_PLUGIN_ID}/commands"),
             Some(TOKEN),
             &[
                 ("If-Match", &format!("\"{rev}\"")),
@@ -85,7 +85,7 @@ async fn http_downloader_add_11th_with_budget_none_settles_to_rejected() {
     let snap = env
         .state
         .store()
-        .get_boost_snapshot_for_plugin("builtin.boost", &[], &[])
+        .get_boost_snapshot_for_plugin(BOOST_PLUGIN_ID, &[], &[])
         .unwrap();
     assert_eq!(snap.reserved_bytes, 0);
 }
@@ -149,7 +149,7 @@ async fn http_downloader_add_budget_exhausted_and_duplicate_reservation_settle_t
     .await;
     let op3 = poll_op(&env, &op3_id).await;
     assert_eq!(op3["state"], "rejected", "op3={op3}");
-    assert_eq!(op3["phase"], "boost-quota-budget-exhausted", "op3={op3}");
+    assert_eq!(op3["phase"], "quota_exceeded", "op3={op3}");
 
     // Duplicate active info_hash settles cleanly to rejected (duplicate_active_reservation).
     let dir2 = tempfile::tempdir_in("/tmp").unwrap();
@@ -302,7 +302,7 @@ async fn deleting_sole_downloader_cleans_active_records_unblocks_drain_and_rejec
     let snap = env
         .state
         .store()
-        .get_boost_snapshot_for_plugin("builtin.boost", &[], &[])
+        .get_boost_snapshot_for_plugin(BOOST_PLUGIN_ID, &[], &[])
         .unwrap();
     assert_eq!(
         snap.reserved_bytes, 0,
@@ -340,14 +340,14 @@ async fn assert_deleted_downloader_rejects_stale_commands(
     let rev = env
         .state
         .store()
-        .get_plugin("builtin.boost")
+        .get_plugin(BOOST_PLUGIN_ID)
         .unwrap()
         .unwrap()
         .revision;
     let (st_add_missing, _, b_add_missing) = env
         .send(req_json(
             "POST",
-            "/api/v1/plugins/builtin.boost/commands",
+            &format!("/api/v1/plugins/{BOOST_PLUGIN_ID}/commands"),
             Some(TOKEN),
             &[
                 ("If-Match", &format!("\"{rev}\"")),
@@ -394,6 +394,8 @@ fn mk_direct_plan(
             imdb_id: None,
             detail_url: None,
             category: None,
+            free_2x: false,
+            free_until: None,
         },
         source: downloader::TorrentSource::Http(downloader::TorrentHttpSource::get(url)),
         purpose,
@@ -415,7 +417,7 @@ fn mk_direct_plan(
         sequential: false,
         first_last_piece: false,
         budget_key: (purpose == downloader::SubmissionPurpose::Boost)
-            .then(|| format!("builtin.boost:{target_dl}")),
+            .then(|| format!("{BOOST_PLUGIN_ID}:{target_dl}")),
         plan_digest: None,
     }
 }
@@ -462,9 +464,9 @@ async fn pre_send_client_connect_failure_settles_without_leaking_boost_reservati
             DownloadOpContext {
                 operation_id: op1,
                 cause_id: "c1".into(),
-                subject: "plugin:builtin.boost".into(),
+                subject: format!("plugin:{BOOST_PLUGIN_ID}"),
                 idempotency_key: "presend-1".into(),
-                plugin_id: Some("builtin.boost".into()),
+                plugin_id: Some(BOOST_PLUGIN_ID.into()),
                 generation: Some(1),
                 config_revision: None,
                 dry_run: false,
@@ -480,7 +482,7 @@ async fn pre_send_client_connect_failure_settles_without_leaking_boost_reservati
     assert_eq!(rec1.state, store::DownloadOperationState::Failed);
     let snap = state
         .store()
-        .get_boost_snapshot_for_plugin("builtin.boost", &[], &[])
+        .get_boost_snapshot_for_plugin(BOOST_PLUGIN_ID, &[], &[])
         .unwrap();
     assert_eq!(
         snap.reserved_bytes, 0,

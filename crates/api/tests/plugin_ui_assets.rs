@@ -492,6 +492,9 @@ async fn assert_nav_builtins_and_revoke(
     entry_url: &str,
     admin_cookie: &str,
 ) {
+    plugin_http_support::plugins_fixture::install_cm_checkin(env, true, false, false, true).await;
+    plugin_http_support::plugins_fixture::install_cm_boost(env, true, false, true).await;
+
     let (st_nav, _, b_nav) = env
         .send(req_json(
             "GET",
@@ -523,19 +526,16 @@ async fn assert_nav_builtins_and_revoke(
     );
     let checkin_app_nav = items
         .iter()
-        .find(|it| it["plugin_id"] == "builtin.checkin" && it["kind"] == "app")
+        .find(|it| it["plugin_id"] == "cm.checkin" && it["kind"] == "app")
         .unwrap();
-    assert_eq!(
-        checkin_app_nav["location"],
-        "/plugin-apps/builtin.checkin/app"
-    );
+    assert_eq!(checkin_app_nav["location"], "/plugin-apps/cm.checkin/app");
 
-    // Built-in checkin & boost expose 4 surfaces and default trusted
-    for builtin in ["builtin.checkin", "builtin.boost"] {
+    // Installed official checkin & boost expose 4 surfaces once trusted
+    for official in ["cm.checkin", "cm.boost"] {
         let (st_b, _, b_b) = env
             .send(req_json(
                 "GET",
-                &format!("/api/v1/plugins/{builtin}/ui"),
+                &format!("/api/v1/plugins/{official}/ui"),
                 Some(TOKEN),
                 &[],
                 None,

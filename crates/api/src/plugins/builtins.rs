@@ -12,26 +12,22 @@ use indexer::{
 };
 use parking_lot::Mutex;
 use plugin_package::{
-    ComponentManifest, MaintenanceManifest, PluginManifest, TaskManifest, TaskScheduleManifest,
+    ComponentManifest, MaintenanceManifest, PluginManifest, parse_minisign_public_key,
 };
-use serde_json::json;
 use store::Store;
 use store::plugins::{
-    PluginGrant, PluginGrantScope, PluginLifecycleObservation, PluginTaskDefinition,
+    PinPluginTrustKey, PluginGrant, PluginGrantScope, PluginLifecycleObservation,
     PluginVersionMetadata,
 };
 use uuid::Uuid;
 
-use super::effect::PluginTaskInvocation;
 use super::ports::{CapturedCookieRecord, StoreHostPorts};
-use super::tasks::sync_task_binding;
 use crate::management::ApiState;
 
 pub const BUILTIN_NEXUSPHP_MAINTENANCE_PLUGIN_ID: &str = "builtin.nexusphp-maintenance";
 pub const BUILTIN_NEXUSPHP_MAINTENANCE_PROVIDER_ID: &str =
     "plugin:builtin.nexusphp-maintenance/default";
-pub const BUILTIN_CHECKIN_PLUGIN_ID: &str = "builtin.checkin";
-pub const BUILTIN_CHECKIN_TASK_ID: &str = "check-in";
+pub const OFFICIAL_PLUGIN_REPO_PUBLIC_KEY: &str = "untrusted comment: minisign public key 860ADD6B5472C243\nRWRDwnJUa90Khi7jSeMH9D+T2XVsggC75qPaPKucTtXW0e2m0fqxWAbu";
 
 fn nexusphp_manifest_json() -> String {
     let manifest = PluginManifest {
@@ -57,7 +53,11 @@ fn nexusphp_manifest_json() -> String {
                 "http".into(),
                 "http:site-auth".into(),
                 "read:sites".into(),
+                "browser:maintenance".into(),
                 "maintenance:provide".into(),
+                "command:site.maintenance".into(),
+                "command:site.check-in".into(),
+                "command:site.verify-session".into(),
             ],
             hooks: Vec::new(),
             tasks: Vec::new(),
@@ -75,59 +75,7 @@ fn nexusphp_manifest_json() -> String {
     serde_json::to_string(&manifest).unwrap_or_else(|_| "{}".into())
 }
 
-const CHECKIN_CONFIG_SCHEMA_JSON: &str = r#"{"type":"object","properties":{"interval_secs":{"type":"integer","minimum":3600,"maximum":86400,"default":86400},"site_id":{"type":"string"}},"additionalProperties":false}"#;
-
-fn checkin_manifest_json() -> String {
-    let input_schema = r#"{"type":"object","properties":{"interval_secs":{"type":"integer","minimum":3600,"maximum":86400,"default":86400},"site_id":{"type":"string"}},"additionalProperties":false}"#;
-    let manifest = PluginManifest {
-        manifest_version: 1,
-        id: BUILTIN_CHECKIN_PLUGIN_ID.into(),
-        name: "Site Check-in Orchestrator".into(),
-        version: "1.0.0".into(),
-        api: plugin_api::API_VERSION.into(),
-        license: "Apache-2.0".into(),
-        authors: vec!["crawler-media".into()],
-        description: "Built-in periodic site check-in and maintenance orchestrator".into(),
-        config_schema: CHECKIN_CONFIG_SCHEMA_JSON.into(),
-        state_schema: 1,
-        credential_binding: None,
-        http: Vec::new(),
-        sites: Vec::new(),
-        limits: None,
-        components: vec![ComponentManifest {
-            id: "builtin".into(),
-            entry: "builtin".into(),
-            world: plugin_host::TASK_WORLD.into(),
-            permissions: vec![
-                "command:site.maintenance".into(),
-                "command:site.check-in".into(),
-                "command:site.verify-session".into(),
-                "browser:maintenance".into(),
-                "kv".into(),
-                "read:sites".into(),
-            ],
-            hooks: Vec::new(),
-            tasks: vec![TaskManifest {
-                id: BUILTIN_CHECKIN_TASK_ID.into(),
-                input_schema: input_schema.into(),
-                schedule: TaskScheduleManifest {
-                    kind: "interval".into(),
-                    seconds: 86_400,
-                },
-                concurrency_key: None,
-            }],
-            indexers: Vec::new(),
-            maintenance: Vec::new(),
-            endpoints: Vec::new(),
-            lists: Vec::new(),
-            channels: Vec::new(),
-        }],
-        ui: Some(super::ui_builtins::checkin_ui_manifest()),
-    };
-    serde_json::to_string(&manifest).unwrap_or_else(|_| "{}".into())
-}
-
-pub(super) fn ensure_builtin_plugin(
+fn ensure_builtin_plugin(
     store: &Store,
     version: PluginVersionMetadata,
     grants: Vec<PluginGrant>,
@@ -175,6 +123,45 @@ pub(super) fn ensure_builtin_plugin(
     Ok(())
 }
 
+fn seed_official_repo_trust_key(store: &Store) {
+    let parsed = match parse_minisign_public_key(OFFICIAL_PLUGIN_REPO_PUBLIC_KEY) {
+        Ok(k) => k,
+        Err(err) => {
+            tracing::error!(error = %err, "Invalid embedded official plugin trust key");
+            return;
+        }
+    };
+    let mut after: Option<String> = None;
+    loop {
+        let page = match store.list_plugin_trust_keys(after.as_deref(), Some(200)) {
+            Ok(p) => p,
+            Err(err) => {
+                tracing::warn!(error = %err, "Failed to list trust keys while seeding official key");
+                return;
+            }
+        };
+        if page.items.iter().any(|k| k.key.key_id == parsed.key_id) {
+            return;
+        }
+        match page.next_cursor {
+            Some(next) if after.as_deref() != Some(next.as_str()) => after = Some(next),
+            _ => break,
+        }
+    }
+    if let Err(err) = store.pin_plugin_trust_key(&PinPluginTrustKey {
+        key_id: parsed.key_id.clone(),
+        label: "crawler-media Official Plugins".into(),
+        public_key: OFFICIAL_PLUGIN_REPO_PUBLIC_KEY.into(),
+        fingerprint: parsed.fingerprint,
+        actor: "system".into(),
+    }) && !matches!(
+        err,
+        store::StoreError::Plugin(store::plugins::PluginError::Conflict)
+    ) {
+        tracing::warn!(error = %err, key_id = %parsed.key_id, "Failed to seed official plugin trust key");
+    }
+}
+
 pub(crate) fn bootstrap_builtin_plugins(state: &ApiState) {
     let maint_ver = PluginVersionMetadata {
         plugin_id: BUILTIN_NEXUSPHP_MAINTENANCE_PLUGIN_ID.into(),
@@ -190,219 +177,26 @@ pub(crate) fn bootstrap_builtin_plugins(state: &ApiState) {
         ui_metadata_ref: None,
         credential_bound: true,
     };
-    let maint_grants = vec![
-        PluginGrant {
-            capability: "http".into(),
-            scope: PluginGrantScope::Global,
-            sensitive: false,
-        },
-        PluginGrant {
-            capability: "http:site-auth".into(),
-            scope: PluginGrantScope::Global,
-            sensitive: false,
-        },
-        PluginGrant {
-            capability: "read:sites".into(),
-            scope: PluginGrantScope::Global,
-            sensitive: false,
-        },
-        PluginGrant {
-            capability: "maintenance:provide".into(),
-            scope: PluginGrantScope::Global,
-            sensitive: false,
-        },
-    ];
+    let maint_grants = [
+        "http",
+        "http:site-auth",
+        "read:sites",
+        "maintenance:provide",
+        "command:site.maintenance",
+        "command:site.check-in",
+        "command:site.verify-session",
+    ]
+    .into_iter()
+    .map(|cap| PluginGrant {
+        capability: cap.into(),
+        scope: PluginGrantScope::Global,
+        sensitive: false,
+    })
+    .collect();
     if let Err(err) = ensure_builtin_plugin(&state.store, maint_ver, maint_grants) {
         tracing::error!(error = %err, "Failed to bootstrap builtin.nexusphp-maintenance plugin");
     }
-
-    let checkin_ver = PluginVersionMetadata {
-        plugin_id: BUILTIN_CHECKIN_PLUGIN_ID.into(),
-        package_hash: "builtin:checkin:1.0.0".into(),
-        version: "1.0.0".into(),
-        manifest_json: checkin_manifest_json(),
-        config_schema_json: CHECKIN_CONFIG_SCHEMA_JSON.into(),
-        state_schema: "1".into(),
-        artifact_path: String::new(),
-        signing_key_id: None,
-        signature_status: "builtin".into(),
-        ui_metadata_ref: Some("ui/asset-manifest.json".into()),
-        credential_bound: false,
-    };
-    let checkin_grants = vec![
-        PluginGrant {
-            capability: "command:site.maintenance".into(),
-            scope: PluginGrantScope::Global,
-            sensitive: false,
-        },
-        PluginGrant {
-            capability: "command:site.check-in".into(),
-            scope: PluginGrantScope::Global,
-            sensitive: false,
-        },
-        PluginGrant {
-            capability: "command:site.verify-session".into(),
-            scope: PluginGrantScope::Global,
-            sensitive: false,
-        },
-        PluginGrant {
-            capability: "kv".into(),
-            scope: PluginGrantScope::Global,
-            sensitive: false,
-        },
-        PluginGrant {
-            capability: "read:sites".into(),
-            scope: PluginGrantScope::Global,
-            sensitive: false,
-        },
-    ];
-    if let Err(err) = ensure_builtin_plugin(&state.store, checkin_ver, checkin_grants) {
-        tracing::error!(error = %err, "Failed to bootstrap builtin.checkin plugin");
-        return;
-    }
-    super::ui_builtins::ensure_builtin_ui_trust(
-        &state.store,
-        BUILTIN_CHECKIN_PLUGIN_ID,
-        "builtin:checkin:1.0.0",
-    );
-
-    if let Ok(Some(plugin)) = state.store.get_plugin(BUILTIN_CHECKIN_PLUGIN_ID)
-        && state
-            .store
-            .get_plugin_task_binding(BUILTIN_CHECKIN_PLUGIN_ID, BUILTIN_CHECKIN_TASK_ID)
-            .ok()
-            .flatten()
-            .is_none()
-        && let Ok(binding) = state.store.save_plugin_task_binding(
-            &plugin,
-            BUILTIN_CHECKIN_TASK_ID,
-            0,
-            &PluginTaskDefinition {
-                enabled: false,
-                interval_secs: Some(86_400),
-                public_config: json!({}),
-            },
-        )
-        && let Err(err) = sync_task_binding(state, &binding)
-    {
-        tracing::warn!(error = %err, "Failed to project builtin.checkin task binding on startup");
-    }
-    super::boost::bootstrap_builtin_boost(state);
-}
-
-fn authorize_checkin_site(
-    store: &Store,
-    authority: &store::plugins::PluginStateAuthority,
-    site_id: SiteId,
-) -> Result<(), String> {
-    let target = [store::plugins::PluginCommandTarget::Site(site_id)];
-    store
-        .authorize_plugin_command(authority, "site.check-in", &target)
-        .or_else(|_| store.authorize_plugin_command(authority, "site.maintenance", &target))
-        .map(|_| ())
-        .map_err(|e| format!("builtin.checkin unauthorized for site `{site_id}`: {e}"))
-}
-
-pub(crate) fn run_builtin_checkin_task(
-    state: &ApiState,
-    invocation: &PluginTaskInvocation,
-) -> Result<(), String> {
-    if invocation.binding.task_id != BUILTIN_CHECKIN_TASK_ID {
-        return Err(format!(
-            "unsupported builtin.checkin task `{}`",
-            invocation.binding.task_id
-        ));
-    }
-    let stored_cfg = state
-        .store
-        .get_plugin_config(BUILTIN_CHECKIN_PLUGIN_ID)
-        .map_err(|e| e.to_string())?;
-    let site_opt = invocation
-        .input_override
-        .as_ref()
-        .and_then(|v| v.get("site_id"))
-        .and_then(|v| v.as_str())
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .or_else(|| {
-            invocation
-                .binding
-                .definition
-                .public_config
-                .get("site_id")
-                .and_then(|v| v.as_str())
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-        })
-        .or_else(|| {
-            stored_cfg
-                .as_ref()
-                .and_then(|c| c.values.get("site_id"))
-                .and_then(|v| v.as_str())
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-        });
-    if let Some(site_str) = site_opt {
-        let site_id: SiteId = super::ports::strip_site_prefix(site_str)
-            .parse()
-            .map_err(|_| format!("invalid site_id `{site_str}`"))?;
-        authorize_checkin_site(&state.store, &invocation.authority, site_id)?;
-        let obs = state
-            .store
-            .observe_site(site_id)
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| format!("site `{site_id}` not found"))?;
-        if !obs.site().enabled {
-            return Err(format!("site `{site_id}` is disabled"));
-        }
-        return crate::site_maintenance::run_scheduled_check_in_for_site(state, obs);
-    }
-
-    let grants = state
-        .store
-        .get_plugin_grants(BUILTIN_CHECKIN_PLUGIN_ID)
-        .map_err(|e| e.to_string())?;
-    if !grants.iter().any(|g| {
-        matches!(
-            g.capability.as_str(),
-            "command:site.check-in" | "command:site.maintenance"
-        )
-    }) {
-        return Err("builtin.checkin lacks check-in command grants".into());
-    }
-    let sites = state
-        .store
-        .list_enabled_sites()
-        .map_err(|e| e.to_string())?;
-    let mut failures = Vec::new();
-    for site in sites {
-        if authorize_checkin_site(&state.store, &invocation.authority, site.id).is_err() {
-            continue;
-        }
-        let Some(observed) = state
-            .store
-            .observe_site(site.id)
-            .map_err(|e| e.to_string())?
-        else {
-            continue;
-        };
-        let cur = observed.site().clone();
-        if !cur.enabled {
-            continue;
-        }
-        if let Err(error) =
-            crate::site_maintenance::run_scheduled_check_in_for_site(state, observed)
-        {
-            tracing::error!(site = %cur.name, site_id = %cur.id, error = %error, "【站点签到】签到/保活失败");
-            crate::worker::notify_public(state, &format!("站点签到失败：{}", cur.name), &error);
-            failures.push(format!("{}: {error}", cur.name));
-        }
-    }
-    if failures.is_empty() {
-        Ok(())
-    } else {
-        Err(format!("站点签到失败: {}", failures.join("; ")))
-    }
+    seed_official_repo_trust_key(&state.store);
 }
 
 pub(crate) struct BuiltinNexusPhpMaintenanceProvider {

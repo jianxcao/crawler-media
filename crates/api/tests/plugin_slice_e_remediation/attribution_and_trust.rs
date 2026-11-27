@@ -8,7 +8,10 @@ use domain::{
 use serde_json::json;
 
 use super::support::plugin_http_support::{
-    HttpEnv, TOKEN, assert_err, assert_ok, pkg::TestSigningKey, req_json,
+    HttpEnv, TOKEN, assert_err, assert_ok,
+    pkg::TestSigningKey,
+    plugins_fixture::{install_cm_boost, install_cm_checkin},
+    req_json,
 };
 use super::support::poll_op;
 use super::{
@@ -217,6 +220,8 @@ async fn assert_handle_caps_and_search_ownership(
 #[tokio::test]
 async fn sdk_read_endpoints_enforce_ui_attribution_and_external_assets_verify_sha256() {
     let env = HttpEnv::new().await;
+    install_cm_checkin(&env, true, true, false, true).await;
+    install_cm_boost(&env, true, false, true).await;
     let key = TestSigningKey::generate(705);
     env.pin_trust_key(&key, "k-705").await;
     let site_id = env.insert_site("PT-AttrRead");
@@ -276,10 +281,7 @@ async fn sdk_read_endpoints_enforce_ui_attribution_and_external_assets_verify_sh
         "plugin.capability_denied",
     );
 
-    for (bpid, tid) in [
-        ("builtin.checkin", "check-in"),
-        ("builtin.boost", "traffic-cycle"),
-    ] {
+    for (bpid, tid) in [("cm.checkin", "check-in"), ("cm.boost", "traffic-cycle")] {
         let bp = env.state.store().get_plugin(bpid).unwrap().unwrap();
         let (st_brc, _, b_brc) = env
             .send(req_json(
@@ -318,9 +320,9 @@ async fn assert_get_op_cross_plugin_and_corrupted_asset(
         .await;
     assert_eq!(st_own, StatusCode::OK);
 
-    let boost_rev = env.get_plugin_rev("builtin.boost").await;
+    let boost_rev = env.get_plugin_rev("cm.boost").await;
     let boost_dis = env
-        .disable_plugin("builtin.boost", boost_rev, "dis-boost-op")
+        .disable_plugin("cm.boost", boost_rev, "dis-boost-op")
         .await;
     let foreign_op_id = boost_dis["operation_id"].as_str().unwrap();
     let (st_for, _, _) = env

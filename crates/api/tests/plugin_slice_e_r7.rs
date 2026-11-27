@@ -22,7 +22,7 @@ use store::{BoostTaskState, PrepareBoostCleanupPlanInput};
 use support::plugin_http_support::{
     HttpEnv, TOKEN, admin_id, assert_err, assert_ok, pkg, req_json,
 };
-use support::{NoopFetcher, poll_op, seed_boost_task};
+use support::{NoopFetcher, poll_op};
 use uuid::Uuid;
 
 async fn install_and_prepare_v2(env: &HttpEnv, pid: &str, tag: u8) -> (Value, Option<String>) {
@@ -294,9 +294,10 @@ fn setup_r7_sibling_boost_env() -> (
         .unwrap();
 
     let store = Arc::new(Store::open(dir.path().join("data")).unwrap());
-    let state = ApiState::new_arc(
+    let state = ApiState::new_arc_with_admin_password(
         store,
         TOKEN.into(),
+        Some(support::plugin_http_support::ADMIN_PASS.into()),
         RegistrySnapshot::builtin().unwrap(),
         Arc::new(NoopFetcher),
         dl_mem.clone() as Arc<dyn Downloader>,
@@ -358,7 +359,7 @@ fn seed_disabled_retained_plan(
         })
         .unwrap();
 
-    let tf = seed_boost_task(
+    let tf = support::plugin_http_support::plugins_fixture::seed_cm_boost_task(
         env.state.store().as_ref(),
         dl_disabled,
         site_id,
@@ -400,6 +401,8 @@ fn seed_disabled_retained_plan(
 async fn boost_cleanup_protects_live_files_on_enabled_downloader_without_boost_facts_and_skips_disabled_downloaders()
  {
     let (env, shared_file, site_id, dl_mem, info_hash) = setup_r7_sibling_boost_env();
+    support::plugin_http_support::plugins_fixture::install_cm_boost(&env, false, false, false)
+        .await;
     let stage = shared_file.parent().unwrap().to_path_buf();
     let planned_rev = seed_disabled_retained_plan(&env, &stage, &shared_file, site_id);
 
@@ -407,7 +410,7 @@ async fn boost_cleanup_protects_live_files_on_enabled_downloader_without_boost_f
     let (st_prev1, _, b_prev1) = env
         .send(req_json(
             "GET",
-            "/api/v1/plugins/builtin.boost/brush-cleanup-preview?plan_handle=r7-sib-plan",
+            "/api/v1/plugins/cm.boost/brush-cleanup-preview?plan_handle=r7-sib-plan",
             Some(TOKEN),
             &[],
             None,
@@ -431,11 +434,12 @@ async fn boost_cleanup_protects_live_files_on_enabled_downloader_without_boost_f
         upload_speed: 0,
         info_hash,
         owned_tags: vec!["cm-op:manual-1".into()],
+        ..Default::default()
     });
     let (st_prev2, _, b_prev2) = env
         .send(req_json(
             "GET",
-            "/api/v1/plugins/builtin.boost/brush-cleanup-preview?plan_handle=r7-sib-plan",
+            "/api/v1/plugins/cm.boost/brush-cleanup-preview?plan_handle=r7-sib-plan",
             Some(TOKEN),
             &[],
             None,
@@ -448,11 +452,11 @@ async fn boost_cleanup_protects_live_files_on_enabled_downloader_without_boost_f
         "plugin.cleanup_blocked",
     );
 
-    let rev = env.get_plugin_rev("builtin.boost").await;
+    let rev = env.get_plugin_rev("cm.boost").await;
     let (st_del, _, b_del) = env
         .send(req_json(
             "POST",
-            "/api/v1/plugins/builtin.boost/commands",
+            "/api/v1/plugins/cm.boost/commands",
             Some(TOKEN),
             &[
                 ("If-Match", &format!("\"{rev}\"")),

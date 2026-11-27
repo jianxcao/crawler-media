@@ -745,13 +745,14 @@ test("Defect 5: sdk.tasks.run awaits auto-enable terminal state before /run, and
   }
 });
 
-test("Defect 6: build-builtin-plugin-uis.mjs runs rustfmt --edition 2024 on generated ui_builtins_assets.rs", () => {
-  const scriptPath = path.resolve(import.meta.dirname, "../../scripts/build-builtin-plugin-uis.mjs");
-  const scriptSource = fs.readFileSync(scriptPath, "utf8");
-  const writeIdx = scriptSource.indexOf("fs.writeFileSync(rustOut,");
-  const fmtIdx = scriptSource.indexOf(
-    'execFileSync("rustfmt", ["--edition", "2024", rustOut], { stdio: "inherit" })',
+test("Defect 6: web/lib/api/plugins exposes repository & upload flows without hardcoded builtin UI bundle scripts", async () => {
+  const apiSource = fs.readFileSync(
+    path.resolve(import.meta.dirname, "../lib/api/plugins.ts"),
+    "utf8",
   );
-  assert.ok(writeIdx >= 0, "Expected fs.writeFileSync(rustOut, ...) in script");
-  assert.ok(fmtIdx > writeIdx, "Expected rustfmt --edition 2024 call after writing rustOut");
+  assert.match(apiSource, /listPluginRepositories/);
+  assert.match(apiSource, /savePluginRepositories/);
+  assert.match(apiSource, /getPluginRepositoryCatalog/);
+  assert.match(apiSource, /stagePluginUpload/);
+  assert.equal(apiSource.includes("ui_builtins_assets"), false);
 });

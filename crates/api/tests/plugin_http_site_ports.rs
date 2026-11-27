@@ -160,7 +160,7 @@ fn make_site(
         id,
         name: format!("site-{id}"),
         url: url.into(),
-        profile_id: "nexusphp".into(),
+        profile_id: "mteam".into(),
         cookie: cookie.map(str::to_string),
         api_key: api_key.map(str::to_string),
         rss_url: None,

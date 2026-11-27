@@ -168,6 +168,8 @@ fn sample_torrent(site_id: SiteId, id: &str, title: &str, enc: &str) -> Torrent 
         imdb_id: None,
         detail_url: None,
         category: Some("Movies".into()),
+        free_2x: false,
+        free_until: None,
     }
 }
 

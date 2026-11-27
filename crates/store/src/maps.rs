@@ -423,5 +423,7 @@ pub(super) fn torrent_from_json(value: &serde_json::Value) -> Result<Torrent, St
             .get("poster_url")
             .and_then(|v| v.as_str())
             .map(str::to_string),
+        free_2x: false,
+        free_until: None,
     })
 }

@@ -332,6 +332,13 @@ impl Downloader for QbitDownloader {
             .map(|info| {
                 let tag = our_tag(&info.tags);
                 let owned_tags = crate::owned_tags_from(info.tags.split(','));
+                let user_tags = crate::user_tags_from(info.tags.split(','));
+                let category = (!info.category.trim().is_empty()).then_some(info.category);
+                let ratio = if info.ratio.is_finite() && info.ratio >= 0.0 {
+                    info.ratio
+                } else {
+                    0.0
+                };
                 crate::TaskSnapshot {
                     owned_tags,
                     tag,
@@ -344,6 +351,13 @@ impl Downloader for QbitDownloader {
                     download_speed: info.dlspeed,
                     upload_speed: info.upspeed,
                     info_hash: info.hash,
+                    ratio,
+                    seeding_secs: info.seeding_time,
+                    added_at: (info.added_on > 0).then_some(info.added_on),
+                    completed_at: (info.completion_on > 0).then_some(info.completion_on),
+                    last_activity_at: (info.last_activity > 0).then_some(info.last_activity),
+                    category,
+                    user_tags,
                 }
             })
             .collect())

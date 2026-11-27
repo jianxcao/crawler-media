@@ -13,8 +13,11 @@ use indexer::RegistrySnapshot;
 use serde_json::{Value, json};
 use store::{BoostTaskState, PrepareBoostCleanupPlanInput};
 
-use crate::support::plugin_http_support::{HttpEnv, TOKEN, assert_ok, req_json};
-use crate::support::{NoopFetcher, poll_op, seed_boost_task};
+use crate::support::NoopFetcher;
+use crate::support::plugin_http_support::{
+    ADMIN_PASS, HttpEnv, TOKEN, assert_ok, plugins_fixture, req_json,
+};
+use crate::support::poll_op;
 
 struct FailingSnapshotsDownloader {
     inner: MemoryDownloader,
@@ -68,11 +71,11 @@ impl Downloader for FailingSnapshotsDownloader {
 }
 
 async fn run_boost_cmd(env: &HttpEnv, idem: &str, kind: &str, payload: Value) -> Value {
-    let rev = env.get_plugin_rev("builtin.boost").await;
+    let rev = env.get_plugin_rev("cm.boost").await;
     let (st, _, body) = env
         .send(req_json(
             "POST",
-            "/api/v1/plugins/builtin.boost/commands",
+            "/api/v1/plugins/cm.boost/commands",
             Some(TOKEN),
             &[
                 ("If-Match", &format!("\"{rev}\"")),
@@ -95,7 +98,7 @@ fn seed_planned_victim(
     handle: &str,
 ) -> (String, i64) {
     let stage = victim.parent().unwrap();
-    let tf = seed_boost_task(
+    let tf = plugins_fixture::seed_cm_boost_task(
         store,
         dl_id,
         site_id,
@@ -137,9 +140,10 @@ async fn slice_e_r6_item2_fail_closed_on_enabled_downloader_connect_and_task_sna
 
     let dl = Arc::new(FailingSnapshotsDownloader::new(stage.clone()));
     let store = Arc::new(Store::open(dir.path().join("data")).unwrap());
-    let state = ApiState::new_arc(
+    let state = ApiState::new_arc_with_admin_password(
         store,
         TOKEN.into(),
+        Some(ADMIN_PASS.into()),
         RegistrySnapshot::builtin().unwrap(),
         Arc::new(NoopFetcher),
         dl.clone(),
@@ -151,6 +155,7 @@ async fn slice_e_r6_item2_fail_closed_on_enabled_downloader_connect_and_task_sna
         state,
         member_token: String::new(),
     };
+    plugins_fixture::install_cm_boost(&env, false, false, false).await;
     let site_id = env.insert_site("PT-R6");
     let dl_def = DownloaderId::new();
     env.state
@@ -182,7 +187,7 @@ async fn slice_e_r6_item2_fail_closed_on_enabled_downloader_connect_and_task_sna
     let (st_tok, _, b_tok) = env
         .send(req_json(
             "GET",
-            "/api/v1/plugins/builtin.boost/brush-cleanup-preview?plan_handle=r6-snap-plan",
+            "/api/v1/plugins/cm.boost/brush-cleanup-preview?plan_handle=r6-snap-plan",
             Some(TOKEN),
             &[],
             None,
@@ -197,7 +202,7 @@ async fn slice_e_r6_item2_fail_closed_on_enabled_downloader_connect_and_task_sna
     let (st_prev_err, _, _) = env
         .send(req_json(
             "GET",
-            "/api/v1/plugins/builtin.boost/brush-cleanup-preview?plan_handle=r6-snap-plan",
+            "/api/v1/plugins/cm.boost/brush-cleanup-preview?plan_handle=r6-snap-plan",
             Some(TOKEN),
             &[],
             None,
@@ -235,7 +240,7 @@ async fn assert_unreachable_enabled_downloader_fails_closed(
     victim_unreach: &Path,
 ) {
     let dl_live = env.insert_downloader("SecondEnabledUnreachableQbit");
-    let tf_ret = seed_boost_task(
+    let tf_ret = plugins_fixture::seed_cm_boost_task(
         env.state.store().as_ref(),
         dl_live,
         site_id,
@@ -291,7 +296,7 @@ async fn assert_unreachable_enabled_downloader_fails_closed(
     let (st_dis, _, _) = env
         .send(req_json(
             "GET",
-            &format!("/api/v1/plugins/builtin.boost/brush-cleanup-preview?task_ids={tf_ret}"),
+            &format!("/api/v1/plugins/cm.boost/brush-cleanup-preview?task_ids={tf_ret}"),
             Some(TOKEN),
             &[],
             None,

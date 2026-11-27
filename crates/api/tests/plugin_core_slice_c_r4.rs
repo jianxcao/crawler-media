@@ -160,6 +160,8 @@ fn build_plan_and_ctx(
         imdb_id: None,
         detail_url: None,
         category: None,
+        free_2x: false,
+        free_until: None,
     };
     let plan = FrozenDownloadPlan {
         torrent,
@@ -322,7 +324,7 @@ async fn reconciling_unknown_op_reusing_existing_owned_tag_submits_without_forei
     let (b_plan, b_ctx) = build_plan_and_ctx(
         (site_id, &url, "Boost.Reconcile.1999.1080p"),
         SubmissionPurpose::Boost,
-        Some("builtin.boost"),
+        Some("cm.boost"),
         "idem-r4-boost-2",
     );
     let second_tag = format!("cm-op:{}", b_ctx.operation_id);

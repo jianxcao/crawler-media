@@ -2016,8 +2016,17 @@ def _make_sweep_broken_handler(smart: bool):
         perm_consents = {}
         trust_keys = {}
         plugins = {
-            "builtin.checkin": {
-                "id": "builtin.checkin",
+            "builtin.nexusphp-maintenance": {
+                "id": "builtin.nexusphp-maintenance",
+                "revision": 1,
+                "config_revision": 1,
+                "generation": 1,
+                "lifecycle": "enabled",
+                "enabled": True,
+                "package_hash": "0" * 64,
+            },
+            "cm.checkin": {
+                "id": "cm.checkin",
                 "revision": 1,
                 "config_revision": 1,
                 "generation": 1,
@@ -2025,8 +2034,8 @@ def _make_sweep_broken_handler(smart: bool):
                 "enabled": True,
                 "package_hash": "a" * 64,
             },
-            "builtin.boost": {
-                "id": "builtin.boost",
+            "cm.boost": {
+                "id": "cm.boost",
                 "revision": 1,
                 "config_revision": 1,
                 "generation": 1,
@@ -2860,8 +2869,9 @@ class TestIteration2IntegrityAndRegressions(unittest.TestCase):
             libs = {}
             subs = {}
             plugins = {
-                "builtin.checkin": {"id": "builtin.checkin", "revision": 1, "lifecycle": "enabled"},
-                "builtin.boost": {"id": "builtin.boost", "revision": 1, "lifecycle": "enabled"},
+                "builtin.nexusphp-maintenance": {"id": "builtin.nexusphp-maintenance", "revision": 1, "lifecycle": "enabled"},
+                "cm.checkin": {"id": "cm.checkin", "revision": 1, "lifecycle": "enabled"},
+                "cm.boost": {"id": "cm.boost", "revision": 1, "lifecycle": "enabled"},
             }
             admin_user = {"id": "00000000-0000-0000-0000-000000000001", "login": "admin", "role": "admin", "enabled": True}
             transfer_rev = 1
@@ -3688,13 +3698,13 @@ class TestIteration2IntegrityAndRegressions(unittest.TestCase):
             def do_GET(self) -> None:
                 path = urllib.parse.urlsplit(self.path).path
                 if path == "/api/v1/plugins":
-                    self._ok([{"id": "builtin.checkin", "revision": 1, "lifecycle": "enabled", "package_hash": "a" * 64}])
-                elif path == "/api/v1/plugins/builtin.checkin/ui":
+                    self._ok([{"id": "cm.checkin", "revision": 1, "lifecycle": "enabled", "package_hash": "a" * 64}])
+                elif path == "/api/v1/plugins/cm.checkin/ui":
                     self._ok(
                         {
-                            "plugin_id": "builtin.checkin",
+                            "plugin_id": "cm.checkin",
                             "package_hash": "a" * 64,
-                            "entry_url": "/api/v1/plugin-ui-assets/builtin.checkin/" + ("a" * 64) + "/ui/assets/remoteEntry.js",
+                            "entry_url": "/api/v1/plugin-ui-assets/cm.checkin/" + ("a" * 64) + "/ui/assets/remoteEntry.js",
                             "surfaces": [
                                 {"id": "cfg", "kind": "config"},
                                 {"id": "pg", "kind": "page"},
@@ -4734,17 +4744,17 @@ class TestE2EM3Tier3AndTier4(unittest.TestCase):
             brush_used = {}
             reauth_map = {}
             plugin_assets = {
-                "builtin.checkin": {"ui/assets/remoteEntry.js": b"export const checkinRemote = true;\n"},
-                "builtin.boost": {"ui/assets/remoteEntry.js": b"export const boostRemote = true;\n"},
+                "cm.checkin": {"ui/assets/remoteEntry.js": b"export const checkinRemote = true;\n"},
+                "cm.boost": {"ui/assets/remoteEntry.js": b"export const boostRemote = true;\n"},
             }
             plugin_surfaces = {
-                "builtin.checkin": [
+                "cm.checkin": [
                     {"id": "cfg", "kind": "config", "title": "Config"},
                     {"id": "pg", "kind": "page", "title": "Page"},
                     {"id": "app", "kind": "app", "title": "App"},
                     {"id": "dash", "kind": "dashboard", "title": "Dashboard"},
                 ],
-                "builtin.boost": [
+                "cm.boost": [
                     {"id": "cfg", "kind": "config", "title": "Config"},
                     {"id": "pg", "kind": "page", "title": "Page"},
                     {"id": "app", "kind": "app", "title": "App"},
@@ -4753,16 +4763,16 @@ class TestE2EM3Tier3AndTier4(unittest.TestCase):
             }
             plugin_http_rules = {}
             plugins = {
-                "builtin.checkin": {
-                    "id": "builtin.checkin",
+                "cm.checkin": {
+                    "id": "cm.checkin",
                     "version": "1.0.0",
                     "revision": 1,
                     "generation": 1,
                     "lifecycle": "enabled",
                     "package_hash": "a" * 64,
                 },
-                "builtin.boost": {
-                    "id": "builtin.boost",
+                "cm.boost": {
+                    "id": "cm.boost",
                     "version": "1.0.0",
                     "revision": 1,
                     "generation": 1,
@@ -5354,7 +5364,7 @@ class TestE2EM3Tier3AndTier4(unittest.TestCase):
                 path = urllib.parse.urlsplit(self.path).path
                 if noop_state["get_valid_plugin"] and path.startswith("/api/v1/plugins/"):
                     self._send_ok(
-                        {"id": "builtin.boost", "revision": 1, "lifecycle": "installed-disabled", "generation": 0}
+                        {"id": "cm.boost", "revision": 1, "lifecycle": "installed-disabled", "generation": 0}
                     )
                     return
                 if path.startswith("/api/v1/plugin-operations/"):
@@ -5387,9 +5397,9 @@ class TestE2EM3Tier3AndTier4(unittest.TestCase):
                             noop_state["get_valid_plugin"] = False
                             noop_state["reauth_valid"] = False
                             for fn in (
-                                lambda: ensure_plugin_enabled(ctx, "builtin.boost"),
-                                lambda: enable_plugin(ctx, "builtin.boost"),
-                                lambda: disable_plugin(ctx, "builtin.boost"),
+                                lambda: ensure_plugin_enabled(ctx, "cm.boost"),
+                                lambda: enable_plugin(ctx, "cm.boost"),
+                                lambda: disable_plugin(ctx, "cm.boost"),
                                 lambda: obtain_reauth(ctx),
                             ):
                                 with self.assertRaises(AssertionError) as cm:
@@ -5399,8 +5409,8 @@ class TestE2EM3Tier3AndTier4(unittest.TestCase):
                             # Direct POST /enable (revision=1) & POST /disable when POST returns {}, [], None
                             noop_state["get_valid_plugin"] = True
                             for fn in (
-                                lambda: enable_plugin(ctx, "builtin.boost", revision=1),
-                                lambda: disable_plugin(ctx, "builtin.boost"),
+                                lambda: enable_plugin(ctx, "cm.boost", revision=1),
+                                lambda: disable_plugin(ctx, "cm.boost"),
                             ):
                                 with self.assertRaises(AssertionError) as cm:
                                     fn()
@@ -5742,7 +5752,7 @@ class TestE2EM3Tier3AndTier4(unittest.TestCase):
                         ("T3-P15", 2),
                         ("T3-P15", 3),
                         ("T3-P21", 1),
-                        ("T4-SCEN-06", 2),  # 1st is builtin.checkin GET; 2nd is hook_pid enable
+                        ("T4-SCEN-06", 2),  # 1st is cm.checkin GET; 2nd is hook_pid enable
                         ("T4-SCEN-10", 1),
                         ("T4-SCEN-13", 1),
                         ("T3-P12", 1),
@@ -5753,16 +5763,24 @@ class TestE2EM3Tier3AndTier4(unittest.TestCase):
                         FailAtEnableHandler.enable_attempts = 0
                         FailAtEnableHandler.browser_enabled = False
                         if cid == "T4-SCEN-06":
-                            FailAtEnableHandler.plugins["builtin.checkin"] = {
-                                "id": "builtin.checkin",
+                            FailAtEnableHandler.plugins["cm.checkin"] = {
+                                "id": "cm.checkin",
                                 "revision": 1,
                                 "generation": 1,
                                 "lifecycle": "enabled",
                             }
                             fail_config["fail_on_enable_count"] = 1
                         elif cid == "T3-P15":
-                            FailAtEnableHandler.plugins["builtin.boost"] = {
-                                "id": "builtin.boost",
+                            FailAtEnableHandler.plugins["cm.boost"] = {
+                                "id": "cm.boost",
+                                "revision": 1,
+                                "generation": 1,
+                                "lifecycle": "enabled",
+                            }
+                            fail_config["fail_on_enable_count"] = fail_idx
+                        elif cid in ("T3-P11", "T3-P12", "T3-P13", "T4-SCEN-07"):
+                            FailAtEnableHandler.plugins["builtin.nexusphp-maintenance"] = {
+                                "id": "builtin.nexusphp-maintenance",
                                 "revision": 1,
                                 "generation": 1,
                                 "lifecycle": "enabled",
@@ -5774,7 +5792,7 @@ class TestE2EM3Tier3AndTier4(unittest.TestCase):
                             with self.assertRaises(ApiError):
                                 by_id[cid].fn(ctx)
                         leaked = {
-                            k for k in FailAtEnableHandler.plugins if k not in ("builtin.checkin", "builtin.boost")
+                            k for k in FailAtEnableHandler.plugins if k not in ("cm.checkin", "cm.boost", "builtin.nexusphp-maintenance")
                         }
                         self.assertEqual(leaked, set(), f"{cid} (fail_idx={fail_idx}) leaked plugins: {leaked}")
                         self.assertFalse(FailAtEnableHandler.browser_enabled, f"{cid} leaked browser_enabled=True")

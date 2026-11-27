@@ -114,6 +114,8 @@ async fn source_quality_survives_persistence_for_wash_cut() {
         detail_url: None,
         category: None,
         poster_url: None,
+        free_2x: false,
+        free_until: None,
     };
     let candidate = filter::ScoredTorrent {
         release: release::parse(&torrent.title),

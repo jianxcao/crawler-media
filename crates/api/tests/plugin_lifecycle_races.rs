@@ -159,6 +159,8 @@ async fn subscribe_transfer_chains_transfer_rename_off_lease_and_records_audit()
         category: None,
         detail_url: None,
         poster_url: None,
+        free_2x: false,
+        free_until: None,
     };
     dl.map_enclosure(&t.enclosure, src_file.clone());
 

@@ -276,7 +276,7 @@ def register_cases(registry: SuiteRegistry) -> None:
         id="T1-F15-03",
         tier=1,
         feature_id=15,
-        name="builtin.boost brush-state accounts exact verified_total_bytes",
+        name="cm.boost brush-state accounts exact verified_total_bytes",
         self_test=False,
     )
     def test_f15_boost_verified_bytes(ctx: TestContext) -> None:
@@ -286,10 +286,10 @@ def register_cases(registry: SuiteRegistry) -> None:
         qb = ctx.new_qbit()
         dl = ensure_downloader(ctx, qb.url)
         site = ensure_site(ctx, pt.url, profile_id="demo")
-        ensure_plugin_enabled(ctx, "builtin.boost")
+        ensure_plugin_enabled(ctx, "cm.boost")
         op = ctx.call_phase1(
             "POST",
-            "/api/v1/plugins/builtin.boost/commands",
+            "/api/v1/plugins/cm.boost/commands",
             json_body={
                 "kind": "downloader.add",
                 "payload": {
@@ -304,7 +304,7 @@ def register_cases(registry: SuiteRegistry) -> None:
         assert poll_operation(ctx, op["operation_id"])["state"] == "succeeded"
         state = ctx.call_phase1(
             "GET",
-            f"/api/v1/plugins/builtin.boost/brush-state?site_id={site['id']}&downloader_id={dl['id']}",
+            f"/api/v1/plugins/cm.boost/brush-state?site_id={site['id']}&downloader_id={dl['id']}",
         )
         assert int(state["used_bytes"]) >= 4096 and "reserved_bytes" in state
 
@@ -385,7 +385,7 @@ def register_cases(registry: SuiteRegistry) -> None:
         qb = ctx.new_qbit()
         dl = ensure_downloader(ctx, qb.url)
         site = ensure_site(ctx, pt.url, profile_id="demo")
-        ensure_plugin_enabled(ctx, "builtin.boost")
+        ensure_plugin_enabled(ctx, "cm.boost")
         sub = ctx.call_phase1(
             "POST",
             "/api/v1/downloaders/submit",
@@ -404,7 +404,7 @@ def register_cases(registry: SuiteRegistry) -> None:
         assert any(t.get("info_hash") == pt.default_torrent.info_hash for t in tasks)
         bop = ctx.call_phase1(
             "POST",
-            "/api/v1/plugins/builtin.boost/commands",
+            "/api/v1/plugins/cm.boost/commands",
             json_body={
                 "kind": "downloader.add",
                 "payload": {
@@ -419,7 +419,7 @@ def register_cases(registry: SuiteRegistry) -> None:
         assert poll_operation(ctx, bop["operation_id"])["state"] == "succeeded"
         state = ctx.call_phase1(
             "GET",
-            f"/api/v1/plugins/builtin.boost/brush-state?site_id={site['id']}&downloader_id={dl['id']}",
+            f"/api/v1/plugins/cm.boost/brush-state?site_id={site['id']}&downloader_id={dl['id']}",
         )
         assert int(state["used_bytes"]) >= boost_tf.verified_total_bytes
 
@@ -440,7 +440,7 @@ def register_cases(registry: SuiteRegistry) -> None:
         site = ensure_site(ctx, pt.url, profile_id="demo")
         lib = ensure_library(ctx)
         sub = create_subscribe(ctx, lib["id"])
-        ensure_plugin_enabled(ctx, "builtin.boost")
+        ensure_plugin_enabled(ctx, "cm.boost")
         ctx.call_phase1(
             "POST",
             "/api/v1/search/admit",
@@ -449,7 +449,7 @@ def register_cases(registry: SuiteRegistry) -> None:
         )
         bop = ctx.call_phase1(
             "POST",
-            "/api/v1/plugins/builtin.boost/commands",
+            "/api/v1/plugins/cm.boost/commands",
             json_body={
                 "kind": "downloader.add",
                 "payload": {
@@ -467,7 +467,7 @@ def register_cases(registry: SuiteRegistry) -> None:
         assert any(t.get("info_hash") == pt.default_torrent.info_hash for t in tasks)
         state = ctx.call_phase1(
             "GET",
-            f"/api/v1/plugins/builtin.boost/brush-state?site_id={site['id']}&downloader_id={dl['id']}",
+            f"/api/v1/plugins/cm.boost/brush-state?site_id={site['id']}&downloader_id={dl['id']}",
         )
         assert int(state["used_bytes"]) >= boost_tf.verified_total_bytes
 
@@ -492,7 +492,7 @@ def register_cases(registry: SuiteRegistry) -> None:
             hooks=[{"id": "download.before", "priority": 200}],
             enable=True,
         )
-        ensure_plugin_enabled(ctx, "builtin.boost")
+        ensure_plugin_enabled(ctx, "cm.boost")
         res = ctx.call_phase1(
             "POST",
             "/api/v1/downloaders/submit",
@@ -514,7 +514,7 @@ def register_cases(registry: SuiteRegistry) -> None:
         )
         state = ctx.call_phase1(
             "GET",
-            f"/api/v1/plugins/builtin.boost/brush-state?site_id={site['id']}&downloader_id={dl['id']}",
+            f"/api/v1/plugins/cm.boost/brush-state?site_id={site['id']}&downloader_id={dl['id']}",
         )
         assert len(tasks) >= 1 or len(acts) >= 1
         assert "used_bytes" in state and "reserved_bytes" in state
@@ -533,7 +533,7 @@ def register_cases(registry: SuiteRegistry) -> None:
         qb.seed_foreign_torrent(foreign_hash, name="foreign.iso", size=2048, tags="manual")
         dl = ensure_downloader(ctx, qb.url)
         site = ensure_site(ctx, pt.url, profile_id="demo")
-        ensure_plugin_enabled(ctx, "builtin.boost")
+        ensure_plugin_enabled(ctx, "cm.boost")
         owned_res = ctx.call_phase1(
             "POST",
             "/api/v1/downloaders/submit",
@@ -561,7 +561,7 @@ def register_cases(registry: SuiteRegistry) -> None:
         )
         state = ctx.call_phase1(
             "GET",
-            f"/api/v1/plugins/builtin.boost/brush-state?downloader_id={dl['id']}",
+            f"/api/v1/plugins/cm.boost/brush-state?downloader_id={dl['id']}",
         )
         assert not any(t.get("info_hash") == foreign_hash for t in (state.get("tasks") or []))
 
@@ -578,7 +578,7 @@ def register_cases(registry: SuiteRegistry) -> None:
         qb.reject_next_add = True
         dl = ensure_downloader(ctx, qb.url)
         site = ensure_site(ctx, pt.url, profile_id="demo")
-        ensure_plugin_enabled(ctx, "builtin.boost")
+        ensure_plugin_enabled(ctx, "cm.boost")
         try:
             res = ctx.call_phase1(
                 "POST",
@@ -609,7 +609,7 @@ def register_cases(registry: SuiteRegistry) -> None:
         assert len(qb.torrents) == 0
         state = ctx.call_phase1(
             "GET",
-            f"/api/v1/plugins/builtin.boost/brush-state?site_id={site['id']}&downloader_id={dl['id']}",
+            f"/api/v1/plugins/cm.boost/brush-state?site_id={site['id']}&downloader_id={dl['id']}",
         )
         assert int(state.get("reserved_bytes", 0)) == 0
 
@@ -765,10 +765,10 @@ def register_cases(registry: SuiteRegistry) -> None:
         qb = ctx.new_qbit()
         dl = ensure_downloader(ctx, qb.url)
         site = ensure_site(ctx, pt.url, profile_id="demo")
-        ensure_plugin_enabled(ctx, "builtin.boost")
+        ensure_plugin_enabled(ctx, "cm.boost")
         op = ctx.call_phase1(
             "POST",
-            "/api/v1/plugins/builtin.boost/commands",
+            "/api/v1/plugins/cm.boost/commands",
             json_body={
                 "kind": "downloader.add",
                 "payload": {
@@ -793,7 +793,7 @@ def register_cases(registry: SuiteRegistry) -> None:
         id="T1-F18-01",
         tier=1,
         feature_id=18,
-        name="builtin.boost dry_run cycle leaves reserved_bytes == 0 and 0 qB add/delete calls",
+        name="cm.boost dry_run cycle leaves reserved_bytes == 0 and 0 qB add/delete calls",
         self_test=False,
     )
     def test_f18_boost_dry_run(ctx: TestContext) -> None:
@@ -801,18 +801,18 @@ def register_cases(registry: SuiteRegistry) -> None:
         qb = ctx.new_qbit()
         dl = ensure_downloader(ctx, qb.url)
         site = ensure_site(ctx, pt.url, profile_id="demo")
-        ensure_plugin_enabled(ctx, "builtin.boost")
+        ensure_plugin_enabled(ctx, "cm.boost")
         before_req = len(qb.request_log)
         op = ctx.call_phase1(
             "POST",
-            "/api/v1/plugins/builtin.boost/commands",
+            "/api/v1/plugins/cm.boost/commands",
             json_body={"kind": "boost.run", "payload": {"site_id": site["id"], "downloader_id": dl["id"], "dry_run": True}},
             idempotency_key=uniq("dry"),
         )
         assert poll_operation(ctx, op["operation_id"])["state"] == "succeeded"
         state = ctx.call_phase1(
             "GET",
-            f"/api/v1/plugins/builtin.boost/brush-state?site_id={site['id']}&downloader_id={dl['id']}",
+            f"/api/v1/plugins/cm.boost/brush-state?site_id={site['id']}&downloader_id={dl['id']}",
         )
         assert int(state.get("reserved_bytes", 0)) == 0
         mutating = [
@@ -820,7 +820,7 @@ def register_cases(registry: SuiteRegistry) -> None:
             if r["path"] in ("/api/v2/torrents/add", "/api/v2/torrents/delete")
         ]
         assert mutating == []
-        audit = unwrap_list(ctx.call_phase1("GET", "/api/v1/plugins/builtin.boost/audit?limit=50"), "audit")
+        audit = unwrap_list(ctx.call_phase1("GET", "/api/v1/plugins/cm.boost/audit?limit=50"), "audit")
         boost_audit = any(
             isinstance(a, dict)
             and a.get("action") not in (
@@ -844,7 +844,7 @@ def register_cases(registry: SuiteRegistry) -> None:
             or boost_audit
         )
         assert ran_boost, (
-            f"Expected builtin.boost dry_run to execute "
+            f"Expected cm.boost dry_run to execute "
             f"(pt={pt.request_log!r}, qb={qb.request_log[before_req:]!r}, audit={audit!r})"
         )
 
@@ -852,7 +852,7 @@ def register_cases(registry: SuiteRegistry) -> None:
         id="T1-F18-02",
         tier=1,
         feature_id=18,
-        name="builtin.boost active cycle updates brush-state with used_bytes, tasks, and disk",
+        name="cm.boost active cycle updates brush-state with used_bytes, tasks, and disk",
         self_test=False,
     )
     def test_f18_boost_active_cycle(ctx: TestContext) -> None:
@@ -860,17 +860,17 @@ def register_cases(registry: SuiteRegistry) -> None:
         qb = ctx.new_qbit()
         dl = ensure_downloader(ctx, qb.url)
         site = ensure_site(ctx, pt.url, profile_id="demo")
-        ensure_plugin_enabled(ctx, "builtin.boost")
+        ensure_plugin_enabled(ctx, "cm.boost")
         op = ctx.call_phase1(
             "POST",
-            "/api/v1/plugins/builtin.boost/commands",
+            "/api/v1/plugins/cm.boost/commands",
             json_body={"kind": "boost.run", "payload": {"site_id": site["id"], "downloader_id": dl["id"], "dry_run": False}},
             idempotency_key=uniq("actcyc"),
         )
         assert poll_operation(ctx, op["operation_id"])["state"] == "succeeded"
         state = ctx.call_phase1(
             "GET",
-            f"/api/v1/plugins/builtin.boost/brush-state?site_id={site['id']}&downloader_id={dl['id']}",
+            f"/api/v1/plugins/cm.boost/brush-state?site_id={site['id']}&downloader_id={dl['id']}",
         )
         for key in ("used_bytes", "reserved_bytes", "retained_file_bytes", "tasks", "disk"):
             assert key in state, f"Missing {key} in brush-state: {state!r}"
@@ -892,10 +892,10 @@ def register_cases(registry: SuiteRegistry) -> None:
         pt = ctx.new_pt_site()
         dl = ensure_downloader(ctx, qb.url)
         site = ensure_site(ctx, pt.url, profile_id="demo")
-        ensure_plugin_enabled(ctx, "builtin.boost")
+        ensure_plugin_enabled(ctx, "cm.boost")
         add_op = ctx.call_phase1(
             "POST",
-            "/api/v1/plugins/builtin.boost/commands",
+            "/api/v1/plugins/cm.boost/commands",
             json_body={
                 "kind": "downloader.add",
                 "payload": {
@@ -920,7 +920,7 @@ def register_cases(registry: SuiteRegistry) -> None:
         tid = matched[0]["id"]
         del_op = ctx.call_phase1(
             "POST",
-            "/api/v1/plugins/builtin.boost/commands",
+            "/api/v1/plugins/cm.boost/commands",
             json_body={"kind": "downloader.delete-task", "payload": {"task_id": tid}},
             idempotency_key=uniq("bdel"),
         )
@@ -929,7 +929,7 @@ def register_cases(registry: SuiteRegistry) -> None:
         assert list(save_dir.glob("**/*.mkv")), f"Expected retained .mkv file in {save_dir}"
         state = ctx.call_phase1(
             "GET",
-            f"/api/v1/plugins/builtin.boost/brush-state?site_id={site['id']}&downloader_id={dl['id']}",
+            f"/api/v1/plugins/cm.boost/brush-state?site_id={site['id']}&downloader_id={dl['id']}",
         )
         assert int(state["retained_file_bytes"]) > 0
 
@@ -946,10 +946,10 @@ def register_cases(registry: SuiteRegistry) -> None:
         pt = ctx.new_pt_site()
         dl = ensure_downloader(ctx, qb.url)
         site = ensure_site(ctx, pt.url, profile_id="demo")
-        ensure_plugin_enabled(ctx, "builtin.boost")
+        ensure_plugin_enabled(ctx, "cm.boost")
         add_op = ctx.call_phase1(
             "POST",
-            "/api/v1/plugins/builtin.boost/commands",
+            "/api/v1/plugins/cm.boost/commands",
             json_body={
                 "kind": "downloader.add",
                 "payload": {
@@ -974,14 +974,14 @@ def register_cases(registry: SuiteRegistry) -> None:
         tid = matched[0]["id"]
         del_op = ctx.call_phase1(
             "POST",
-            "/api/v1/plugins/builtin.boost/commands",
+            "/api/v1/plugins/cm.boost/commands",
             json_body={"kind": "downloader.delete-task", "payload": {"task_id": tid}},
             idempotency_key=uniq("cdel"),
         )
         assert poll_operation(ctx, del_op["operation_id"])["state"] == "succeeded"
         prep_op = ctx.call_phase1(
             "POST",
-            "/api/v1/plugins/builtin.boost/commands",
+            "/api/v1/plugins/cm.boost/commands",
             json_body={
                 "kind": "downloader.prepare-cleanup",
                 "payload": {"site_id": site["id"], "downloader_id": dl["id"], "task_ids": [tid]},
@@ -994,13 +994,13 @@ def register_cases(registry: SuiteRegistry) -> None:
         assert plan_handle, f"Missing plan_handle from prepare-cleanup: {done!r}"
         preview = ctx.call_phase1(
             "GET",
-            f"/api/v1/plugins/builtin.boost/brush-cleanup-preview?plan_handle={plan_handle}",
+            f"/api/v1/plugins/cm.boost/brush-cleanup-preview?plan_handle={plan_handle}",
         )
         assert preview.get("mode") == "plan"
         assert preview.get("confirmation_token")
         del_files_op = ctx.call_phase1(
             "POST",
-            "/api/v1/plugins/builtin.boost/commands",
+            "/api/v1/plugins/cm.boost/commands",
             json_body={
                 "kind": "downloader.delete-files",
                 "payload": {
@@ -1015,7 +1015,7 @@ def register_cases(registry: SuiteRegistry) -> None:
         assert poll_operation(ctx, del_files_op["operation_id"])["state"] == "succeeded"
         state_after = ctx.call_phase1(
             "GET",
-            f"/api/v1/plugins/builtin.boost/brush-state?site_id={site['id']}&downloader_id={dl['id']}",
+            f"/api/v1/plugins/cm.boost/brush-state?site_id={site['id']}&downloader_id={dl['id']}",
         )
         assert int(state_after["retained_file_bytes"]) == 0
         assert not list(save_dir.glob("**/*.mkv"))
@@ -1032,10 +1032,10 @@ def register_cases(registry: SuiteRegistry) -> None:
         qb = ctx.new_qbit()
         dl = ensure_downloader(ctx, qb.url)
         site = ensure_site(ctx, pt.url, profile_id="demo")
-        ensure_plugin_enabled(ctx, "builtin.boost")
+        ensure_plugin_enabled(ctx, "cm.boost")
         add_op = ctx.call_phase1(
             "POST",
-            "/api/v1/plugins/builtin.boost/commands",
+            "/api/v1/plugins/cm.boost/commands",
             json_body={
                 "kind": "downloader.add",
                 "payload": {
@@ -1050,7 +1050,7 @@ def register_cases(registry: SuiteRegistry) -> None:
         assert poll_operation(ctx, add_op["operation_id"])["state"] == "succeeded"
         op = ctx.call_phase1(
             "POST",
-            "/api/v1/plugins/builtin.boost/commands",
+            "/api/v1/plugins/cm.boost/commands",
             json_body={
                 "kind": "downloader.control",
                 "payload": {

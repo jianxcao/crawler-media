@@ -168,7 +168,7 @@ fn hdarea_api_search_builds_rest_v1_get_and_parses_items() {
         first.detail_url.as_deref(),
         Some("https://hdarea.club/details.php?id=469752")
     );
-    assert_eq!(first.category.as_deref(), Some("TV Shows"));
+    assert_eq!(first.category.as_deref(), Some("tv"));
     assert_eq!(
         first.enclosure,
         "https://hdarea.club/download.php?id=469752&dl_token=searchtok"
@@ -285,6 +285,8 @@ fn hdarea_resolve_torrent_download_handles_string_and_object_shapes() {
         detail_url: None,
         category: None,
         poster_url: None,
+        free_2x: false,
+        free_until: None,
     };
 
     assert_eq!(
@@ -405,6 +407,8 @@ fn hdarea_resolve_torrent_download_short_circuits_existing_dl_token_and_passkey(
         detail_url: None,
         category: None,
         poster_url: None,
+        free_2x: false,
+        free_until: None,
     };
 
     assert_eq!(

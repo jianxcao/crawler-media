@@ -375,6 +375,8 @@ fn seed_subscriptions(store: &Store, admin_id: UserId, media_id: MediaId, lib_id
                     detail_url: None,
                     category: None,
                     poster_url: None,
+                    free_2x: false,
+                    free_until: None,
                 },
                 release_override: None,
                 downloader_id: None,

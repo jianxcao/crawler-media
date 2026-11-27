@@ -6,8 +6,6 @@ use store::plugins::PluginVersionMetadata;
 
 use super::staging::hex_lower;
 use super::types::PluginServiceError;
-use super::ui_builtins::builtin_bundle_sha256;
-use super::ui_builtins_assets::builtin_asset_manifest_bytes;
 
 fn package_root_dir(data_dir: &Path, version: &PluginVersionMetadata) -> PathBuf {
     let artifact = Path::new(&version.artifact_path);
@@ -122,10 +120,6 @@ pub(crate) async fn resolve_bundle_sha256(
     version: &PluginVersionMetadata,
     ui: &UiManifest,
 ) -> Result<String, PluginServiceError> {
-    if version.signature_status == "builtin" {
-        return Ok(builtin_bundle_sha256(&version.plugin_id)
-            .unwrap_or_else(|| version.package_hash.clone()));
-    }
     let pkg_root = package_root_dir(data_dir, version);
     if let Some(bytes) = read_verified_ui_manifest_bytes(&pkg_root, version, ui).await? {
         return Ok(hex_lower(&Sha256::digest(&bytes)));
@@ -159,11 +153,6 @@ pub(super) async fn resolve_ui_styles(
     version: &PluginVersionMetadata,
     ui: &UiManifest,
 ) -> Result<Vec<String>, PluginServiceError> {
-    if version.signature_status == "builtin" {
-        return Ok(builtin_asset_manifest_bytes(&version.plugin_id)
-            .map(extract_manifest_styles)
-            .unwrap_or_default());
-    }
     let pkg_root = package_root_dir(data_dir, version);
     Ok(read_verified_ui_manifest_bytes(&pkg_root, version, ui)
         .await?

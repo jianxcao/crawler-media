@@ -82,6 +82,8 @@ fn seed_pending_at(root: &std::path::Path, enclosure: &str, submitted_at: i64) -
         detail_url: None,
         category: None,
         poster_url: None,
+        free_2x: false,
+        free_until: None,
     };
     store
         .merge_pending(
@@ -280,6 +282,7 @@ async fn list_tasks_does_not_bind_pending_to_same_size_different_title() {
         upload_speed: 0,
         info_hash: "bbbb".into(),
         owned_tags: vec![],
+        ..Default::default()
     });
     let app = router(state(
         tmp.path(),
@@ -540,6 +543,7 @@ async fn untagged_reachable_snapshot_does_not_prune_stale_pending() {
         upload_speed: 0,
         info_hash: "cccccccccccccccccccccccccccccccccccccccc".into(),
         owned_tags: vec![],
+        ..Default::default()
     });
     let app = router(state(
         tmp.path(),
@@ -597,6 +601,8 @@ async fn d_l4_deleting_a_downloader_orphans_its_pending() {
             detail_url: None,
             category: None,
             poster_url: None,
+            free_2x: false,
+            free_until: None,
         };
         store
             .merge_pending(
@@ -715,6 +721,7 @@ async fn list_tasks_succeeds_without_writing_when_read_only_even_with_stale_abse
         upload_speed: 0,
         info_hash: "cccc".into(),
         owned_tags: vec![downloader::ownership_tag("https://pt.example/other")],
+        ..Default::default()
     });
     let base_state = state(
         tmp.path(),

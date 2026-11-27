@@ -11,6 +11,8 @@ mod plugin_browser;
 mod profile;
 mod provider;
 mod registry;
+mod tz;
+mod user_stats;
 
 pub use browser::{
     Browser, BrowserConfig, BrowserRoute, PageSession, RecordingFetcher, RenderedPage,
@@ -24,7 +26,7 @@ pub use plugin_browser::{
     CdpPluginPage, PluginBrowserError, PluginBrowserErrorKind, PluginBrowserLease,
     PluginBrowserPage, PluginNavResponse,
 };
-pub use profile::{ApiDialect, Framework, Profile};
+pub use profile::{ApiDialect, CategoryMapping, Framework, Profile, normalize_category};
 pub use provider::{
     AuthType, IndexerProvider, MaintenanceAction, MaintenanceCallContext, MaintenanceDescriptor,
     MaintenanceOutcome, MaintenanceProvider, MaintenanceState, ProviderAvailability,
@@ -34,3 +36,4 @@ pub use provider::{
 pub use registry::{
     IndexerEntry, MaintenanceEntry, RegistryCandidate, RegistrySnapshot, parse_plugin_provider_id,
 };
+pub use tz::{parse_site_datetime, resolve_offset_secs};

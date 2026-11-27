@@ -160,10 +160,21 @@ impl tasks::Guest for TaskFixture {
                 core::hint::spin_loop();
             },
             "boost-snapshot" => run_boost_snapshot(),
+            "boost-run-cycle" => run_boost_run_cycle(),
             "downloader-commands" => run_downloader_commands(),
             "submit-and-state" | _ => run_submit_and_state(),
         }
     }
+}
+
+fn run_boost_run_cycle() -> Result<tasks::TaskOutcome, types::ApiError> {
+    let summary = boost::run_cycle("{\"dry_run\":true}")?;
+    Ok(tasks::TaskOutcome {
+        partial: false,
+        progress: 100,
+        operation_ids: Vec::new(),
+        summary,
+    })
 }
 
 fn run_boost_snapshot() -> Result<tasks::TaskOutcome, types::ApiError> {

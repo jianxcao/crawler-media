@@ -1,5 +1,5 @@
 use crate::bindings::{
-    crawler::plugin::{log, types},
+    crawler::plugin::{boost, log, types},
     endpoint_world, exports, task_world,
 };
 use plugin_api as api;
@@ -134,7 +134,7 @@ impl From<types::TaskControl> for api::TaskControl {
     }
 }
 
-impl From<api::BoostDisk> for task_world::crawler::plugin::boost::Disk {
+impl From<api::BoostDisk> for boost::Disk {
     fn from(value: api::BoostDisk) -> Self {
         Self {
             available_bytes: value.available_bytes,
@@ -144,7 +144,7 @@ impl From<api::BoostDisk> for task_world::crawler::plugin::boost::Disk {
     }
 }
 
-impl From<api::BoostReservationView> for task_world::crawler::plugin::boost::ReservationView {
+impl From<api::BoostReservationView> for boost::ReservationView {
     fn from(value: api::BoostReservationView) -> Self {
         Self {
             handle: value.handle,
@@ -161,7 +161,7 @@ impl From<api::BoostReservationView> for task_world::crawler::plugin::boost::Res
     }
 }
 
-impl From<api::BoostTaskView> for task_world::crawler::plugin::boost::TaskFactView {
+impl From<api::BoostTaskView> for boost::TaskFactView {
     fn from(value: api::BoostTaskView) -> Self {
         Self {
             handle: value.handle,
@@ -170,6 +170,17 @@ impl From<api::BoostTaskView> for task_world::crawler::plugin::boost::TaskFactVi
             site_id: value.site_id,
             info_hash: value.info_hash,
             state: value.state,
+            title: value.title,
+            progress_permille: value.progress_permille,
+            downloaded_bytes: value.downloaded_bytes,
+            upload_speed: value.upload_speed,
+            download_speed: value.download_speed,
+            seeding_secs: value.seeding_secs,
+            added_at: value.added_at,
+            completed_at: value.completed_at,
+            last_activity_at: value.last_activity_at,
+            category: value.category,
+            tags: value.tags,
             task_bytes: value.task_bytes,
             retained_bytes: value.retained_bytes,
             uploaded_bytes: value.uploaded_bytes,
@@ -185,7 +196,7 @@ impl From<api::BoostTaskView> for task_world::crawler::plugin::boost::TaskFactVi
     }
 }
 
-impl From<api::BoostSnapshotView> for task_world::crawler::plugin::boost::SnapshotView {
+impl From<api::BoostSnapshotView> for boost::SnapshotView {
     fn from(value: api::BoostSnapshotView) -> Self {
         Self {
             revision: value.revision,

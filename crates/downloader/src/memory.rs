@@ -17,6 +17,20 @@ pub struct MemorySubmission {
 }
 
 #[derive(Clone, Debug, Default)]
+pub struct MemoryTaskMetrics {
+    pub progress: f64,
+    pub state: Option<String>,
+    pub downloaded_bytes: u64,
+    pub uploaded_bytes: u64,
+    pub download_speed: u64,
+    pub upload_speed: u64,
+    pub seeding_secs: u64,
+    pub added_at: Option<i64>,
+    pub completed_at: Option<i64>,
+    pub last_activity_at: Option<i64>,
+}
+
+#[derive(Clone, Debug, Default)]
 struct MemoryTaskMeta {
     files: Vec<PathBuf>,
     total_bytes: u64,
@@ -25,6 +39,7 @@ struct MemoryTaskMeta {
     upload_limit: Option<u64>,
     download_limit: Option<u64>,
     claimed_by_app: bool,
+    metrics: Option<MemoryTaskMetrics>,
 }
 
 pub struct MemoryDownloader {
@@ -91,6 +106,11 @@ impl MemoryDownloader {
     pub fn set_task_claimed(&self, info_hash: &str, claimed: bool) {
         let key = info_hash.trim().to_ascii_lowercase();
         self.task_meta.lock().entry(key).or_default().claimed_by_app = claimed;
+    }
+
+    pub fn set_task_metrics(&self, info_hash: &str, metrics: MemoryTaskMetrics) {
+        let key = info_hash.trim().to_ascii_lowercase();
+        self.task_meta.lock().entry(key).or_default().metrics = Some(metrics);
     }
 
     pub fn is_task_paused(&self, info_hash: &str) -> bool {
@@ -386,6 +406,7 @@ impl Downloader for MemoryDownloader {
                 upload_limit: options.upload_limit,
                 download_limit: options.download_limit,
                 claimed_by_app: false,
+                metrics: None,
             },
         );
         self.requested.lock().push(info_hash.clone());
@@ -678,24 +699,44 @@ impl Downloader for MemoryDownloader {
                 .map(|m| m.total_bytes)
                 .filter(|&b| b > 0)
                 .unwrap_or(fallback_size);
+            let metrics = meta.and_then(|m| m.metrics.as_ref());
+            let category = meta.and_then(|m| m.category.clone());
+            let user_tags = meta
+                .map(|m| crate::user_tags_from(m.tags.iter().map(String::as_str)))
+                .unwrap_or_default();
+            let uploaded_bytes = metrics.map_or(0, |m| m.uploaded_bytes);
+            let ratio = if size_bytes > 0 {
+                uploaded_bytes as f64 / size_bytes as f64
+            } else {
+                0.0
+            };
             rows.push(TaskSnapshot {
                 tag: crate::TASK_TAG.to_string(),
                 name: title,
-                progress: 0.0,
-                state: if *broken {
-                    "error".into()
-                } else if *paused {
-                    "pausedDL".into()
-                } else {
-                    "downloading".into()
-                },
+                progress: metrics.map_or(0.0, |m| m.progress),
+                state: metrics.and_then(|m| m.state.clone()).unwrap_or_else(|| {
+                    if *broken {
+                        "error".into()
+                    } else if *paused {
+                        "pausedDL".into()
+                    } else {
+                        "downloading".into()
+                    }
+                }),
                 size_bytes,
-                downloaded_bytes: 0,
-                uploaded_bytes: 0,
-                download_speed: 0,
-                upload_speed: 0,
+                downloaded_bytes: metrics.map_or(0, |m| m.downloaded_bytes),
+                uploaded_bytes,
+                download_speed: metrics.map_or(0, |m| m.download_speed),
+                upload_speed: metrics.map_or(0, |m| m.upload_speed),
                 info_hash: hash.clone(),
                 owned_tags: crate::owned_tags_from(extra_owned.iter().map(String::as_str)),
+                ratio,
+                seeding_secs: metrics.map_or(0, |m| m.seeding_secs),
+                added_at: metrics.and_then(|m| m.added_at),
+                completed_at: metrics.and_then(|m| m.completed_at),
+                last_activity_at: metrics.and_then(|m| m.last_activity_at),
+                category,
+                user_tags,
             });
         }
         for torrent in added {
@@ -723,6 +764,7 @@ impl Downloader for MemoryDownloader {
                 upload_speed: 0,
                 info_hash: String::new(),
                 owned_tags: crate::owned_tags_from([enc_tag.as_str()]),
+                ..Default::default()
             });
         }
         Ok(rows)

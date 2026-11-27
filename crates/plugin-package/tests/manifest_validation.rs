@@ -655,6 +655,7 @@ fn man_25_phase2_commands_and_endpoint_auth_rejected_by_default() {
         "downloader.delete-task",
         "downloader.prepare-cleanup",
         "downloader.delete-files",
+        "boost.run",
         "notify.send",
         "schedule.set",
         "schedule.disable",

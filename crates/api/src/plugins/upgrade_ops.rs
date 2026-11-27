@@ -139,7 +139,7 @@ impl PluginService {
         &self,
         state: &ApiState,
         plugin_id: &str,
-        input: PrepareUpgradeInput,
+        mut input: PrepareUpgradeInput,
     ) -> Result<OperationAdminView, PluginServiceError> {
         if let Some(replayed) = check_management_replay(
             state,
@@ -179,37 +179,30 @@ impl PluginService {
                 return Err(err);
             }
         };
-        let validated = compile_upgrade_source(
-            self,
-            state,
-            plugin_id,
-            input.actor_user_id,
-            &input.version,
-            input.upload_id,
-            ctx.historical_ver,
-        )
-        .await?;
-        let analysis = analyze_upgrade_target(
-            state,
-            plugin_id,
-            &ctx.plugin,
-            &ctx.config_summary,
-            &validated,
-            &input,
-        )
-        .await?;
-        let (prep_view, pkg_hash, ver_str) = build_upgrade_prep_view(
-            self,
-            plugin_id,
-            &input,
-            &ctx.plugin,
-            &ctx.current_version,
-            &ctx.existing_grants,
-            &ctx.config_summary,
-            &validated,
-            analysis,
-        )?;
-        persist_prepare_upgrade_op(state, plugin_id, &input, pkg_hash, ver_str, &prep_view).await
+        let repo_staged_id = if let Some(repo_id) = input.repo_id.as_deref().map(str::trim) {
+            let staged = super::repositories::download_and_stage_from_repo(
+                state,
+                input.actor_user_id,
+                repo_id,
+                plugin_id,
+                Some(input.version.as_str()),
+            )
+            .await?;
+            input.upload_id = Some(staged.upload_id);
+            input.version = staged.version;
+            Some(staged.upload_id)
+        } else {
+            None
+        };
+        let res = finish_prepare_upgrade(self, state, plugin_id, &input, ctx).await;
+        if res.is_err() {
+            super::repositories::cleanup_staged_upload(
+                state.store.data_dir().to_path_buf(),
+                repo_staged_id,
+            )
+            .await;
+        }
+        res
     }
 
     pub async fn execute_upgrade(
@@ -285,30 +278,76 @@ struct UpgradeAnalysis {
     val_errs: Vec<plugin_package::SchemaFieldError>,
 }
 
+async fn finish_prepare_upgrade(
+    service: &PluginService,
+    state: &ApiState,
+    plugin_id: &str,
+    input: &PrepareUpgradeInput,
+    ctx: UpgradeContext,
+) -> Result<OperationAdminView, PluginServiceError> {
+    let validated = compile_upgrade_source(
+        service,
+        state,
+        plugin_id,
+        input.actor_user_id,
+        &input.version,
+        input.upload_id,
+        ctx.historical_ver,
+    )
+    .await?;
+    let analysis = analyze_upgrade_target(
+        state,
+        plugin_id,
+        &ctx.plugin,
+        &ctx.config_summary,
+        &validated,
+        input,
+    )
+    .await?;
+    let (prep_view, pkg_hash, ver_str) = build_upgrade_prep_view(
+        service,
+        plugin_id,
+        input,
+        &ctx.plugin,
+        &ctx.current_version,
+        &ctx.existing_grants,
+        &ctx.config_summary,
+        &validated,
+        analysis,
+    )?;
+    persist_prepare_upgrade_op(state, plugin_id, input, pkg_hash, ver_str, &prep_view).await
+}
+
 fn validate_prepare_upgrade_input(input: &PrepareUpgradeInput) -> Result<(), PluginServiceError> {
-    if input.repo_id.is_some() {
-        return Err(PluginServiceError::Unprocessable {
-            code: "plugin.unsupported",
-            message: "remote plugin repositories are deferred to Phase 2".into(),
-        });
-    }
     if !matches!(input.state_policy.as_str(), "preserve" | "reset") {
         return Err(PluginServiceError::invalid(
             "plugin.invalid_input",
             "state_policy must be `preserve` or `reset`",
         ));
     }
-    if input.upload_id.is_some() && input.package_hash.is_some() {
-        return Err(PluginServiceError::invalid(
-            "plugin.invalid_input",
-            "specify at most one of upload_id or package_hash",
-        ));
-    }
-    if input.upload_id.is_none() && input.package_hash.is_none() && input.version.trim().is_empty()
+    if input
+        .repo_id
+        .as_deref()
+        .is_some_and(|s| s.trim().is_empty())
     {
         return Err(PluginServiceError::invalid(
             "plugin.invalid_input",
-            "specify upload_id, package_hash, or target version",
+            "repo_id must not be empty",
+        ));
+    }
+    let source_count = u8::from(input.upload_id.is_some())
+        + u8::from(input.package_hash.is_some())
+        + u8::from(input.repo_id.is_some());
+    if source_count > 1 {
+        return Err(PluginServiceError::invalid(
+            "plugin.invalid_input",
+            "specify at most one of upload_id, package_hash, or repo_id",
+        ));
+    }
+    if source_count == 0 && input.version.trim().is_empty() {
+        return Err(PluginServiceError::invalid(
+            "plugin.invalid_input",
+            "specify upload_id, package_hash, repo_id, or target version",
         ));
     }
     Ok(())
@@ -322,6 +361,7 @@ async fn load_prepare_upgrade_context(
     let pid_read = plugin_id.to_string();
     let upload_id = input.upload_id;
     let package_hash = input.package_hash.clone();
+    let has_remote_repo = input.repo_id.is_some();
     let target_version = input.version.trim().to_string();
     let expected_revision = input.expected_revision;
     run_app_read(state, move |store| {
@@ -353,7 +393,7 @@ async fn load_prepare_upgrade_context(
                     "historical package version not found",
                 )
             })?)
-        } else if upload_id.is_none() {
+        } else if upload_id.is_none() && !has_remote_repo {
             Some(
                 store
                     .get_plugin_version_by_semver(&pid_read, &target_version)?

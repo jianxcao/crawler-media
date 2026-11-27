@@ -153,100 +153,39 @@ impl PluginService {
         }
         super::service::require_foreground_write_admitted(state)?;
 
-        if input.repo_id.is_some() {
-            return Err(PluginServiceError::Unprocessable {
-                code: "plugin.unsupported",
-                message: "remote plugin repositories are deferred to Phase 2".into(),
-            });
-        }
-        let upload_id = input.upload_id.ok_or_else(|| {
-            PluginServiceError::invalid("plugin.invalid_input", "upload_id is required")
-        })?;
-
-        let s = state.clone();
-        let actor_for_upload = input.actor_user_id;
-        let expected_pid = input.plugin_id.clone();
-        let expected_ver = input.version.clone();
-        let host = self
-            .wasm_host()
-            .map_err(|e| PluginServiceError::invalid("plugin.invalid_component", e.to_string()))?
-            .clone();
-        let validated = run_blocking(move || {
-            let (pkg_bytes, sig_text, _) = read_staged_upload_for_actor_sync(
-                s.store.data_dir(),
-                upload_id,
-                Some(actor_for_upload),
-            )?;
-            let policy = build_package_policy_from_store(&s.store, sig_text)?;
-            let pkg = validate_cmplugin_bytes(&pkg_bytes, &policy).map_err(map_package_err)?;
-            if expected_pid
-                .as_deref()
-                .map(str::trim)
-                .is_some_and(|id| !id.is_empty() && pkg.manifest.id != id)
-                || expected_ver
-                    .as_deref()
-                    .map(str::trim)
-                    .is_some_and(|v| !v.is_empty() && pkg.manifest.version != v)
-            {
-                return Err(PluginServiceError::invalid(
-                    "plugin.invalid_package",
-                    "package manifest id/version mismatch",
-                ));
+        let (upload_id, repo_staged_id, expected_ver) =
+            resolve_install_upload_source(state, &input).await?;
+        let validated = match validate_and_compile_install(
+            self,
+            state,
+            input.actor_user_id,
+            upload_id,
+            input.plugin_id.clone(),
+            expected_ver,
+        )
+        .await
+        {
+            Ok(pkg) => pkg,
+            Err(err) => {
+                super::repositories::cleanup_staged_upload(
+                    state.store.data_dir().to_path_buf(),
+                    repo_staged_id,
+                )
+                .await;
+                return Err(err);
             }
-            compile_validated_package_components(&host, &pkg).map_err(|e| {
-                PluginServiceError::invalid("plugin.invalid_component", e.to_string())
-            })?;
-            Ok(pkg)
-        })
-        .await?;
+        };
 
         let prep_view = build_install_prep_view(self, input.actor_user_id, upload_id, &validated);
-        let result_json =
-            serde_json::to_value(&prep_view).map_err(|e| PluginServiceError::Io(e.to_string()))?;
-        let plugin_id = prep_view.plugin_id;
-        let pkg_hash = prep_view.package_hash;
-        let version_str = prep_view.version;
-        let actor = input.actor_user_id;
-        let idem = input.idempotency_key;
-        let req = input.request;
-        run_app_write_tx(state, move |app| {
-            let accepted = app.begin_staged_plugin_operation(&AcceptStagedPluginOperation {
-                subject: PluginSubject::User(actor),
-                idempotency_key: idem,
-                request: req,
-                op_kind: StagedPluginOpKind::InstallPrepare,
-                expected_revision: 0,
-                intent: StagedPluginIntent {
-                    target_plugin_id: plugin_id.clone(),
-                    package_hash: Some(pkg_hash),
-                    version: Some(version_str),
-                    artifact_path: None,
-                    state_policy: None,
-                    target_config_digest: None,
-                    grants: Vec::new(),
-                },
-                cause: PluginCommandCause::root(format!("install-prepare:{plugin_id}")),
-            })?;
-            if accepted.replayed {
-                return load_app_operation_admin_view(app, accepted.operation.operation_id);
-            }
-            let claim = app.claim_staged_plugin_operation(
-                accepted.operation.operation_id,
-                accepted.operation.revision,
-                0,
-                now_unix(),
-            )?;
-            app.complete_staged_plugin_operation(
-                &claim,
-                PluginOperationState::Succeeded,
-                "prepared",
-                Some(&result_json),
-                None,
-                now_unix(),
-            )?;
-            load_app_operation_admin_view(app, accepted.operation.operation_id)
-        })
-        .await
+        let res = persist_prepare_install_op(state, &input, &prep_view).await;
+        if res.is_err() {
+            super::repositories::cleanup_staged_upload(
+                state.store.data_dir().to_path_buf(),
+                repo_staged_id,
+            )
+            .await;
+        }
+        res
     }
 
     pub async fn execute_install(
@@ -411,6 +350,137 @@ async fn peek_install_consent(
             Err(err)
         }
     }
+}
+
+async fn resolve_install_upload_source(
+    state: &ApiState,
+    input: &PrepareInstallInput,
+) -> Result<(Uuid, Option<Uuid>, Option<String>), PluginServiceError> {
+    if input.repo_id.is_some() && input.upload_id.is_some() {
+        return Err(PluginServiceError::invalid(
+            "plugin.invalid_input",
+            "specify at most one of upload_id or repo_id",
+        ));
+    }
+    if let Some(raw_repo_id) = input.repo_id.as_deref() {
+        let repo_id = raw_repo_id.trim();
+        if repo_id.is_empty() {
+            return Err(PluginServiceError::invalid(
+                "plugin.invalid_input",
+                "repo_id must not be empty",
+            ));
+        }
+        let pid = input.plugin_id.as_deref().unwrap_or("");
+        let staged = super::repositories::download_and_stage_from_repo(
+            state,
+            input.actor_user_id,
+            repo_id,
+            pid,
+            input.version.as_deref(),
+        )
+        .await?;
+        return Ok((
+            staged.upload_id,
+            Some(staged.upload_id),
+            Some(staged.version),
+        ));
+    }
+    let uid = input.upload_id.ok_or_else(|| {
+        PluginServiceError::invalid("plugin.invalid_input", "upload_id is required")
+    })?;
+    Ok((uid, None, input.version.clone()))
+}
+
+async fn validate_and_compile_install(
+    service: &PluginService,
+    state: &ApiState,
+    actor_user_id: domain::UserId,
+    upload_id: Uuid,
+    expected_pid: Option<String>,
+    expected_ver: Option<String>,
+) -> Result<plugin_package::ValidatedPackage, PluginServiceError> {
+    let s = state.clone();
+    let host = service
+        .wasm_host()
+        .map_err(|e| PluginServiceError::invalid("plugin.invalid_component", e.to_string()))?
+        .clone();
+    run_blocking(move || {
+        let (pkg_bytes, sig_text, _) =
+            read_staged_upload_for_actor_sync(s.store.data_dir(), upload_id, Some(actor_user_id))?;
+        let policy = build_package_policy_from_store(&s.store, sig_text)?;
+        let pkg = validate_cmplugin_bytes(&pkg_bytes, &policy).map_err(map_package_err)?;
+        if expected_pid
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|id| !id.is_empty() && pkg.manifest.id != id)
+            || expected_ver
+                .as_deref()
+                .map(str::trim)
+                .is_some_and(|v| !v.is_empty() && pkg.manifest.version != v)
+        {
+            return Err(PluginServiceError::invalid(
+                "plugin.invalid_package",
+                "package manifest id/version mismatch",
+            ));
+        }
+        compile_validated_package_components(&host, &pkg)
+            .map_err(|e| PluginServiceError::invalid("plugin.invalid_component", e.to_string()))?;
+        Ok(pkg)
+    })
+    .await
+}
+
+async fn persist_prepare_install_op(
+    state: &ApiState,
+    input: &PrepareInstallInput,
+    prep_view: &InstallationPreparationView,
+) -> Result<OperationAdminView, PluginServiceError> {
+    let result_json =
+        serde_json::to_value(prep_view).map_err(|e| PluginServiceError::Io(e.to_string()))?;
+    let plugin_id = prep_view.plugin_id.clone();
+    let pkg_hash = prep_view.package_hash.clone();
+    let version_str = prep_view.version.clone();
+    let actor = input.actor_user_id;
+    let idem = input.idempotency_key.clone();
+    let req = input.request.clone();
+    run_app_write_tx(state, move |app| {
+        let accepted = app.begin_staged_plugin_operation(&AcceptStagedPluginOperation {
+            subject: PluginSubject::User(actor),
+            idempotency_key: idem,
+            request: req,
+            op_kind: StagedPluginOpKind::InstallPrepare,
+            expected_revision: 0,
+            intent: StagedPluginIntent {
+                target_plugin_id: plugin_id.clone(),
+                package_hash: Some(pkg_hash),
+                version: Some(version_str),
+                artifact_path: None,
+                state_policy: None,
+                target_config_digest: None,
+                grants: Vec::new(),
+            },
+            cause: PluginCommandCause::root(format!("install-prepare:{plugin_id}")),
+        })?;
+        if accepted.replayed {
+            return load_app_operation_admin_view(app, accepted.operation.operation_id);
+        }
+        let claim = app.claim_staged_plugin_operation(
+            accepted.operation.operation_id,
+            accepted.operation.revision,
+            0,
+            now_unix(),
+        )?;
+        app.complete_staged_plugin_operation(
+            &claim,
+            PluginOperationState::Succeeded,
+            "prepared",
+            Some(&result_json),
+            None,
+            now_unix(),
+        )?;
+        load_app_operation_admin_view(app, accepted.operation.operation_id)
+    })
+    .await
 }
 
 fn build_install_prep_view(

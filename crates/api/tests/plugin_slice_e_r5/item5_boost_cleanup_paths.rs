@@ -11,8 +11,12 @@ use downloader::{
 use serde_json::json;
 use store::{BoostTaskState, PrepareBoostCleanupPlanInput};
 
-use crate::support::plugin_http_support::{HttpEnv, TOKEN, assert_ok, req_json};
-use crate::support::{seed_boost_task, seed_library_file_entry};
+use crate::support::plugin_http_support::{
+    HttpEnv, TOKEN, assert_ok,
+    plugins_fixture::{install_cm_boost, seed_cm_boost_task},
+    req_json,
+};
+use crate::support::seed_library_file_entry;
 use crate::{env_with_dl_maps, run_boost_cmd};
 
 struct ContainerMappedDownloader {
@@ -94,6 +98,7 @@ async fn slice_e_r5_item5a_mapped_task_files_ancestor_siblings_and_fail_closed_r
     let dl = Arc::new(ContainerMappedDownloader::new(stage.clone(), "/dl"));
     let maps = vec![PathMap::new("/dl", stage.clone())];
     let (env, site_id, dl_id) = env_with_dl_maps(dir, dl.clone(), maps);
+    install_cm_boost(&env, false, false, false).await;
 
     // 1) Relative file path in TaskFileSet + container save_path `/dl` mapped to `stage`:
     //    both `/brush-state` and `downloader.delete-task` must recognize `library_paths`!
@@ -112,7 +117,7 @@ async fn slice_e_r5_item5a_mapped_task_files_ancestor_siblings_and_fail_closed_r
         .unwrap();
     dl.inner
         .set_task_files(h_lib, vec![PathBuf::from("SeasonPack/LibEp01.mkv")], 13);
-    let tf_lib = seed_boost_task(
+    let tf_lib = seed_cm_boost_task(
         env.state.store().as_ref(),
         dl_id,
         site_id,
@@ -129,7 +134,7 @@ async fn slice_e_r5_item5a_mapped_task_files_ancestor_siblings_and_fail_closed_r
     let (st_bs, _, b_bs) = env
         .send(req_json(
             "GET",
-            "/api/v1/plugins/builtin.boost/brush-state",
+            "/api/v1/plugins/cm.boost/brush-state",
             Some(TOKEN),
             &[],
             None,
@@ -160,7 +165,7 @@ async fn assert_dir_sibling_and_fail_closed(
     stage: &Path,
     sib_ep: &Path,
 ) {
-    let tf_ret = seed_boost_task(
+    let tf_ret = seed_cm_boost_task(
         env.state.store().as_ref(),
         dl_id,
         site_id,
@@ -209,7 +214,7 @@ async fn assert_dir_sibling_and_fail_closed(
     let (st_prev, _, b_prev) = env
         .send(req_json(
             "GET",
-            &format!("/api/v1/plugins/builtin.boost/brush-cleanup-preview?task_ids={tf_ret}"),
+            &format!("/api/v1/plugins/cm.boost/brush-cleanup-preview?task_ids={tf_ret}"),
             Some(TOKEN),
             &[],
             None,
@@ -249,7 +254,7 @@ async fn assert_dir_sibling_and_fail_closed(
     let (st_prev_err, _, _) = env
         .send(req_json(
             "GET",
-            &format!("/api/v1/plugins/builtin.boost/brush-cleanup-preview?task_ids={tf_ret}"),
+            &format!("/api/v1/plugins/cm.boost/brush-cleanup-preview?task_ids={tf_ret}"),
             Some(TOKEN),
             &[],
             None,
@@ -268,7 +273,8 @@ async fn slice_e_r5_item5b_slash_root_guard_and_pruned_parent_idempotent_retry()
     let dl_slash = Arc::new(MemoryDownloader::new(dir_slash.path()));
     let (env_s, site_s, dl_id_s) =
         env_with_dl_maps(dir_slash, dl_slash, vec![PathMap::new("/dl", "/")]);
-    let tf_s = seed_boost_task(
+    install_cm_boost(&env_s, false, false, false).await;
+    let tf_s = seed_cm_boost_task(
         env_s.state.store().as_ref(),
         dl_id_s,
         site_s,
@@ -306,7 +312,7 @@ async fn slice_e_r5_item5b_slash_root_guard_and_pruned_parent_idempotent_retry()
     let (st_tok_s, _, b_tok_s) = env_s
         .send(req_json(
             "GET",
-            "/api/v1/plugins/builtin.boost/brush-cleanup-preview?plan_handle=r5-slash-plan",
+            "/api/v1/plugins/cm.boost/brush-cleanup-preview?plan_handle=r5-slash-plan",
             Some(TOKEN),
             &[],
             None,
@@ -350,7 +356,8 @@ async fn assert_pruned_parent_retry_succeeds() {
     let dl = Arc::new(MemoryDownloader::new(real_root.clone()));
     let (env, site_id, dl_id) =
         env_with_dl_maps(dir, dl, vec![PathMap::new("/dl", real_root.clone())]);
-    let tf_id = seed_boost_task(
+    install_cm_boost(&env, false, false, false).await;
+    let tf_id = seed_cm_boost_task(
         env.state.store().as_ref(),
         dl_id,
         site_id,
@@ -388,7 +395,7 @@ async fn assert_pruned_parent_retry_succeeds() {
     let (st_p, _, b_p) = env
         .send(req_json(
             "GET",
-            "/api/v1/plugins/builtin.boost/brush-cleanup-preview?plan_handle=r5-pruned-plan",
+            "/api/v1/plugins/cm.boost/brush-cleanup-preview?plan_handle=r5-pruned-plan",
             Some(TOKEN),
             &[],
             None,

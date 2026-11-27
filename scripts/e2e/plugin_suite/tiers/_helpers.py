@@ -14,6 +14,7 @@ from ..lib.fixtures import (
     MinisignKeypair,
     build_cmplugin,
     generate_minisign_keypair,
+    load_fixture_wasm,
     sign_cmplugin_sha256,
 )
 from ..lib.instance import InstanceSupervisor, default_binary_path
@@ -761,13 +762,176 @@ def trigger_job(
     )
 
 
+def install_first_party_cm_plugin(ctx: TestContext, plugin_id: str) -> Dict[str, Any]:
+    if plugin_id == "cm.checkin":
+        schema_override: Dict[str, Any] = {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "interval_secs": {"type": "integer", "minimum": 3600, "maximum": 86400, "default": 86400},
+                "site_id": {"type": "string", "minLength": 1, "maxLength": 128},
+                "sites": {
+                    "type": "array",
+                    "items": {"type": "string", "minLength": 1, "maxLength": 128},
+                    "uniqueItems": True,
+                    "default": [],
+                },
+            },
+        }
+        extra_files = {"components/checkin.wasm": load_fixture_wasm("task")}
+        extra_components = [
+            {
+                "id": "runner",
+                "entry": "components/checkin.wasm",
+                "world": "crawler:plugin/task-plugin@1.0.0",
+                "permissions": [
+                    "kv",
+                    "read:sites",
+                    "command:site.maintenance",
+                    "command:site.check-in",
+                    "command:site.verify-session",
+                ],
+                "tasks": [
+                    {
+                        "id": "check-in",
+                        "input_schema": "schemas/config.schema.json",
+                        "seconds": 86400,
+                        "concurrency_key": "check-in",
+                    }
+                ],
+            }
+        ]
+        ui_overrides = {
+            "remote_name": "cmCheckin",
+            "capabilities": [
+                "read:sites",
+                "read:history",
+                "command:site.maintenance",
+                "command:site.check-in",
+                "command:site.verify-session",
+                "task:run:check-in",
+            ],
+            "surfaces": [
+                {"id": "settings", "kind": "config", "expose": "./Config", "title": "签到设置"},
+                {"id": "main", "kind": "page", "expose": "./Page", "title": "站点签到"},
+                {"id": "app", "kind": "app", "expose": "./App", "title": "签到工作台"},
+                {"id": "summary", "kind": "dashboard", "expose": "./Dashboard", "title": "签到概览"},
+            ],
+        }
+    elif plugin_id == "cm.boost":
+        schema_override = {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "sites": {
+                    "type": "array",
+                    "items": {"type": "string", "minLength": 1, "maxLength": 128},
+                    "uniqueItems": True,
+                    "default": [],
+                },
+                "downloader_id": {"type": "string", "maxLength": 128, "default": ""},
+                "dry_run": {"type": "boolean", "default": True},
+                "max_adds_per_hour": {"type": "integer", "minimum": 1, "maximum": 100, "default": 10},
+            },
+        }
+        extra_files = {
+            "components/boost_task.wasm": load_fixture_wasm("task"),
+            "components/boost_gate.wasm": load_fixture_wasm("policy"),
+        }
+        extra_components = [
+            {
+                "id": "cycle",
+                "entry": "components/boost_task.wasm",
+                "world": "crawler:plugin/task-plugin@1.0.0",
+                "permissions": [
+                    "kv",
+                    "read:sites",
+                    "read:downloads",
+                    "read:boost",
+                    "command:boost.run",
+                    "command:indexer.search",
+                    "command:indexer.rss",
+                    "command:downloader.add",
+                    "command:downloader.control",
+                    "command:downloader.delete-task",
+                    "command:downloader.prepare-cleanup",
+                    "command:downloader.delete-files",
+                ],
+                "tasks": [
+                    {
+                        "id": "traffic-cycle",
+                        "input_schema": "schemas/config.schema.json",
+                        "seconds": 600,
+                        "concurrency_key": "traffic-cycle",
+                    }
+                ],
+            },
+            {
+                "id": "gate",
+                "entry": "components/boost_gate.wasm",
+                "world": "crawler:plugin/hook-plugin@1.0.0",
+                "permissions": ["hooks:download.before", "read:boost"],
+                "hooks": [{"id": "download.before", "priority": 100}],
+            },
+        ]
+        ui_overrides = {
+            "remote_name": "cmBoost",
+            "capabilities": [
+                "read:sites",
+                "read:downloads",
+                "read:boost",
+                "command:boost.run",
+                "command:downloader.delete-task",
+                "command:downloader.prepare-cleanup",
+                "command:downloader.delete-files",
+                "command:indexer.search",
+                "task:run:traffic-cycle",
+            ],
+            "surfaces": [
+                {"id": "settings", "kind": "config", "expose": "./Config", "title": "刷流设置"},
+                {"id": "main", "kind": "page", "expose": "./Page", "title": "自动刷流"},
+                {"id": "app", "kind": "app", "expose": "./App", "title": "刷流工作台"},
+                {"id": "summary", "kind": "dashboard", "expose": "./Dashboard", "title": "刷流概览"},
+            ],
+        }
+    else:
+        raise ValueError(f"Unsupported first-party fixture plugin_id: {plugin_id!r}")
+
+    _, _, plugin = setup_signed_plugin_ready(
+        ctx,
+        plugin_id=plugin_id,
+        version="1.0.0",
+        kind="ui-only",
+        include_ui=True,
+        ui_overrides=ui_overrides,
+        schema_override=schema_override,
+        extra_files=extra_files,
+        extra_components=extra_components,
+        enable=True,
+    )
+    return plugin
+
+
 def ensure_plugin_enabled(ctx: TestContext, plugin_id: str) -> Dict[str, Any]:
-    plugin = ctx.call_phase1("GET", f"/api/v1/plugins/{plugin_id}")
+    try:
+        plugin = ctx.call_phase1("GET", f"/api/v1/plugins/{plugin_id}")
+    except UnimplementedFeatureError as exc:
+        cause = exc.__cause__
+        if (
+            plugin_id in ("cm.checkin", "cm.boost")
+            and isinstance(cause, ApiError)
+            and cause.status == 404
+        ):
+            plugin = install_first_party_cm_plugin(ctx, plugin_id)
+        else:
+            raise
     assert isinstance(plugin, dict) and "revision" in plugin, (
         f"Expected plugin object with 'revision' for {plugin_id}, got {plugin!r}"
     )
-    if plugin_id == "builtin.boost":
-        cfg = ctx.call_phase1("GET", "/api/v1/plugins/builtin.boost/config")
+    if plugin_id == "cm.boost":
+        cfg = ctx.call_phase1("GET", "/api/v1/plugins/cm.boost/config")
         vals = dict(cfg.get("values") or {})
         if int(vals.get("max_adds_per_hour", 10)) < 100:
             if plugin.get("lifecycle") == "enabled":
@@ -775,7 +939,7 @@ def ensure_plugin_enabled(ctx: TestContext, plugin_id: str) -> Dict[str, Any]:
             vals["max_adds_per_hour"] = 100
             ctx.call_phase1(
                 "PUT",
-                "/api/v1/plugins/builtin.boost/config",
+                "/api/v1/plugins/cm.boost/config",
                 json_body={
                     "schema_revision": cfg["schema_revision"],
                     "values": vals,

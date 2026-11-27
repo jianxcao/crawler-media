@@ -127,30 +127,28 @@ async fn trust_keys_list_cursor_pagination_and_query_validation() {
     env.pin_trust_key(&TestSigningKey::generate(102), "Key Two")
         .await;
 
-    let (st_l1, _, b_l1) = env
-        .send(req_json(
-            "GET",
-            "/api/v1/plugin-trust-keys?limit=1",
-            Some(TOKEN),
-            &[],
-            None,
-        ))
-        .await;
-    let (items1, next1) = assert_paged(st_l1, &b_l1);
-    assert_eq!(items1.len(), 1);
-    let cursor = next1.expect("limit=1 with 2 keys should have next_cursor");
-    let (st_l2, _, b_l2) = env
-        .send(req_json(
-            "GET",
-            &format!("/api/v1/plugin-trust-keys?limit=1&cursor={cursor}"),
-            Some(TOKEN),
-            &[],
-            None,
-        ))
-        .await;
-    let (items2, next2) = assert_paged(st_l2, &b_l2);
-    assert_eq!(items2.len(), 1);
-    assert_eq!(next2, None);
+    let mut seen_labels = Vec::new();
+    let mut cursor: Option<String> = None;
+    loop {
+        let uri = match &cursor {
+            Some(c) => format!("/api/v1/plugin-trust-keys?limit=1&cursor={c}"),
+            None => "/api/v1/plugin-trust-keys?limit=1".to_string(),
+        };
+        let (st, _, body) = env
+            .send(req_json("GET", &uri, Some(TOKEN), &[], None))
+            .await;
+        let (items, next) = assert_paged(st, &body);
+        assert_eq!(items.len(), 1);
+        seen_labels.push(items[0]["label"].as_str().unwrap().to_string());
+        match next {
+            Some(c) => cursor = Some(c),
+            None => break,
+        }
+    }
+    assert!(seen_labels.contains(&"crawler-media Official Plugins".to_string()));
+    assert!(seen_labels.contains(&"Key One".to_string()));
+    assert!(seen_labels.contains(&"Key Two".to_string()));
+    assert_eq!(seen_labels.len(), 3);
 
     for bad_q in ["limit=0", "limit=201", "offset=0", "cursor="] {
         let (st_b, _, b_b) = env
@@ -436,8 +434,8 @@ async fn upload_replay_and_install_prepare_execute_and_list_plugins() {
     assert_err(
         st_repo,
         &b_repo,
-        StatusCode::UNPROCESSABLE_ENTITY,
-        "plugin.unsupported",
+        StatusCode::BAD_REQUEST,
+        "plugin.invalid_input",
     );
 
     env.install_pkg(&pkg, None, json!([])).await;

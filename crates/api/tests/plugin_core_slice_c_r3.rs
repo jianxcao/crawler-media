@@ -177,6 +177,8 @@ fn build_plan_and_ctx(
         imdb_id: None,
         detail_url: None,
         category: None,
+        free_2x: false,
+        free_until: None,
     };
     let plan = FrozenDownloadPlan {
         torrent,
@@ -320,7 +322,7 @@ async fn delete_subscription_marks_download_ownership_deleted_for_owned_tasks() 
         (site2, &u2, "Del.Plugin.S01E01.1080p.WEB-DL"),
         SubmissionPurpose::Plugin,
         Some(sub2),
-        Some("builtin.boost"),
+        Some("cm.boost"),
         "idem-del-plugin",
     );
     ApiDownloadService::new(env.state.clone())
@@ -373,7 +375,7 @@ async fn boost_submission_deduping_existing_owned_tag_succeeds_without_fk_error(
         (site_id, &url, "Boost.Dedup.1999.1080p"),
         SubmissionPurpose::Boost,
         None,
-        Some("builtin.boost"),
+        Some("cm.boost"),
         "idem-second-boost",
     );
     let boost_out = svc.submit_sync(b_plan, b_ctx).unwrap();

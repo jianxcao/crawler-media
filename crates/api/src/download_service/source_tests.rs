@@ -118,6 +118,8 @@ fn sample_plan(site_id: SiteId, url: &str) -> FrozenDownloadPlan {
             imdb_id: None,
             detail_url: None,
             category: None,
+            free_2x: false,
+            free_until: None,
         },
         source: TorrentSource::from_url(url).unwrap(),
         purpose: SubmissionPurpose::Manual,

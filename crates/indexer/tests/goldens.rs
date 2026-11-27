@@ -77,7 +77,7 @@ fn nexusphp_html_fixture_produces_torrent_fields() {
     assert_eq!(torrent.leechers, Some(7));
     assert_eq!(torrent.snatched, Some(180));
     assert_eq!(torrent.upload_time.as_deref(), Some("2024-01-15 08:30"));
-    assert_eq!(torrent.category.as_deref(), Some("Movies"));
+    assert_eq!(torrent.category.as_deref(), Some("movie"));
     assert_eq!(
         torrent.detail_url.as_deref(),
         Some("https://pt.example/details.php?id=1")
@@ -202,7 +202,7 @@ fn rss_xml_fixture_produces_torrent_fields() {
     assert_eq!(torrent.leechers, Some(3));
     assert_eq!(torrent.snatched, Some(95));
     assert_eq!(torrent.upload_time.as_deref(), Some("2024-02-01 12:00"));
-    assert_eq!(torrent.category.as_deref(), Some("Movies"));
+    assert_eq!(torrent.category.as_deref(), Some("movie"));
 }
 
 #[test]

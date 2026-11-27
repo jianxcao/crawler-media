@@ -25,7 +25,7 @@ use store::{BoostTaskState, PrepareBoostCleanupPlanInput};
 use support::plugin_http_support::{
     HttpEnv, TOKEN, admin_id, assert_err, assert_ok, pkg, req_json,
 };
-use support::{NoopFetcher, poll_op, seed_boost_task};
+use support::{NoopFetcher, poll_op};
 use uuid::Uuid;
 
 fn body_sha256(body: &Value) -> [u8; 32] {
@@ -392,7 +392,7 @@ fn seed_retained_cleanup_plan(
     plan_handle: &str,
     size_bytes: i64,
 ) -> i64 {
-    let tf = seed_boost_task(
+    let tf = support::plugin_http_support::plugins_fixture::seed_cm_boost_task(
         store,
         dl_id,
         site_id,
@@ -468,6 +468,7 @@ fn seed_live_core_torrent(env_dl: &MemoryDownloader, dl_root: &std::path::Path, 
         upload_speed: 0,
         info_hash: live_hash,
         owned_tags: vec!["cm-op:core-1".into()],
+        ..Default::default()
     });
 }
 
@@ -478,9 +479,10 @@ async fn boost_protects_default_downloader_when_disabled_row_exists_and_skips_di
     std::fs::create_dir_all(&dl_root_a).unwrap();
     let env_dl = Arc::new(MemoryDownloader::new(dl_root_a.clone()));
     let store_a = Arc::new(Store::open(dir_a.path().join("data_a")).unwrap());
-    let state_a = ApiState::new_arc(
+    let state_a = ApiState::new_arc_with_admin_password(
         store_a,
         TOKEN.into(),
+        Some(support::plugin_http_support::ADMIN_PASS.into()),
         RegistrySnapshot::builtin().unwrap(),
         Arc::new(NoopFetcher),
         env_dl.clone() as Arc<dyn Downloader>,
@@ -492,6 +494,8 @@ async fn boost_protects_default_downloader_when_disabled_row_exists_and_skips_di
         state: state_a,
         member_token: String::new(),
     };
+    support::plugin_http_support::plugins_fixture::install_cm_boost(&env_a, false, false, false)
+        .await;
     let site_a = env_a.insert_site("R8-Boost-Site-A");
 
     let disabled_dl = DownloaderId::new();
@@ -529,7 +533,7 @@ async fn boost_protects_default_downloader_when_disabled_row_exists_and_skips_di
     let (st_bs, _, b_bs) = env_a
         .send(req_json(
             "GET",
-            "/api/v1/plugins/builtin.boost/brush-state",
+            "/api/v1/plugins/cm.boost/brush-state",
             Some(TOKEN),
             &[],
             None,
@@ -542,7 +546,7 @@ async fn boost_protects_default_downloader_when_disabled_row_exists_and_skips_di
     let (st_prev_a, _, b_prev_a) = env_a
         .send(req_json(
             "GET",
-            "/api/v1/plugins/builtin.boost/brush-cleanup-preview?plan_handle=r8-env-plan",
+            "/api/v1/plugins/cm.boost/brush-cleanup-preview?plan_handle=r8-env-plan",
             Some(TOKEN),
             &[],
             None,
@@ -569,9 +573,10 @@ async fn boost_cleanup_succeeds_on_empty_dynamic_downloader_without_env_fallback
         DownloaderEnv::default(),
         dir_b.path(),
     ));
-    let state_b = ApiState::new_arc(
+    let state_b = ApiState::new_arc_with_admin_password(
         store_b,
         TOKEN.into(),
+        Some(support::plugin_http_support::ADMIN_PASS.into()),
         RegistrySnapshot::builtin().unwrap(),
         Arc::new(NoopFetcher),
         dyn_dl as Arc<dyn Downloader>,
@@ -583,6 +588,8 @@ async fn boost_cleanup_succeeds_on_empty_dynamic_downloader_without_env_fallback
         state: state_b,
         member_token: String::new(),
     };
+    support::plugin_http_support::plugins_fixture::install_cm_boost(&env_b, false, false, false)
+        .await;
     let site_b = env_b.insert_site("R8-Boost-Site-B");
     let plan_rev = seed_retained_cleanup_plan(
         env_b.state.store().as_ref(),
@@ -598,7 +605,7 @@ async fn boost_cleanup_succeeds_on_empty_dynamic_downloader_without_env_fallback
     let (st_prev_b, _, b_prev_b) = env_b
         .send(req_json(
             "GET",
-            "/api/v1/plugins/builtin.boost/brush-cleanup-preview?plan_handle=r8-dyn-plan",
+            "/api/v1/plugins/cm.boost/brush-cleanup-preview?plan_handle=r8-dyn-plan",
             Some(TOKEN),
             &[],
             None,
@@ -606,11 +613,11 @@ async fn boost_cleanup_succeeds_on_empty_dynamic_downloader_without_env_fallback
         .await;
     let prev_b = assert_ok(st_prev_b, &b_prev_b, StatusCode::OK);
     let tok_b = prev_b["confirmation_token"].as_str().unwrap();
-    let rev_b = env_b.get_plugin_rev("builtin.boost").await;
+    let rev_b = env_b.get_plugin_rev("cm.boost").await;
     let (st_del_b, _, b_del_b) = env_b
         .send(req_json(
             "POST",
-            "/api/v1/plugins/builtin.boost/commands",
+            "/api/v1/plugins/cm.boost/commands",
             Some(TOKEN),
             &[
                 ("if-match", &format!("\"{rev_b}\"")),

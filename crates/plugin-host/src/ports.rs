@@ -4,8 +4,8 @@ use crate::phase1_ports::{EntityPage, EntityView, MediaReference};
 use crate::{
     Invocation,
     bindings::{
-        crawler::plugin::{blob, clock, config, kv, log, operations, runtime, types},
-        task_world::crawler::plugin::{boost, commands},
+        crawler::plugin::{blob, boost, clock, config, kv, log, operations, runtime, types},
+        task_world::crawler::plugin::commands,
     },
 };
 use plugin_api::{
@@ -149,6 +149,9 @@ pub trait HostPorts: Send + Sync + 'static {
         _: &[String],
     ) -> Result<BoostSnapshotView, ApiError> {
         Err(unsupported("Boost port unavailable"))
+    }
+    fn boost_run_cycle(&self, _: &Invocation, _: &str) -> Result<String, ApiError> {
+        Err(unsupported("Boost run_cycle unavailable"))
     }
     fn subscribe_list(&self, _: &Invocation, _: PageRequest) -> Result<EntityPage, ApiError> {
         Err(unsupported("Subscribe port unavailable"))
@@ -491,10 +494,13 @@ impl boost::Host for State {
         downloaders: Vec<String>,
     ) -> Result<boost::SnapshotView, types::ApiError> {
         self.check_alive()?;
-        if !matches!(self.invocation.role, GuestRole::Task | GuestRole::Endpoint) {
+        if !matches!(
+            self.invocation.role,
+            GuestRole::Task | GuestRole::Endpoint | GuestRole::Gate | GuestRole::Filter
+        ) {
             return Err(api_error(
                 types::ErrorCode::WrongContext,
-                "boost.snapshot is restricted to task and endpoint contexts",
+                "boost.snapshot is restricted to task, endpoint, gate, and filter contexts",
             ));
         }
         self.check("read:boost")?;
@@ -504,5 +510,22 @@ impl boost::Host for State {
             .map_err(types::ApiError::from)?;
         self.check_alive()?;
         Ok(snapshot.into())
+    }
+
+    fn run_cycle(&mut self, override_json: String) -> Result<String, types::ApiError> {
+        self.check_alive()?;
+        if self.invocation.role != GuestRole::Task {
+            return Err(api_error(
+                types::ErrorCode::WrongContext,
+                "boost.run-cycle is restricted to task context",
+            ));
+        }
+        self.check("command:boost.run")?;
+        let summary = self
+            .ports
+            .boost_run_cycle(&self.invocation, &override_json)
+            .map_err(types::ApiError::from)?;
+        self.check_alive()?;
+        Ok(summary)
     }
 }

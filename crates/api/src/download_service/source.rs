@@ -23,6 +23,7 @@ pub(crate) struct SubmissionFence {
     pub(crate) subscribe_id: Option<domain::SubscribeId>,
     pub(crate) expected_subscribe: Option<domain::Subscribe>,
     pub(crate) control: Option<library::WorkControl>,
+    pub(crate) exclude_hook_plugin: Option<String>,
 }
 
 impl From<&domain::Subscribe> for SubmissionFence {
@@ -32,6 +33,7 @@ impl From<&domain::Subscribe> for SubmissionFence {
             subscribe_id: Some(subscribe.id),
             expected_subscribe: Some(subscribe.clone()),
             control: None,
+            exclude_hook_plugin: None,
         }
     }
 }

@@ -332,10 +332,13 @@ async fn slice_e_r5_item2b_browser_check_enforces_write_admission_and_eliminates
     };
 
     let site_id = env.insert_site("PT-BChk-R5");
-    let rev0 = env.get_plugin_rev("builtin.checkin").await;
-    env.disable_plugin("builtin.checkin", rev0, "r5-dis-bchk")
-        .await;
-    let rev_dis = env.get_plugin_rev("builtin.checkin").await;
+    crate::support::plugin_http_support::plugins_fixture::install_cm_checkin(
+        &env, false, true, false, false,
+    )
+    .await;
+    let rev0 = env.get_plugin_rev("cm.checkin").await;
+    env.disable_plugin("cm.checkin", rev0, "r5-dis-bchk").await;
+    let rev_dis = env.get_plugin_rev("cm.checkin").await;
     let grants = json!([{
         "capability": "browser:maintenance",
         "scope": "Global",
@@ -344,7 +347,7 @@ async fn slice_e_r5_item2b_browser_check_enforces_write_admission_and_eliminates
     let (st_prep, _, b_prep) = env
         .send(req_json(
             "POST",
-            "/api/v1/plugins/builtin.checkin/permissions/prepare",
+            "/api/v1/plugins/cm.checkin/permissions/prepare",
             Some(TOKEN),
             &[],
             Some(json!({ "requested_grants": grants })),
@@ -354,7 +357,7 @@ async fn slice_e_r5_item2b_browser_check_enforces_write_admission_and_eliminates
     let (st_gr, _, b_gr) = env
         .send(req_json(
             "POST",
-            "/api/v1/plugins/builtin.checkin/permissions/grant",
+            "/api/v1/plugins/cm.checkin/permissions/grant",
             Some(TOKEN),
             &[
                 ("if-match", &format!("\"{rev_dis}\"")),
@@ -364,10 +367,9 @@ async fn slice_e_r5_item2b_browser_check_enforces_write_admission_and_eliminates
         ))
         .await;
     assert_ok(st_gr, &b_gr, StatusCode::ACCEPTED);
-    let rev_gr = env.get_plugin_rev("builtin.checkin").await;
-    env.enable_plugin("builtin.checkin", rev_gr, "r5-en-bchk")
-        .await;
-    let rev_en = env.get_plugin_rev("builtin.checkin").await;
+    let rev_gr = env.get_plugin_rev("cm.checkin").await;
+    env.enable_plugin("cm.checkin", rev_gr, "r5-en-bchk").await;
+    let rev_en = env.get_plugin_rev("cm.checkin").await;
 
     // 1) Immediate write admission gate check at entry
     let gate = env.state.write_gate();
@@ -376,7 +378,7 @@ async fn slice_e_r5_item2b_browser_check_enforces_write_admission_and_eliminates
         let (st_gate, _, b_gate) = env
             .send(req_json(
                 "POST",
-                "/api/v1/plugins/builtin.checkin/browser-checks",
+                "/api/v1/plugins/cm.checkin/browser-checks",
                 Some(TOKEN),
                 &[
                     ("if-match", &format!("\"{rev_en}\"")),
@@ -411,7 +413,7 @@ async fn slice_e_r5_item2b_browser_check_enforces_write_admission_and_eliminates
 
     let req = req_json(
         "POST",
-        "/api/v1/plugins/builtin.checkin/browser-checks",
+        "/api/v1/plugins/cm.checkin/browser-checks",
         Some(TOKEN),
         &[
             ("if-match", &format!("\"{rev_en}\"")),

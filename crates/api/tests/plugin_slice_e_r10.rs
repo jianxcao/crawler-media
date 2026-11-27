@@ -22,9 +22,9 @@ use store::download_operations::{
 };
 use support::NoopFetcher;
 use support::plugin_http_support::{
-    HttpEnv, TOKEN, assert_ok,
+    ADMIN_PASS, HttpEnv, TOKEN, assert_ok,
     pkg::{TestSigningKey, build_stored_zip},
-    req_json,
+    plugins_fixture, req_json,
 };
 use uuid::Uuid;
 
@@ -59,9 +59,10 @@ fn make_boost_r10_env() -> (HttpEnv, Arc<MemoryDownloader>) {
     std::fs::create_dir_all(&dl_root).unwrap();
     let store = Arc::new(Store::open(dir.path().join("data")).unwrap());
     let env_dl = Arc::new(MemoryDownloader::new(&dl_root));
-    let state = ApiState::new_arc(
+    let state = ApiState::new_arc_with_admin_password(
         store,
         TOKEN.into(),
+        Some(ADMIN_PASS.into()),
         RegistrySnapshot::builtin().unwrap(),
         Arc::new(NoopFetcher),
         env_dl.clone() as Arc<dyn Downloader>,
@@ -85,7 +86,7 @@ fn seed_nil_boost_task(store: &Store, site_id: SiteId, hash: &str) {
             idempotency_key: "ik-op-r10-nil".into(),
             source_kind: "boost".into(),
             subscribe_id: None,
-            plugin_id: Some("builtin.boost".into()),
+            plugin_id: Some("cm.boost".into()),
             subject: "system".into(),
             cause_id: "c-r10".into(),
             site_id: Some(site_id),
@@ -108,7 +109,7 @@ fn seed_nil_boost_task(store: &Store, site_id: SiteId, hash: &str) {
             bytes_digest: None,
             operation_id: "op-r10-nil".into(),
             subscribe_id: None,
-            plugin_id: Some("builtin.boost".into()),
+            plugin_id: Some("cm.boost".into()),
             subject: "system".into(),
             site_id: Some(site_id),
             enclosure: format!("magnet:?xt=urn:btih:{hash}&dn=Boost.Nil"),
@@ -121,7 +122,7 @@ fn seed_nil_boost_task(store: &Store, site_id: SiteId, hash: &str) {
     store
         .upsert_boost_task_fact(&UpsertBoostTaskFactInput {
             task_fact_id: "tf-op-r10-nil".into(),
-            plugin_id: "builtin.boost".into(),
+            plugin_id: "cm.boost".into(),
             downloader_id: nil_dl,
             site_id: Some(site_id),
             quota_key: format!("site:{site_id}"),
@@ -147,6 +148,7 @@ fn seed_nil_boost_task(store: &Store, site_id: SiteId, hash: &str) {
 async fn boost_snapshot_nil_downloader_preserves_live_metrics_and_disabled_default_reports_unavailable()
  {
     let (env, env_dl) = make_boost_r10_env();
+    plugins_fixture::install_cm_boost(&env, false, false, false).await;
     let site_id = env.insert_site("R10-Boost-NilSite");
     let hash = "ffff6666ffff6666ffff6666ffff6666ffff6666";
     env_dl
@@ -173,6 +175,7 @@ async fn boost_snapshot_nil_downloader_preserves_live_metrics_and_disabled_defau
         upload_speed: 500,
         info_hash: hash.into(),
         owned_tags: vec!["cm-op:op-r10-nil".into()],
+        ..Default::default()
     });
     seed_nil_boost_task(env.state.store().as_ref(), site_id, hash);
 
@@ -180,7 +183,7 @@ async fn boost_snapshot_nil_downloader_preserves_live_metrics_and_disabled_defau
     let (st, _, b) = env
         .send(req_json(
             "GET",
-            &format!("/api/v1/plugins/builtin.boost/brush-state?downloader_id={nil_str}"),
+            &format!("/api/v1/plugins/cm.boost/brush-state?downloader_id={nil_str}"),
             Some(TOKEN),
             &[],
             None,
@@ -213,7 +216,7 @@ async fn boost_snapshot_nil_downloader_preserves_live_metrics_and_disabled_defau
     let (st2, _, b2) = env
         .send(req_json(
             "GET",
-            "/api/v1/plugins/builtin.boost/brush-state",
+            "/api/v1/plugins/cm.boost/brush-state",
             Some(TOKEN),
             &[],
             None,
@@ -229,6 +232,7 @@ async fn boost_snapshot_nil_downloader_preserves_live_metrics_and_disabled_defau
 #[tokio::test]
 async fn downloader_add_plugin_command_rejects_disabled_and_missing_downloaders() {
     let (env, _env_dl) = make_boost_r10_env();
+    plugins_fixture::install_cm_boost(&env, false, false, false).await;
     let dis_dl = DownloaderId::new();
     env.state
         .store()
@@ -247,12 +251,12 @@ async fn downloader_add_plugin_command_rejects_disabled_and_missing_downloaders(
         })
         .unwrap();
 
-    let rev = env.get_plugin_rev("builtin.boost").await;
+    let rev = env.get_plugin_rev("cm.boost").await;
     let hash = "aaaa7777aaaa7777aaaa7777aaaa7777aaaa7777";
     let (st_cmd, _, b_cmd) = env
         .send(req_json(
             "POST",
-            "/api/v1/plugins/builtin.boost/commands",
+            "/api/v1/plugins/cm.boost/commands",
             Some(TOKEN),
             &[
                 ("if-match", &format!("\"{rev}\"")),

@@ -565,7 +565,7 @@ def register_cases(registry: SuiteRegistry) -> None:
         site = ensure_site(ctx, pt.url, profile_id="pterclub")
         avail_off = ctx.call_phase1(
             "GET",
-            f"/api/v1/plugins/builtin.checkin/browser-availability?site_id={site['id']}&purpose=maintenance",
+            f"/api/v1/plugins/builtin.nexusphp-maintenance/browser-availability?site_id={site['id']}&purpose=maintenance",
         )
         assert avail_off.get("status") != "ready"
         reqs_off = avail_off.get("missing_requirements")
@@ -581,7 +581,7 @@ def register_cases(registry: SuiteRegistry) -> None:
         try:
             avail_on = ctx.call_phase1(
                 "GET",
-                f"/api/v1/plugins/builtin.checkin/browser-availability?site_id={site['id']}&purpose=maintenance",
+                f"/api/v1/plugins/builtin.nexusphp-maintenance/browser-availability?site_id={site['id']}&purpose=maintenance",
             )
             reqs_on = avail_on.get("missing_requirements")
             assert isinstance(reqs_on, list), f"Expected list missing_requirements, got {avail_on!r}"
@@ -610,7 +610,7 @@ def register_cases(registry: SuiteRegistry) -> None:
         put_browser_settings(ctx, True, cdp.url)
         site = ensure_site(ctx, pt.url, profile_id="pterclub")
         ctx.call_phase1("PATCH", f"/api/v1/sites/{site['id']}", json_body={"maintenance_via": "browser"})
-        grant_site_browser_permission(ctx, "builtin.checkin", site["id"], "browser:maintenance")
+        grant_site_browser_permission(ctx, "builtin.nexusphp-maintenance", site["id"], "browser:maintenance")
         try:
             res = ctx.call_phase1("POST", f"/api/v1/sites/{site['id']}/check-in", json_body={})
             if isinstance(res, dict) and res.get("operation_id"):
@@ -642,12 +642,12 @@ def register_cases(registry: SuiteRegistry) -> None:
         put_browser_settings(ctx, True, cdp.url)
         site = ensure_site(ctx, pt.url, profile_id="pterclub")
         ctx.call_phase1("PATCH", f"/api/v1/sites/{site['id']}", json_body={"maintenance_via": "browser"})
-        grant_site_browser_permission(ctx, "builtin.checkin", site["id"], "browser:maintenance")
-        p_chk = ctx.call_phase1("GET", "/api/v1/plugins/builtin.checkin")
+        grant_site_browser_permission(ctx, "builtin.nexusphp-maintenance", site["id"], "browser:maintenance")
+        p_chk = ctx.call_phase1("GET", "/api/v1/plugins/builtin.nexusphp-maintenance")
         try:
             res = ctx.call_phase1(
                 "POST",
-                "/api/v1/plugins/builtin.checkin/browser-checks",
+                "/api/v1/plugins/builtin.nexusphp-maintenance/browser-checks",
                 json_body={"site_id": site["id"], "purpose": "maintenance"},
                 if_match=str(p_chk["revision"]),
                 idempotency_key=uniq("t2f12incompat"),
@@ -673,19 +673,19 @@ def register_cases(registry: SuiteRegistry) -> None:
         site = ensure_site(ctx, pt.url, profile_id="pterclub")
         ctx.call_phase1(
             "GET",
-            f"/api/v1/plugins/builtin.checkin/browser-availability?site_id={site['id']}&purpose=maintenance",
+            f"/api/v1/plugins/builtin.nexusphp-maintenance/browser-availability?site_id={site['id']}&purpose=maintenance",
         )
         _, mc = create_member_client(ctx)
         assert_api_error(
             lambda: mc.get(
-                f"/api/v1/plugins/builtin.checkin/browser-availability?site_id={site['id']}&purpose=maintenance"
+                f"/api/v1/plugins/builtin.nexusphp-maintenance/browser-availability?site_id={site['id']}&purpose=maintenance"
             ),
             (403,),
             label="member browser-availability",
         )
         assert_api_error(
             lambda: mc.post(
-                "/api/v1/plugins/builtin.checkin/browser-checks",
+                "/api/v1/plugins/builtin.nexusphp-maintenance/browser-checks",
                 json_body={"site_id": site["id"], "purpose": "maintenance"},
             ),
             (403,),
@@ -729,7 +729,7 @@ def register_cases(registry: SuiteRegistry) -> None:
         self_test=False,
     )
     def test_t2_f13_rotation_no_duplicate_checkin(ctx: TestContext) -> None:
-        ctx.call_phase1("GET", "/api/v1/plugins/builtin.checkin")
+        ctx.call_phase1("GET", "/api/v1/plugins/builtin.nexusphp-maintenance")
         pt = ctx.new_pt_site(expected_cookie="uid=42; pass=v1")
         site = ensure_site(ctx, pt.url, profile_id="pterclub", cookie="uid=42; pass=v1")
         r1 = ctx.call_phase1("POST", f"/api/v1/sites/{site['id']}/check-in", json_body={})
@@ -753,7 +753,7 @@ def register_cases(registry: SuiteRegistry) -> None:
         self_test=False,
     )
     def test_t2_f13_drop_response_unknown_blocks_retry(ctx: TestContext) -> None:
-        ctx.call_phase1("GET", "/api/v1/plugins/builtin.checkin")
+        ctx.call_phase1("GET", "/api/v1/plugins/builtin.nexusphp-maintenance")
         pt = ctx.new_pt_site(expected_cookie="uid=42; pass=valid")
         pt.drop_response_on_next_checkin = True
         site = ensure_site(ctx, pt.url, profile_id="pterclub")
@@ -784,7 +784,7 @@ def register_cases(registry: SuiteRegistry) -> None:
         self_test=False,
     )
     def test_t2_f13_cookie_cas_race(ctx: TestContext) -> None:
-        ctx.call_phase1("GET", "/api/v1/plugins/builtin.checkin")
+        ctx.call_phase1("GET", "/api/v1/plugins/builtin.nexusphp-maintenance")
         pt = ctx.new_pt_site(expected_cookie="uid=42; pass=valid")
         pt.checkin_rotate_cookie = "pass=rotated_from_checkin"
         site = ensure_site(ctx, pt.url, profile_id="pterclub")
@@ -814,7 +814,7 @@ def register_cases(registry: SuiteRegistry) -> None:
         self_test=False,
     )
     def test_t2_f13_challenge_not_completed(ctx: TestContext) -> None:
-        ctx.call_phase1("GET", "/api/v1/plugins/builtin.checkin")
+        ctx.call_phase1("GET", "/api/v1/plugins/builtin.nexusphp-maintenance")
         pt = ctx.new_pt_site(expected_cookie="uid=42; pass=valid")
         pt.checkin_mode = "challenge"
         site = ensure_site(ctx, pt.url, profile_id="pterclub")

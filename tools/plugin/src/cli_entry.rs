@@ -13,6 +13,7 @@ pub fn run(args: &[String]) -> Result<String, CliError> {
         CliCommand::Build { dir } => build_cmd::execute_build(&dir),
         CliCommand::Pack { dir, output } => pack::execute_pack(&dir, &output),
         CliCommand::Sign { package, key } => sign::execute_sign(&package, &key),
+        CliCommand::Keygen { key, pubkey } => sign::execute_keygen(&key, &pubkey),
         CliCommand::Dev(dev_args) => dev::execute_dev(&dev_args),
     }
 }

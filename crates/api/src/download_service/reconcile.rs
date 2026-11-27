@@ -251,8 +251,8 @@ fn build_reconciled_boost_task_fact(
         .flatten()
         .map(|c| c.values)
         .unwrap_or_else(|| serde_json::json!({}));
-    let cfg = crate::plugins::boost::config::BuiltinBoostConfig::from_layers(&[&cfg_val])
-        .unwrap_or_default();
+    let cfg =
+        crate::plugins::boost::config::BoostConfig::from_layers(&[&cfg_val]).unwrap_or_default();
     let hold_until = (cfg.hold_days > 0).then(|| now + cfg.hold_days * 86_400);
     let (protection_state, protection_reason) = if hold_until.is_some() {
         (

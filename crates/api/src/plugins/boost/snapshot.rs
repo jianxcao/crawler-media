@@ -24,6 +24,18 @@ pub(crate) struct BrushTaskDto {
     pub site_id: Option<String>,
     pub info_hash: String,
     pub state: String,
+    pub title: String,
+    pub progress_permille: u32,
+    pub downloaded_bytes: u64,
+    pub ratio: f64,
+    pub upload_speed: u64,
+    pub download_speed: u64,
+    pub seeding_secs: u64,
+    pub added_at: Option<u64>,
+    pub completed_at: Option<u64>,
+    pub last_activity_at: Option<u64>,
+    pub category: Option<String>,
+    pub tags: Vec<String>,
     pub task_bytes: u64,
     pub retained_bytes: u64,
     pub uploaded_bytes: u64,
@@ -95,25 +107,45 @@ impl From<&BoostSnapshotView> for BrushStateDto {
             tasks: v
                 .tasks
                 .iter()
-                .map(|t| BrushTaskDto {
-                    handle: t.handle.clone(),
-                    task_id: t.handle.clone(),
-                    quota_key: t.quota_key.clone(),
-                    downloader_id: t.downloader_id.clone(),
-                    site_id: t.site_id.clone(),
-                    info_hash: t.info_hash.clone(),
-                    state: t.state.clone(),
-                    task_bytes: t.task_bytes,
-                    retained_bytes: t.retained_bytes,
-                    uploaded_bytes: t.uploaded_bytes,
-                    hr_protected: t.hr_protected,
-                    hold_until: t.hold_until,
-                    free_until: t.free_until,
-                    protection_state: t.protection_state.clone(),
-                    transfer_active: t.transfer_active,
-                    library_referenced: t.library_referenced,
-                    observed_at: t.observed_at,
-                    revision: t.revision,
+                .map(|t| {
+                    let denom = t.task_bytes.max(t.downloaded_bytes);
+                    let ratio = if denom > 0 {
+                        t.uploaded_bytes as f64 / denom as f64
+                    } else {
+                        0.0
+                    };
+                    BrushTaskDto {
+                        handle: t.handle.clone(),
+                        task_id: t.handle.clone(),
+                        quota_key: t.quota_key.clone(),
+                        downloader_id: t.downloader_id.clone(),
+                        site_id: t.site_id.clone(),
+                        info_hash: t.info_hash.clone(),
+                        state: t.state.clone(),
+                        title: t.title.clone(),
+                        progress_permille: t.progress_permille,
+                        downloaded_bytes: t.downloaded_bytes,
+                        ratio,
+                        upload_speed: t.upload_speed,
+                        download_speed: t.download_speed,
+                        seeding_secs: t.seeding_secs,
+                        added_at: t.added_at,
+                        completed_at: t.completed_at,
+                        last_activity_at: t.last_activity_at,
+                        category: t.category.clone(),
+                        tags: t.tags.clone(),
+                        task_bytes: t.task_bytes,
+                        retained_bytes: t.retained_bytes,
+                        uploaded_bytes: t.uploaded_bytes,
+                        hr_protected: t.hr_protected,
+                        hold_until: t.hold_until,
+                        free_until: t.free_until,
+                        protection_state: t.protection_state.clone(),
+                        transfer_active: t.transfer_active,
+                        library_referenced: t.library_referenced,
+                        observed_at: t.observed_at,
+                        revision: t.revision,
+                    }
                 })
                 .collect(),
             disk: BrushDiskDto {
@@ -498,6 +530,89 @@ fn collect_downloader_metrics(
     }
 }
 
+fn build_boost_task_view(
+    t: &store::download_operations::BoostTaskFactRecord,
+    probed: &ProbedDownloaderMetrics,
+    db: &DbSnapshotData,
+    observed_at: u64,
+) -> (BoostTaskView, u64) {
+    let hash_norm = t.info_hash.trim().to_ascii_lowercase();
+    let live = probed
+        .snap_by_dl
+        .get(&t.downloader_id)
+        .and_then(|m| m.get(&hash_norm));
+    let uploaded_bytes = live.map_or(0, |s| s.uploaded_bytes);
+    let title = live
+        .map(|s| s.name.clone())
+        .filter(|n| !n.trim().is_empty())
+        .unwrap_or_else(|| t.info_hash.clone());
+    let progress_permille = live
+        .map(|s| (s.progress.clamp(0.0, 1.0) * 1000.0).round() as u32)
+        .unwrap_or(0);
+    let downloaded_bytes = live.map_or(0, |s| s.downloaded_bytes);
+    let upload_speed = live.map_or(0, |s| s.upload_speed);
+    let download_speed = live.map_or(0, |s| s.download_speed);
+    let seeding_secs = live.map_or(0, |s| s.seeding_secs);
+    let added_at = live.and_then(|s| s.added_at.and_then(|v| u64::try_from(v).ok()));
+    let completed_at = live.and_then(|s| s.completed_at.and_then(|v| u64::try_from(v).ok()));
+    let last_activity_at =
+        live.and_then(|s| s.last_activity_at.and_then(|v| u64::try_from(v).ok()));
+    let category = live.and_then(|s| s.category.clone());
+    let tags = live.map_or_else(Vec::new, |s| s.user_tags.clone());
+    let mut candidate_paths = probed
+        .files_by_task
+        .get(&(t.downloader_id, hash_norm.clone()))
+        .cloned()
+        .unwrap_or_default();
+    if candidate_paths.is_empty() {
+        candidate_paths = extract_plan_paths(t);
+    }
+    let library_referenced = candidate_paths
+        .iter()
+        .any(|p| path_is_in_set(p, &db.protections.library_paths));
+    let transfer_active = db.protections.active_subscribe_hashes.contains(&hash_norm)
+        || candidate_paths
+            .iter()
+            .any(|p| path_is_in_set(p, &db.protections.transfer_paths));
+    let rev = u64::try_from(t.revision).unwrap_or(1);
+    let protection_state = if library_referenced || transfer_active {
+        "protected".to_string()
+    } else {
+        t.protection_state.as_str().to_string()
+    };
+    let view = BoostTaskView {
+        handle: t.task_fact_id.clone(),
+        quota_key: t.quota_key.clone(),
+        downloader_id: t.downloader_id.to_string(),
+        site_id: t.site_id.map(|s| s.to_string()),
+        info_hash: t.info_hash.clone(),
+        state: t.state.as_str().to_string(),
+        title,
+        progress_permille,
+        downloaded_bytes,
+        upload_speed,
+        download_speed,
+        seeding_secs,
+        added_at,
+        completed_at,
+        last_activity_at,
+        category,
+        tags,
+        task_bytes: u64::try_from(t.occupied_bytes).unwrap_or(0),
+        retained_bytes: u64::try_from(t.retained_bytes).unwrap_or(0),
+        uploaded_bytes,
+        hr_protected: t.hr_active,
+        hold_until: t.hold_until.and_then(|v| u64::try_from(v).ok()),
+        free_until: t.free_until.and_then(|v| u64::try_from(v).ok()),
+        protection_state,
+        transfer_active,
+        library_referenced,
+        observed_at: u64::try_from(t.observed_at).unwrap_or(observed_at),
+        revision: rev,
+    };
+    (view, rev)
+}
+
 fn probe_downloaders_off_lock(
     store: &Store,
     default_dl: &Arc<dyn Downloader>,
@@ -531,53 +646,9 @@ fn probe_downloaders_off_lock(
         .tasks
         .iter()
         .map(|t| {
-            let hash_norm = t.info_hash.trim().to_ascii_lowercase();
-            let live = probed
-                .snap_by_dl
-                .get(&t.downloader_id)
-                .and_then(|m| m.get(&hash_norm));
-            let uploaded_bytes = live.map_or(0, |s| s.uploaded_bytes);
-            let mut candidate_paths = probed
-                .files_by_task
-                .get(&(t.downloader_id, hash_norm.clone()))
-                .cloned()
-                .unwrap_or_default();
-            if candidate_paths.is_empty() {
-                candidate_paths = extract_plan_paths(t);
-            }
-            let library_referenced = candidate_paths
-                .iter()
-                .any(|p| path_is_in_set(p, &db.protections.library_paths));
-            let transfer_active = db.protections.active_subscribe_hashes.contains(&hash_norm)
-                || candidate_paths
-                    .iter()
-                    .any(|p| path_is_in_set(p, &db.protections.transfer_paths));
-            let rev = u64::try_from(t.revision).unwrap_or(1);
+            let (view, rev) = build_boost_task_view(t, &probed, db, observed_at);
             max_rev = max_rev.max(rev);
-            let protection_state = if library_referenced || transfer_active {
-                "protected".to_string()
-            } else {
-                t.protection_state.as_str().to_string()
-            };
-            BoostTaskView {
-                handle: t.task_fact_id.clone(),
-                quota_key: t.quota_key.clone(),
-                downloader_id: t.downloader_id.to_string(),
-                site_id: t.site_id.map(|s| s.to_string()),
-                info_hash: t.info_hash.clone(),
-                state: t.state.as_str().to_string(),
-                task_bytes: u64::try_from(t.occupied_bytes).unwrap_or(0),
-                retained_bytes: u64::try_from(t.retained_bytes).unwrap_or(0),
-                uploaded_bytes,
-                hr_protected: t.hr_active,
-                hold_until: t.hold_until.and_then(|v| u64::try_from(v).ok()),
-                free_until: t.free_until.and_then(|v| u64::try_from(v).ok()),
-                protection_state,
-                transfer_active,
-                library_referenced,
-                observed_at: u64::try_from(t.observed_at).unwrap_or(observed_at),
-                revision: rev,
-            }
+            view
         })
         .collect::<Vec<_>>();
 

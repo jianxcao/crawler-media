@@ -210,7 +210,7 @@ mod tests {
 
         for spa_path in [
             "/plugin-apps/org.example.demo/checkin",
-            "/settings/plugins/builtin.checkin",
+            "/settings/plugins/cm.checkin",
         ] {
             let r_spa = app
                 .clone()

@@ -9,14 +9,17 @@ use indexer::MaintenanceAction;
 use serde::Deserialize;
 use serde_json::json;
 use store::SiteMaintenanceReceiptFilter;
+use store::plugins::{PluginLifecycle, PluginRecord};
 
 use crate::http::err;
 use crate::http::plugins::extractors::CanonicalWrite;
 use crate::http::plugins::{accepted_op, ok_with_etag, service_error_response};
 use crate::http::store_wait::store_read;
 use crate::management::ApiState;
-use crate::plugins::builtins::BUILTIN_CHECKIN_PLUGIN_ID;
+use crate::plugins::builtins::BUILTIN_NEXUSPHP_MAINTENANCE_PLUGIN_ID;
 use crate::plugins::{SubmitAdminCommandInput, op_settlement};
+
+const OFFICIAL_CHECKIN_PLUGIN_ID: &str = "cm.checkin";
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -185,6 +188,31 @@ fn receipt_view_json(r: store::SiteMaintenanceReceipt) -> serde_json::Value {
     })
 }
 
+async fn check_site_action_replay(
+    state: &ApiState,
+    user_id: UserId,
+    w: &CanonicalWrite<SitePluginActionRequest>,
+) -> Result<Option<crate::plugins::OperationAdminView>, crate::plugins::PluginServiceError> {
+    for candidate in [
+        OFFICIAL_CHECKIN_PLUGIN_ID,
+        BUILTIN_NEXUSPHP_MAINTENANCE_PLUGIN_ID,
+    ] {
+        if let Some(op) = op_settlement::check_management_replay(
+            state,
+            user_id,
+            Some(candidate),
+            &w.idempotency_key,
+            &w.request,
+            "site.maintenance",
+        )
+        .await?
+        {
+            return Ok(Some(op));
+        }
+    }
+    Ok(None)
+}
+
 pub(crate) async fn plugin_actions(
     State(state): State<ApiState>,
     Extension(user_id): Extension<UserId>,
@@ -200,16 +228,7 @@ pub(crate) async fn plugin_actions(
         Err(resp) => return resp,
     };
 
-    match op_settlement::check_management_replay(
-        &state,
-        user_id,
-        Some(BUILTIN_CHECKIN_PLUGIN_ID),
-        &w.idempotency_key,
-        &w.request,
-        "site.maintenance",
-    )
-    .await
-    {
+    match check_site_action_replay(&state, user_id, &w).await {
         Ok(Some(replayed)) => return accepted_op(replayed),
         Ok(None) => {}
         Err(err) => return service_error_response(err),
@@ -217,12 +236,13 @@ pub(crate) async fn plugin_actions(
 
     let read = match store_read(&state, &[store::Db::App], move |store| {
         let obs = store.observe_site(id)?;
-        let plugin = store.get_plugin(BUILTIN_CHECKIN_PLUGIN_ID)?;
-        Ok::<_, store::StoreError>((obs, plugin))
+        let cm_checkin = store.get_plugin(OFFICIAL_CHECKIN_PLUGIN_ID)?;
+        let maint = store.get_plugin(BUILTIN_NEXUSPHP_MAINTENANCE_PLUGIN_ID)?;
+        Ok::<_, store::StoreError>((obs, cm_checkin, maint))
     })
     .await
     {
-        Ok(Ok(pair)) => pair,
+        Ok(Ok(triple)) => triple,
         Ok(Err(e)) => {
             return err(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -232,7 +252,7 @@ pub(crate) async fn plugin_actions(
         }
         Err(error) => return error.response(),
     };
-    let (Some(observed), checkin_plugin) = read else {
+    let (Some(observed), cm_checkin, maint) = read else {
         return err(StatusCode::NOT_FOUND, "site.missing", "站点不存在");
     };
     if observed.revision() != w.expected_revision {
@@ -263,11 +283,11 @@ pub(crate) async fn plugin_actions(
             &error.to_string(),
         );
     }
-    let Some(plugin) = checkin_plugin else {
+    let Some(plugin) = select_enabled_plugin(cm_checkin, maint) else {
         return err(
             StatusCode::INTERNAL_SERVER_ERROR,
             "plugin.missing",
-            "builtin.checkin plugin unavailable",
+            "site maintenance plugin unavailable",
         );
     };
 
@@ -275,7 +295,7 @@ pub(crate) async fn plugin_actions(
         .plugins()
         .submit_admin_command(
             &state,
-            BUILTIN_CHECKIN_PLUGIN_ID,
+            &plugin.plugin_id,
             SubmitAdminCommandInput {
                 actor_user_id: user_id,
                 kind: "site.maintenance".into(),
@@ -298,4 +318,13 @@ pub(crate) async fn plugin_actions(
         Ok(op) => accepted_op(op),
         Err(err) => service_error_response(err),
     }
+}
+
+fn select_enabled_plugin(
+    preferred: Option<PluginRecord>,
+    fallback: Option<PluginRecord>,
+) -> Option<PluginRecord> {
+    preferred
+        .filter(|p| p.lifecycle == PluginLifecycle::Enabled)
+        .or_else(|| fallback.filter(|p| p.lifecycle == PluginLifecycle::Enabled))
 }

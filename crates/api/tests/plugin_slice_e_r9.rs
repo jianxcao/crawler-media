@@ -21,7 +21,7 @@ use plugin_host::Invocation;
 use serde_json::{Value, json};
 use support::NoopFetcher;
 use support::plugin_http_support::{
-    HttpEnv, TOKEN, assert_ok,
+    ADMIN_PASS, HttpEnv, TOKEN, assert_ok,
     pkg::{TestSigningKey, build_stored_zip},
     req_json,
 };
@@ -35,9 +35,10 @@ fn make_boost_r9_env() -> (HttpEnv, DownloaderId) {
 
     let store = Arc::new(Store::open(dir.path().join("data")).unwrap());
     let env_dl = Arc::new(MemoryDownloader::new(&dl_root));
-    let state = ApiState::new_arc(
+    let state = ApiState::new_arc_with_admin_password(
         store,
         TOKEN.into(),
+        Some(ADMIN_PASS.into()),
         RegistrySnapshot::builtin().unwrap(),
         Arc::new(NoopFetcher),
         env_dl as Arc<dyn Downloader>,
@@ -73,12 +74,14 @@ fn make_boost_r9_env() -> (HttpEnv, DownloaderId) {
 #[tokio::test]
 async fn boost_disabled_downloader_returns_unavailable_disk_and_skips_submission() {
     let (env, disabled_dl) = make_boost_r9_env();
+    support::plugin_http_support::plugins_fixture::install_cm_boost(&env, false, false, false)
+        .await;
 
     // 1. Explicit disabled `downloader_id` in `brush-state` must NOT fall back to `default_dl`
     let (st_bs, _, b_bs) = env
         .send(req_json(
             "GET",
-            &format!("/api/v1/plugins/builtin.boost/brush-state?downloader_id={disabled_dl}"),
+            &format!("/api/v1/plugins/cm.boost/brush-state?downloader_id={disabled_dl}"),
             Some(TOKEN),
             &[],
             None,
@@ -91,23 +94,23 @@ async fn boost_disabled_downloader_returns_unavailable_disk_and_skips_submission
     );
     assert!(bs["disk"]["available_bytes"].is_null());
 
-    // 2. Configuring `builtin.boost` with disabled `downloader_id` must reject/skip boost cycle
+    // 2. Configuring `cm.boost` with disabled `downloader_id` must reject/skip boost cycle
     let site_id = env.insert_site("R9-Boost-Site");
     let (_, _, cfg_get) = env
         .send(req_json(
             "GET",
-            "/api/v1/plugins/builtin.boost/config",
+            "/api/v1/plugins/cm.boost/config",
             Some(TOKEN),
             &[],
             None,
         ))
         .await;
     let srev = cfg_get["data"]["schema_revision"].as_str().unwrap();
-    let rev_pre = env.get_plugin_rev("builtin.boost").await;
+    let rev_pre = env.get_plugin_rev("cm.boost").await;
     let (st_dis, _, b_dis) = env
         .send(req_json(
             "POST",
-            "/api/v1/plugins/builtin.boost/disable",
+            "/api/v1/plugins/cm.boost/disable",
             Some(TOKEN),
             &[
                 ("if-match", &format!("\"{rev_pre}\"")),
@@ -118,11 +121,11 @@ async fn boost_disabled_downloader_returns_unavailable_disk_and_skips_submission
         .await;
     assert_ok(st_dis, &b_dis, StatusCode::ACCEPTED);
 
-    let rev0 = env.get_plugin_rev("builtin.boost").await;
+    let rev0 = env.get_plugin_rev("cm.boost").await;
     let (st_cfg, _, b_cfg) = env
         .send(req_json(
             "PUT",
-            "/api/v1/plugins/builtin.boost/config",
+            "/api/v1/plugins/cm.boost/config",
             Some(TOKEN),
             &[
                 ("if-match", &format!("\"{rev0}\"")),
@@ -140,15 +143,14 @@ async fn boost_disabled_downloader_returns_unavailable_disk_and_skips_submission
         .await;
     assert_ok(st_cfg, &b_cfg, StatusCode::OK);
 
-    let rev_en = env.get_plugin_rev("builtin.boost").await;
-    env.enable_plugin("builtin.boost", rev_en, "r9-boost-en")
-        .await;
+    let rev_en = env.get_plugin_rev("cm.boost").await;
+    env.enable_plugin("cm.boost", rev_en, "r9-boost-en").await;
 
-    let rev1 = env.get_plugin_rev("builtin.boost").await;
+    let rev1 = env.get_plugin_rev("cm.boost").await;
     let (st_cmd, _, b_cmd) = env
         .send(req_json(
             "POST",
-            "/api/v1/plugins/builtin.boost/commands",
+            "/api/v1/plugins/cm.boost/commands",
             Some(TOKEN),
             &[
                 ("if-match", &format!("\"{rev1}\"")),

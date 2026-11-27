@@ -20,8 +20,10 @@ use indexer::{
 use serde_json::{Value, json};
 use store::BoostTaskState;
 use store::plugins::{CanonicalPluginRequest, PluginCommandTarget};
-use support::plugin_http_support::{HttpEnv, TOKEN, admin_id, assert_err, assert_ok, req_json};
-use support::{NoopFetcher, poll_op, seed_boost_task};
+use support::plugin_http_support::{
+    ADMIN_PASS, HttpEnv, TOKEN, admin_id, assert_err, assert_ok, plugins_fixture, req_json,
+};
+use support::{NoopFetcher, poll_op};
 
 struct CountingFakePage;
 
@@ -72,9 +74,10 @@ fn env_with_dl_maps(
     path_maps: Vec<PathMap>,
 ) -> (HttpEnv, domain::SiteId, DownloaderId) {
     let store = Arc::new(Store::open(dir.path().join("data")).unwrap());
-    let state = ApiState::new_arc(
+    let state = ApiState::new_arc_with_admin_password(
         store,
         TOKEN.into(),
+        Some(ADMIN_PASS.into()),
         RegistrySnapshot::builtin().unwrap(),
         Arc::new(NoopFetcher),
         dl,
@@ -108,11 +111,11 @@ fn env_with_dl_maps(
 }
 
 async fn run_boost_cmd(env: &HttpEnv, idem: &str, kind: &str, payload: Value) -> Value {
-    let rev = env.get_plugin_rev("builtin.boost").await;
+    let rev = env.get_plugin_rev("cm.boost").await;
     let (st, _, body) = env
         .send(req_json(
             "POST",
-            "/api/v1/plugins/builtin.boost/commands",
+            "/api/v1/plugins/cm.boost/commands",
             Some(TOKEN),
             &[
                 ("If-Match", &format!("\"{rev}\"")),
@@ -141,7 +144,7 @@ fn checkin_direct_input(
         idempotency_key: idem.into(),
         request: CanonicalPluginRequest {
             method: "POST".into(),
-            path: "/api/v1/plugins/builtin.checkin/commands".into(),
+            path: "/api/v1/plugins/cm.checkin/commands".into(),
             body_digest: [tag; 32],
         },
     }
@@ -170,7 +173,7 @@ async fn post_checkin_cmd_while_app_writer_held(
 
     let req = req_json(
         "POST",
-        "/api/v1/plugins/builtin.checkin/commands",
+        "/api/v1/plugins/cm.checkin/commands",
         Some(TOKEN),
         &[
             ("if-match", &format!("\"{rev}\"")),
@@ -206,12 +209,13 @@ async fn post_checkin_cmd_while_app_writer_held(
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn slice_e_r4_item1_submit_admin_command_enforces_post_lock_write_admission() {
     let env = HttpEnv::new().await;
+    plugins_fixture::install_cm_checkin(&env, false, false, false, false).await;
     let site_id = env.insert_site("PT-R4-1");
-    let rev = env.get_plugin_rev("builtin.checkin").await;
+    let rev = env.get_plugin_rev("cm.checkin").await;
     let audit_before = env
         .state
         .store()
-        .list_plugin_audit_events("builtin.checkin", None, None, None, Some(100))
+        .list_plugin_audit_events("cm.checkin", None, None, None, Some(100))
         .unwrap()
         .items
         .len();
@@ -224,7 +228,7 @@ async fn slice_e_r4_item1_submit_admin_command_enforces_post_lock_write_admissio
             .plugins()
             .submit_admin_command(
                 &env.state,
-                "builtin.checkin",
+                "cm.checkin",
                 checkin_direct_input(site_id, rev, "r4-direct-gate", 1),
             )
             .await
@@ -238,7 +242,7 @@ async fn slice_e_r4_item1_submit_admin_command_enforces_post_lock_write_admissio
             .plugins()
             .submit_admin_command(
                 &env.state,
-                "builtin.checkin",
+                "cm.checkin",
                 checkin_direct_input(site_id, rev, "r4-direct-ro", 2),
             )
             .await
@@ -263,7 +267,7 @@ async fn slice_e_r4_item1_submit_admin_command_enforces_post_lock_write_admissio
     let audit_after = env
         .state
         .store()
-        .list_plugin_audit_events("builtin.checkin", None, None, None, Some(100))
+        .list_plugin_audit_events("cm.checkin", None, None, None, Some(100))
         .unwrap()
         .items
         .len();
@@ -285,8 +289,9 @@ async fn slice_e_r4_item2_live_downloader_tasks_block_cleanup_and_preview() {
 
     let dl = Arc::new(MemoryDownloader::new(stage.clone()));
     let (env, site_id, dl_id) = env_with_dl_maps(dir, dl.clone(), vec![]);
+    plugins_fixture::install_cm_boost(&env, false, false, false).await;
 
-    let tf_plan = seed_boost_task(
+    let tf_plan = plugins_fixture::seed_cm_boost_task(
         env.state.store().as_ref(),
         dl_id,
         site_id,
@@ -298,7 +303,7 @@ async fn slice_e_r4_item2_live_downloader_tasks_block_cleanup_and_preview() {
         Some(false),
         None,
     );
-    let tf_ret = seed_boost_task(
+    let tf_ret = plugins_fixture::seed_cm_boost_task(
         env.state.store().as_ref(),
         dl_id,
         site_id,
@@ -339,9 +344,7 @@ async fn slice_e_r4_item2_live_downloader_tasks_block_cleanup_and_preview() {
     let (st_tok, _, b_tok) = env
         .send(req_json(
             "GET",
-            &format!(
-                "/api/v1/plugins/builtin.boost/brush-cleanup-preview?plan_handle={plan_handle}"
-            ),
+            &format!("/api/v1/plugins/cm.boost/brush-cleanup-preview?plan_handle={plan_handle}"),
             Some(TOKEN),
             &[],
             None,
@@ -403,7 +406,7 @@ async fn assert_live_task_blocks_preview_and_cleanup(
     let (st_sel, _, b_sel) = env
         .send(req_json(
             "GET",
-            &format!("/api/v1/plugins/builtin.boost/brush-cleanup-preview?task_ids={tf_ret}"),
+            &format!("/api/v1/plugins/cm.boost/brush-cleanup-preview?task_ids={tf_ret}"),
             Some(TOKEN),
             &[],
             None,
@@ -416,9 +419,7 @@ async fn assert_live_task_blocks_preview_and_cleanup(
     let (st_pl, _, b_pl) = env
         .send(req_json(
             "GET",
-            &format!(
-                "/api/v1/plugins/builtin.boost/brush-cleanup-preview?plan_handle={plan_handle}"
-            ),
+            &format!("/api/v1/plugins/cm.boost/brush-cleanup-preview?plan_handle={plan_handle}"),
             Some(TOKEN),
             &[],
             None,
@@ -475,8 +476,9 @@ async fn slice_e_r4_item3_symlinked_ancestor_deletes_target_and_prunes_empty_sub
         to: real_root.clone(),
     }];
     let (env, site_id, dl_id) = env_with_dl_maps(dir, dl, maps);
+    plugins_fixture::install_cm_boost(&env, false, false, false).await;
 
-    let tf_id = seed_boost_task(
+    let tf_id = plugins_fixture::seed_cm_boost_task(
         env.state.store().as_ref(),
         dl_id,
         site_id,
@@ -513,7 +515,7 @@ async fn slice_e_r4_item3_symlinked_ancestor_deletes_target_and_prunes_empty_sub
     let (st_p, _, b_p) = env
         .send(req_json(
             "GET",
-            &format!("/api/v1/plugins/builtin.boost/brush-cleanup-preview?plan_handle={handle}"),
+            &format!("/api/v1/plugins/cm.boost/brush-cleanup-preview?plan_handle={handle}"),
             Some(TOKEN),
             &[],
             None,
@@ -551,10 +553,11 @@ async fn slice_e_r4_item3_symlinked_ancestor_deletes_target_and_prunes_empty_sub
 #[tokio::test]
 async fn slice_e_r4_item4_builtin_checkin_effective_grants_roundtrip_permissions_prepare() {
     let env = HttpEnv::new().await;
+    plugins_fixture::install_cm_checkin(&env, false, false, false, false).await;
     let (st_g, _, b_g) = env
         .send(req_json(
             "GET",
-            "/api/v1/plugins/builtin.checkin/permissions",
+            "/api/v1/plugins/cm.checkin/permissions",
             Some(TOKEN),
             &[],
             None,
@@ -566,13 +569,13 @@ async fn slice_e_r4_item4_builtin_checkin_effective_grants_roundtrip_permissions
         !effective
             .iter()
             .any(|g| g["capability"] == "maintenance:provide"),
-        "builtin.checkin must not bootstrap undeclared maintenance:provide: {effective:?}"
+        "cm.checkin must not bootstrap undeclared maintenance:provide: {effective:?}"
     );
 
     let (st_prep, _, b_prep) = env
         .send(req_json(
             "POST",
-            "/api/v1/plugins/builtin.checkin/permissions/prepare",
+            "/api/v1/plugins/cm.checkin/permissions/prepare",
             Some(TOKEN),
             &[],
             Some(json!({ "requested_grants": perms["effective_grants"] })),
@@ -590,7 +593,7 @@ async fn post_browser_check(env: &HttpEnv, site_id: &str, rev: i64, idem: &str) 
     let (st, _, body) = env
         .send(req_json(
             "POST",
-            "/api/v1/plugins/builtin.checkin/browser-checks",
+            "/api/v1/plugins/cm.checkin/browser-checks",
             Some(TOKEN),
             &[
                 ("if-match", &format!("\"{rev}\"")),
@@ -606,7 +609,9 @@ async fn post_browser_check(env: &HttpEnv, site_id: &str, rev: i64, idem: &str) 
 async fn slice_e_r4_item5_browser_object_site_scope_ui_attribution_and_probe_gates() {
     let dir = tempfile::tempdir_in("/tmp").unwrap();
     let (browser, cdp_calls) = make_counting_browser();
-    let state = support::plugin_http_support::build_state(dir.path()).with_browser(browser);
+    let state = support::plugin_http_support::build_state(dir.path())
+        .with_browser(browser)
+        .with_admin_trusted_plugins(["cm.checkin"]);
     state.store().put_setting("cdp.enabled", "true").unwrap();
     let env = HttpEnv {
         _dir: dir,
@@ -614,6 +619,7 @@ async fn slice_e_r4_item5_browser_object_site_scope_ui_attribution_and_probe_gat
         state,
         member_token: String::new(),
     };
+    plugins_fixture::install_cm_checkin(&env, true, true, false, true).await;
 
     let (st_s, _, b_s) = env
         .send(req_json(
@@ -635,18 +641,13 @@ async fn slice_e_r4_item5_browser_object_site_scope_ui_attribution_and_probe_gat
         .unwrap()
         .to_string();
 
-    let checkin_rec = env
-        .state
-        .store()
-        .get_plugin("builtin.checkin")
-        .unwrap()
-        .unwrap();
+    let checkin_rec = env.state.store().get_plugin("cm.checkin").unwrap().unwrap();
     let rev0 = checkin_rec.revision;
     let gen0 = checkin_rec.generation.to_string();
     let (st_ui, _, b_ui) = env
         .send(req_json(
             "POST",
-            "/api/v1/plugins/builtin.checkin/browser-checks",
+            "/api/v1/plugins/cm.checkin/browser-checks",
             Some(TOKEN),
             &[
                 ("if-match", &format!("\"{rev0}\"")),
@@ -670,9 +671,8 @@ async fn slice_e_r4_item5_browser_object_site_scope_ui_attribution_and_probe_gat
     assert_eq!(op_mg["result"]["reason"], "missing_grant");
     assert_eq!(cdp_calls.load(Ordering::SeqCst), 0);
 
-    env.disable_plugin("builtin.checkin", rev0, "r4-dis-chk")
-        .await;
-    let rev_dis = env.get_plugin_rev("builtin.checkin").await;
+    env.disable_plugin("cm.checkin", rev0, "r4-dis-chk").await;
+    let rev_dis = env.get_plugin_rev("cm.checkin").await;
     let op_ne = post_browser_check(&env, &site_id, rev_dis, "r4-bchk-ne").await;
     assert_eq!(op_ne["state"], "failed");
     assert_eq!(op_ne["phase"], "plugin-not-enabled");
@@ -684,7 +684,7 @@ async fn slice_e_r4_item5_browser_object_site_scope_ui_attribution_and_probe_gat
 }
 
 async fn grant_object_site_browser_maint_and_enable(env: &HttpEnv, site_id: &str) {
-    let rev_dis = env.get_plugin_rev("builtin.checkin").await;
+    let rev_dis = env.get_plugin_rev("cm.checkin").await;
     let grants = json!([{
         "capability": "browser:maintenance",
         "scope": { "Object": { "kind": "site", "id": format!("site:{site_id}") } },
@@ -693,7 +693,7 @@ async fn grant_object_site_browser_maint_and_enable(env: &HttpEnv, site_id: &str
     let (st_prep, _, b_prep) = env
         .send(req_json(
             "POST",
-            "/api/v1/plugins/builtin.checkin/permissions/prepare",
+            "/api/v1/plugins/cm.checkin/permissions/prepare",
             Some(TOKEN),
             &[],
             Some(json!({ "requested_grants": grants })),
@@ -703,7 +703,7 @@ async fn grant_object_site_browser_maint_and_enable(env: &HttpEnv, site_id: &str
     let (st_gr, _, b_gr) = env
         .send(req_json(
             "POST",
-            "/api/v1/plugins/builtin.checkin/permissions/grant",
+            "/api/v1/plugins/cm.checkin/permissions/grant",
             Some(TOKEN),
             &[
                 ("if-match", &format!("\"{rev_dis}\"")),
@@ -716,9 +716,8 @@ async fn grant_object_site_browser_maint_and_enable(env: &HttpEnv, site_id: &str
         assert_ok(st_gr, &b_gr, StatusCode::ACCEPTED)["state"],
         "succeeded"
     );
-    let rev_gr = env.get_plugin_rev("builtin.checkin").await;
-    env.enable_plugin("builtin.checkin", rev_gr, "r4-en-chk")
-        .await;
+    let rev_gr = env.get_plugin_rev("cm.checkin").await;
+    env.enable_plugin("cm.checkin", rev_gr, "r4-en-chk").await;
 }
 
 async fn assert_object_scope_browser_ready_and_settings_gated(
@@ -730,7 +729,7 @@ async fn assert_object_scope_browser_ready_and_settings_gated(
         .send(req_json(
             "GET",
             &format!(
-                "/api/v1/plugins/builtin.checkin/browser-availability?site_id={site_id}&purpose=maintenance"
+                "/api/v1/plugins/cm.checkin/browser-availability?site_id={site_id}&purpose=maintenance"
             ),
             Some(TOKEN),
             &[],
@@ -741,7 +740,7 @@ async fn assert_object_scope_browser_ready_and_settings_gated(
     assert_eq!(av["grant_present"], true, "av={av}");
     assert_eq!(av["site_enabled"], false);
 
-    let rev_en = env.get_plugin_rev("builtin.checkin").await;
+    let rev_en = env.get_plugin_rev("cm.checkin").await;
     let op_ok = post_browser_check(env, site_id, rev_en, "r4-bchk-ok").await;
     assert_eq!(op_ok["state"], "succeeded", "op_ok={op_ok}");
     assert_eq!(op_ok["phase"], "checked");
@@ -751,7 +750,7 @@ async fn assert_object_scope_browser_ready_and_settings_gated(
         .store()
         .put_setting("cdp.enabled", "false")
         .unwrap();
-    let rev_en2 = env.get_plugin_rev("builtin.checkin").await;
+    let rev_en2 = env.get_plugin_rev("cm.checkin").await;
     let op_cd = post_browser_check(env, site_id, rev_en2, "r4-bchk-cdp-off").await;
     assert_eq!(op_cd["state"], "failed");
     assert_eq!(op_cd["phase"], "cdp-disabled");

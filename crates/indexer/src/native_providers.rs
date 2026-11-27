@@ -170,7 +170,7 @@ impl IndexerProvider for MTeamProvider {
             .map(|item| {
                 let id_str = item.id.clone().unwrap_or_default();
                 let enclosure = format!("{base}/api/torrent/download?id={id_str}");
-                item.into_torrent(site.id, enclosure)
+                item.into_torrent(site.id, enclosure, self.profile.categories.as_ref())
             })
             .collect())
     }
@@ -274,7 +274,7 @@ impl IndexerProvider for GenericApiYamlProvider {
                     .map(|item| {
                         let id_str = item.id.clone().unwrap_or_default();
                         let enclosure = format!("{base}/api/torrent/download?id={id_str}");
-                        item.into_torrent(site.id, enclosure)
+                        item.into_torrent(site.id, enclosure, self.profile.categories.as_ref())
                     })
                     .collect())
             }

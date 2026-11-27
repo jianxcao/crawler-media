@@ -106,6 +106,7 @@ pub(crate) fn env_with_dl<D: Downloader + 'static>(
         app,
         member_token: String::new(),
     };
+    support::install_cm_boost_plugin(env.state.store().as_ref());
     let site_id = env.insert_site("PT-Safety");
     let dl_id = DownloaderId::new();
     env.state
@@ -130,7 +131,7 @@ pub(crate) fn env_with_dl<D: Downloader + 'static>(
 pub(crate) fn boost_rev(env: &HttpEnv) -> i64 {
     env.state
         .store()
-        .get_plugin("builtin.boost")
+        .get_plugin("cm.boost")
         .unwrap()
         .unwrap()
         .revision
@@ -147,7 +148,7 @@ pub(crate) async fn send_boost_cmd(
     let (st, _, body) = env
         .send(req_json(
             "POST",
-            "/api/v1/plugins/builtin.boost/commands",
+            "/api/v1/plugins/cm.boost/commands",
             Some(token),
             &[
                 ("If-Match", &format!("\"{rev}\"")),
@@ -232,7 +233,7 @@ async fn admin_command_with_global_grant_and_downloader_target_succeeds() {
     let (st, _, body) = env
         .send(req_json(
             "POST",
-            "/api/v1/plugins/builtin.boost/commands",
+            "/api/v1/plugins/cm.boost/commands",
             Some(TOKEN),
             &[
                 ("If-Match", &format!("\"{rev}\"")),
@@ -309,7 +310,7 @@ async fn admin_delete_files_rejects_from_plugin_and_binds_and_consumes_token() {
     let (st_p, _, b_p) = env
         .send(req_json(
             "GET",
-            "/api/v1/plugins/builtin.boost/brush-cleanup-preview?plan_handle=plan-tok-1",
+            "/api/v1/plugins/cm.boost/brush-cleanup-preview?plan_handle=plan-tok-1",
             Some(TOKEN),
             &[],
             None,
@@ -628,7 +629,7 @@ async fn prepare_cleanup_and_delete_files_reject_empty_paths() {
     let (st_prev, _, b_prev) = env
         .send(req_json(
             "GET",
-            "/api/v1/plugins/builtin.boost/brush-cleanup-preview?plan_handle=plan-empty-1",
+            "/api/v1/plugins/cm.boost/brush-cleanup-preview?plan_handle=plan-empty-1",
             Some(TOKEN),
             &[],
             None,

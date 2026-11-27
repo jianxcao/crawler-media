@@ -10,6 +10,7 @@ pub(crate) mod extractors;
 mod lifecycle_and_upgrade;
 mod multipart;
 mod ops_tasks_audit;
+mod repositories;
 mod trust_and_settings;
 mod ui;
 mod upload_and_install;
@@ -89,6 +90,14 @@ fn admin_plugin_package_routes() -> Router<ApiState> {
         .route(
             "/plugin-hook-catalog",
             get(ops_tasks_audit::get_hook_catalog),
+        )
+        .route(
+            "/plugin-repositories",
+            get(repositories::list_repositories).put(repositories::save_repositories),
+        )
+        .route(
+            "/plugin-repositories/{repo_id}/catalog",
+            get(repositories::get_catalog),
         )
 }
 

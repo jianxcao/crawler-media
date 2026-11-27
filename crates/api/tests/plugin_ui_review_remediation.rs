@@ -583,10 +583,11 @@ async fn indexer_cached_returns_409_while_pending_redacts_passkey_and_resolves_h
 #[tokio::test]
 async fn builtin_boost_config_schema_exposes_canonical_downloader_id_only() {
     let env = HttpEnv::new().await;
+    plugin_http_support::plugins_fixture::install_cm_boost(&env, false, false, false).await;
     let (st, _, body) = env
         .send(req_json(
             "GET",
-            "/api/v1/plugins/builtin.boost/config-schema",
+            "/api/v1/plugins/cm.boost/config-schema",
             Some(TOKEN),
             &[],
             None,

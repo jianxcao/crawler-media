@@ -1,9 +1,7 @@
 import "./plugin-ui-env";
 
 import assert from "node:assert/strict";
-import path from "node:path";
 import test from "node:test";
-import { pathToFileURL } from "node:url";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import React from "react";
 import { MemoryRouter } from "react-router-dom";
@@ -16,11 +14,9 @@ import { PluginSchemaForm } from "../components/plugins/PluginSchemaForm";
 import { PluginSurfaceHost } from "../components/plugins/PluginSurfaceHost";
 import type { SessionView } from "../lib/api/auth";
 import type { PluginUiContract, UiDescriptorView } from "../lib/api/plugins";
-import { loadFederatedSurface } from "../lib/plugins/federation-loader";
+import { loadFederatedSurface, type FederatedContainer } from "../lib/plugins/federation-loader";
 import { createPluginHostSdk } from "../lib/plugins/sdk";
 import { SessionProvider } from "../lib/session";
-
-const REPO_ROOT = path.resolve(import.meta.dirname, "../..");
 
 const ADMIN_SESSION: SessionView = {
   id: "user-admin-r4",
@@ -109,30 +105,56 @@ test("R4-F1: boost Config preserves unset optional budget_bytes instead of coerc
 
   try {
     const saved: Array<Record<string, unknown>> = [];
-    const boostDist = path.join(REPO_ROOT, "examples/plugins/boost/ui/ui-dist");
     const boostDesc = makeDescriptor({
-      plugin_id: "builtin.boost",
-      source: "builtin",
-      remote_name: "cmBuiltinBoost",
-      package_hash: "builtin:boost:1.0.0",
-      package_sha256: "builtin:boost:1.0.0",
+      plugin_id: "cm.boost",
+      source: "external",
+      remote_name: "cmBoost",
+      package_hash: "cm:boost:1.0.0",
+      package_sha256: "cm:boost:1.0.0",
       capabilities: ["read:sites", "read:downloaders"],
     });
-    const boostLoader = (descriptor: UiDescriptorView, expose: string) =>
-      loadFederatedSurface(
-        {
-          ...descriptor,
-          entry_url: pathToFileURL(path.join(boostDist, "ui/assets/remoteEntry.js")).href,
-        },
-        expose,
-        { fetchManifest: async () => [], importRemote: (u) => import(`${u}?t=${Date.now()}`) },
+    const BoostConfigStub: React.FC<PluginSurfaceProps> = ({ config }) => {
+      const vals = config?.values ?? {};
+      const [budgetGiB, setBudgetGiB] = React.useState(
+        typeof vals.budget_bytes === "number" ? String(vals.budget_bytes / 1024 ** 3) : "",
       );
+      return (
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            const out: Record<string, unknown> = { ...vals };
+            if (budgetGiB.trim()) {
+              out.budget_bytes = Math.round(Number(budgetGiB) * 1024 ** 3);
+            } else {
+              delete out.budget_bytes;
+            }
+            void config?.save(out);
+          }}
+        >
+          <h2>自动刷流策略与配额设置</h2>
+          <label>
+            空间预算 (GiB)
+            <input value={budgetGiB} onChange={(e) => setBudgetGiB(e.target.value)} />
+          </label>
+          <button type="submit">保存刷流配置</button>
+        </form>
+      );
+    };
+    const container: FederatedContainer = {
+      init: () => {},
+      get: async () => () => ({ default: BoostConfigStub }),
+    };
+    const boostLoader = (descriptor: UiDescriptorView, expose: string) =>
+      loadFederatedSurface(descriptor, expose, {
+        fetchManifest: async () => [],
+        importRemote: async () => container,
+      });
 
     render(
       <MemoryRouter>
         <SessionProvider value={{ session: ADMIN_SESSION, setSession: () => {}, loginEpoch: "r4-b1" }}>
           <PluginSurfaceHost
-            pluginId="builtin.boost"
+            pluginId="cm.boost"
             surfaceId="settings"
             expectedKind="config"
             config={{

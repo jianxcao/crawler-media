@@ -494,10 +494,10 @@ def register_cases(registry: SuiteRegistry) -> None:
             f"/api/v1/sites/{site['id']}",
             json_body={"maintenance_via": "browser"},
         )
-        grant_site_browser_permission(ctx, "builtin.checkin", site["id"], "browser:maintenance")
+        grant_site_browser_permission(ctx, "builtin.nexusphp-maintenance", site["id"], "browser:maintenance")
         avail = ctx.call_phase1(
             "GET",
-            f"/api/v1/plugins/builtin.checkin/browser-availability?site_id={site['id']}&purpose=maintenance",
+            f"/api/v1/plugins/builtin.nexusphp-maintenance/browser-availability?site_id={site['id']}&purpose=maintenance",
         )
         assert avail.get("status") == "ready", f"Expected ready, got {avail!r}"
         assert avail.get("missing_requirements") == []
@@ -520,11 +520,11 @@ def register_cases(registry: SuiteRegistry) -> None:
             f"/api/v1/sites/{site['id']}",
             json_body={"maintenance_via": "browser"},
         )
-        grant_site_browser_permission(ctx, "builtin.checkin", site["id"], "browser:maintenance")
-        p_chk = ctx.call_phase1("GET", "/api/v1/plugins/builtin.checkin")
+        grant_site_browser_permission(ctx, "builtin.nexusphp-maintenance", site["id"], "browser:maintenance")
+        p_chk = ctx.call_phase1("GET", "/api/v1/plugins/builtin.nexusphp-maintenance")
         op = ctx.call_phase1(
             "POST",
-            "/api/v1/plugins/builtin.checkin/browser-checks",
+            "/api/v1/plugins/builtin.nexusphp-maintenance/browser-checks",
             json_body={"site_id": site["id"], "purpose": "maintenance"},
             if_match=str(p_chk["revision"]),
             idempotency_key=uniq("bchk"),
@@ -552,7 +552,7 @@ def register_cases(registry: SuiteRegistry) -> None:
             f"/api/v1/sites/{site['id']}",
             json_body={"maintenance_via": "browser"},
         )
-        grant_site_browser_permission(ctx, "builtin.checkin", site["id"], "browser:maintenance")
+        grant_site_browser_permission(ctx, "builtin.nexusphp-maintenance", site["id"], "browser:maintenance")
         res = ctx.call_phase1("POST", f"/api/v1/sites/{site['id']}/check-in", json_body={})
         if isinstance(res, dict) and res.get("operation_id"):
             assert poll_operation(ctx, res["operation_id"])["state"] == "succeeded"
@@ -594,20 +594,20 @@ def register_cases(registry: SuiteRegistry) -> None:
             f"/api/v1/sites/{site['id']}",
             json_body={"browser_search": True},
         )
-        grant_site_browser_permission(ctx, "builtin.checkin", site["id"], "browser:maintenance")
+        grant_site_browser_permission(ctx, "builtin.nexusphp-maintenance", site["id"], "browser:maintenance")
         b_settings = ctx.call_phase1("GET", "/api/v1/settings/browser")
         assert int(b_settings.get("browser_sites", 0)) >= 1, f"Expected browser_sites >= 1, got {b_settings!r}"
         assert (b_settings.get("capabilities") or {}).get("search") == "http_only", f"Unexpected caps: {b_settings!r}"
         avail_search = ctx.call_phase1(
             "GET",
-            f"/api/v1/plugins/builtin.checkin/browser-availability?site_id={site['id']}&purpose=search",
+            f"/api/v1/plugins/builtin.nexusphp-maintenance/browser-availability?site_id={site['id']}&purpose=search",
         )
         assert avail_search.get("status") != "ready", f"Search purpose must not report ready: {avail_search!r}"
         assert cdp.url not in str(avail_search) and "ws://" not in str(avail_search)
-        p_chk = ctx.call_phase1("GET", "/api/v1/plugins/builtin.checkin")
+        p_chk = ctx.call_phase1("GET", "/api/v1/plugins/builtin.nexusphp-maintenance")
         b_op = ctx.call_phase1(
             "POST",
-            "/api/v1/plugins/builtin.checkin/browser-checks",
+            "/api/v1/plugins/builtin.nexusphp-maintenance/browser-checks",
             json_body={"site_id": site["id"], "purpose": "maintenance"},
             if_match=str(p_chk["revision"]),
             idempotency_key=uniq("t1f1204"),
@@ -637,7 +637,7 @@ def register_cases(registry: SuiteRegistry) -> None:
         s2 = ensure_site(ctx, pt2.url, profile_id="pterclub")
         for s in (s1, s2):
             ctx.call_phase1("PATCH", f"/api/v1/sites/{s['id']}", json_body={"maintenance_via": "browser"})
-            grant_site_browser_permission(ctx, "builtin.checkin", s["id"], "browser:maintenance")
+            grant_site_browser_permission(ctx, "builtin.nexusphp-maintenance", s["id"], "browser:maintenance")
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
             f1 = pool.submit(ctx.call_phase1, "POST", f"/api/v1/sites/{s1['id']}/check-in", json_body={})
             f2 = pool.submit(ctx.call_phase1, "POST", f"/api/v1/sites/{s2['id']}/check-in", json_body={})
@@ -659,11 +659,11 @@ def register_cases(registry: SuiteRegistry) -> None:
         id="T1-F13-01",
         tier=1,
         feature_id=13,
-        name="builtin.checkin executes check-in once and records completed receipt",
+        name="builtin.nexusphp-maintenance executes check-in once and records completed receipt",
         self_test=False,
     )
     def test_f13_checkin_receipt(ctx: TestContext) -> None:
-        ctx.call_phase1("GET", "/api/v1/plugins/builtin.checkin")
+        ctx.call_phase1("GET", "/api/v1/plugins/builtin.nexusphp-maintenance")
         pt = ctx.new_pt_site(expected_cookie="uid=42; pass=valid")
         site = ensure_site(ctx, pt.url, profile_id="pterclub")
         res = ctx.call_phase1("POST", f"/api/v1/sites/{site['id']}/check-in", json_body={})
@@ -681,7 +681,7 @@ def register_cases(registry: SuiteRegistry) -> None:
         self_test=False,
     )
     def test_f13_window_dedup(ctx: TestContext) -> None:
-        ctx.call_phase1("GET", "/api/v1/plugins/builtin.checkin")
+        ctx.call_phase1("GET", "/api/v1/plugins/builtin.nexusphp-maintenance")
         pt = ctx.new_pt_site(expected_cookie="uid=42; pass=valid")
         site = ensure_site(ctx, pt.url, profile_id="pterclub")
         res1 = ctx.call_phase1("POST", f"/api/v1/sites/{site['id']}/check-in", json_body={})
@@ -702,7 +702,7 @@ def register_cases(registry: SuiteRegistry) -> None:
         self_test=False,
     )
     def test_f13_verify_session(ctx: TestContext) -> None:
-        ctx.call_phase1("GET", "/api/v1/plugins/builtin.checkin")
+        ctx.call_phase1("GET", "/api/v1/plugins/builtin.nexusphp-maintenance")
         pt = ctx.new_pt_site(expected_cookie="uid=42; pass=valid")
         site = ensure_site(ctx, pt.url, profile_id="pterclub")
         res = ctx.call_phase1("POST", f"/api/v1/sites/{site['id']}/verify", json_body={})
@@ -755,7 +755,7 @@ def register_cases(registry: SuiteRegistry) -> None:
         self_test=False,
     )
     def test_f13_already_html(ctx: TestContext) -> None:
-        ctx.call_phase1("GET", "/api/v1/plugins/builtin.checkin")
+        ctx.call_phase1("GET", "/api/v1/plugins/builtin.nexusphp-maintenance")
         pt = ctx.new_pt_site(expected_cookie="uid=42; pass=valid")
         pt.checkin_mode = "already"
         site = ensure_site(ctx, pt.url, profile_id="pterclub")

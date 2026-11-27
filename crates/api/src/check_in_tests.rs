@@ -330,3 +330,44 @@ fn store_policies_enable_benchmark_fake_ip_and_sync_browser_user_agent() {
         crate::user_agent::DEFAULT_USER_AGENT
     );
 }
+
+#[test]
+fn repo_http_policy_enables_benchmark_fake_ip_domains() {
+    use std::net::{IpAddr, Ipv4Addr};
+    use std::sync::Arc;
+
+    let dir = tempfile::tempdir_in("/tmp").unwrap();
+    let store = Arc::new(store::Store::open(dir.path().join("data")).unwrap());
+    let dl = Arc::new(downloader::MemoryDownloader::new(dir.path().join("dl")));
+    let snap = indexer::RegistrySnapshot::builtin().unwrap();
+    let fetcher = Arc::new(crate::http_fetcher::HttpFetcher::new());
+    let api_state =
+        crate::ApiState::new_arc(store, "repo-policy-test".into(), snap, fetcher, dl).unwrap();
+    let repo_policy =
+        crate::plugins::repositories::build_repo_http_policy(&api_state, 2 * 1024 * 1024);
+
+    let domain_target = net_guard::normalize_url(
+        "https://raw.githubusercontent.com/org/repo/main/index.json",
+        false,
+    )
+    .unwrap();
+    let literal_target = net_guard::normalize_url("https://198.18.0.24/index.json", false).unwrap();
+    let fake_sock = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(198, 18, 0, 24)), 443);
+    let lan_sock = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 50, 2)), 443);
+
+    assert!(
+        repo_policy
+            .validate_socket_addr(&domain_target, fake_sock)
+            .is_ok()
+    );
+    assert!(
+        repo_policy
+            .validate_socket_addr(&domain_target, lan_sock)
+            .is_err()
+    );
+    assert!(
+        repo_policy
+            .validate_socket_addr(&literal_target, fake_sock)
+            .is_err()
+    );
+}

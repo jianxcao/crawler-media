@@ -17,22 +17,22 @@ import { createPluginHostSdk } from "../lib/plugins/sdk";
 
 function makeDescriptor(overrides: Partial<UiDescriptorView> = {}): UiDescriptorView {
   return {
-    plugin_id: "builtin.checkin",
+    plugin_id: "cm.checkin",
     plugin_name: "Site Check-in Orchestrator",
     version: "1.0.0",
     generation: 3,
     lifecycle: "enabled",
-    source: "builtin",
+    source: "external",
     package_hash: "pkg-hash-abc",
     package_sha256: "pkg-hash-abc",
     bundle_sha256: "bundle-hash-xyz",
     subject_user_id: "user-admin-1",
     subject_role: "admin",
     ui_mode: "federation-react",
-    remote_name: "cmBuiltinCheckin",
+    remote_name: "cmCheckin",
     entry: "ui/assets/remoteEntry.js",
-    entry_url: "/api/v1/plugin-ui-assets/builtin.checkin/pkg-hash-abc/ui/assets/remoteEntry.js",
-    asset_base_url: "/api/v1/plugin-ui-assets/builtin.checkin/pkg-hash-abc",
+    entry_url: "/api/v1/plugin-ui-assets/cm.checkin/pkg-hash-abc/ui/assets/remoteEntry.js",
+    asset_base_url: "/api/v1/plugin-ui-assets/cm.checkin/pkg-hash-abc",
     contract: "1.0.0",
     react: "19.3.0",
     react_dom: "19.3.0",
@@ -52,7 +52,7 @@ function makeDescriptor(overrides: Partial<UiDescriptorView> = {}): UiDescriptor
         expose: "./Page",
         title: "Site Check-in",
         icon: "calendar-check",
-        location: "/settings/plugins/builtin.checkin?tab=page&view=main",
+        location: "/settings/plugins/cm.checkin?tab=page&view=main",
         mountable: true,
         editable: false,
         required_role: "admin",
@@ -99,10 +99,10 @@ test("fetchPluginUiDescriptor uses cookie credentials only and omits Authorizati
   }) as typeof fetch;
 
   try {
-    const desc = await fetchPluginUiDescriptor("builtin.checkin");
+    const desc = await fetchPluginUiDescriptor("cm.checkin");
     assert.equal(desc.subject_user_id, "user-admin-1");
     assert.equal(captured.length, 1);
-    assert.equal(captured[0].url, "/api/v1/plugins/builtin.checkin/ui");
+    assert.equal(captured[0].url, "/api/v1/plugins/cm.checkin/ui");
     assert.equal(captured[0].credentials, "include");
     assert.equal(captured[0].authHeader, null);
   } finally {
@@ -374,7 +374,7 @@ test("loadFederatedSurface scopes cache by subject_user_id, loads descriptor.sty
     },
   );
   assert.equal(comp1, StubCompA);
-  assert.equal(isRemoteLoaded("cmBuiltinCheckin"), true);
+  assert.equal(isRemoteLoaded("cmCheckin"), true);
   assert.equal(document.head.querySelectorAll("link[data-cm-plugin-ui]").length, 0);
   assert.equal(imports[0].reactEqual, true);
 
@@ -727,7 +727,7 @@ test("endpoint.request supports multi-segment paths, explicit method, raw Endpoi
       query: { site_id: "s1" },
     });
     assert.deepEqual(rawJson, { items: [1, 2] });
-    assert.ok(seen[0].url.endsWith("/plugins/builtin.checkin/endpoints/v1/kv-get?site_id=s1"));
+    assert.ok(seen[0].url.endsWith("/plugins/cm.checkin/endpoints/v1/kv-get?site_id=s1"));
     assert.equal(seen[0].method, "DELETE");
 
     const plain = await handle.sdk.endpoint.request("/boost-snapshot", {});

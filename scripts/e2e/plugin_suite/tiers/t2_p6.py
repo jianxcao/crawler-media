@@ -661,7 +661,7 @@ def register_cases(registry: SuiteRegistry) -> None:
         self_test=False,
     )
     def test_t2_f26_checkin_browser_availability_redacted(ctx: TestContext) -> None:
-        p = _find_first_party_plugin(ctx, ("builtin.checkin", "org.example.checkin"), "checkin")
+        p = _find_first_party_plugin(ctx, ("cm.checkin", "org.example.checkin"), "checkin")
         pt = ctx.new_pt_site()
         cdp = ctx.new_cdp()
         secret_cookie = "uid=99; pass=ultra-secret-cookie-777"
@@ -725,7 +725,7 @@ def register_cases(registry: SuiteRegistry) -> None:
         self_test=False,
     )
     def test_t2_f26_checkin_config_bounds(ctx: TestContext) -> None:
-        p = _find_first_party_plugin(ctx, ("builtin.checkin", "org.example.checkin"), "checkin")
+        p = _find_first_party_plugin(ctx, ("cm.checkin", "org.example.checkin"), "checkin")
         pid = p["id"]
         if p.get("lifecycle") == "enabled":
             disable_plugin(ctx, pid)
@@ -754,7 +754,7 @@ def register_cases(registry: SuiteRegistry) -> None:
         self_test=False,
     )
     def test_t2_f26_boost_retained_bytes_accounting(ctx: TestContext) -> None:
-        p = _find_first_party_plugin(ctx, ("builtin.boost", "org.example.boost"), "boost")
+        p = _find_first_party_plugin(ctx, ("cm.boost", "org.example.boost"), "boost")
         pid = p["id"]
         if p.get("lifecycle") != "enabled":
             enable_plugin(ctx, pid, revision=int(p["revision"]))
@@ -845,7 +845,7 @@ def register_cases(registry: SuiteRegistry) -> None:
         self_test=False,
     )
     def test_t2_f26_cleanup_preview_exclusivity(ctx: TestContext) -> None:
-        p = _find_first_party_plugin(ctx, ("builtin.boost", "org.example.boost"), "boost")
+        p = _find_first_party_plugin(ctx, ("cm.boost", "org.example.boost"), "boost")
         pid = p["id"]
         assert_api_error(
             lambda: ctx.call_phase1("GET", f"/api/v1/plugins/{pid}/brush-cleanup-preview"),
@@ -869,7 +869,7 @@ def register_cases(registry: SuiteRegistry) -> None:
         self_test=False,
     )
     def test_t2_f26_disabled_or_untrusted_blocked(ctx: TestContext) -> None:
-        p = _find_first_party_plugin(ctx, ("builtin.boost", "org.example.boost"), "boost")
+        p = _find_first_party_plugin(ctx, ("cm.boost", "org.example.boost"), "boost")
         pid = p["id"]
         desc = ctx.call_phase1("GET", f"/api/v1/plugins/{pid}/ui")
         granted = grant_ui_trust(ctx, pid, desc["package_hash"])

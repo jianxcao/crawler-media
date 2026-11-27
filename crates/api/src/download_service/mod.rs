@@ -20,8 +20,8 @@ use hooks::Gate;
 use outcome::{build_submit_options, record_gate_defer, record_gate_reject, settle_submit_result};
 use plugin_api::DownloadPlanView;
 use source::{
-    PreparedSubmissionPayload, SubmissionFence, check_submission_fence,
-    fetch_and_prepare_payload_at, snapshot_inputs,
+    PreparedSubmissionPayload, check_submission_fence, fetch_and_prepare_payload_at,
+    snapshot_inputs,
 };
 use store::{
     AcceptDownloadOperationInput, CommitBoostFinalInput, DownloadOperationRecord,
@@ -36,7 +36,7 @@ use crate::plugins::hooks_runtime;
 pub(crate) use helpers::{compute_request_digest, replay_outcome};
 pub(crate) use plugin_command::{execute_plugin_command_step, reconcile_plugin_command_step};
 pub(crate) use reconcile::reconcile_pending_operations;
-pub(crate) use source::is_operation_rolled_back;
+pub(crate) use source::{SubmissionFence, is_operation_rolled_back};
 
 #[derive(Clone)]
 pub struct ApiDownloadService {
@@ -89,13 +89,16 @@ impl ApiDownloadService {
             op.operation_id.to_string(),
             snap.site_provider.as_deref().unwrap_or("indexer"),
         );
-        let (final_view, gate, db_traces) = hooks_runtime::run_download_before(
+        let (final_view, gate, db_traces) = hooks_runtime::run_download_before_excluding(
             &self.state,
             plan.subscribe_id,
             candidate,
             purpose_label(plan.purpose),
             initial_plan_view(&plan, initial_dl_id),
             &snap.allowed_downloaders,
+            self.fence
+                .as_ref()
+                .and_then(|f| f.exclude_hook_plugin.as_deref()),
         );
         let frozen_dl_id =
             DownloaderId::from_str(&final_view.downloader_id).unwrap_or(initial_dl_id);
@@ -335,6 +338,53 @@ fn validate_boost_payload_guards(
     None
 }
 
+struct BoostPolicyParams {
+    plugin_id: String,
+    quota_key: String,
+    budget_bytes: i64,
+    max_add_per_hour: i64,
+}
+
+fn resolve_boost_policy_params(
+    state: &ApiState,
+    plan: &FrozenDownloadPlan,
+    op: &DownloadOpContext,
+    frozen_dl_id: DownloaderId,
+    budget_cap: Option<i64>,
+) -> Option<BoostPolicyParams> {
+    let plugin_id = op.plugin_id.clone().or_else(|| {
+        plan.budget_key
+            .as_deref()
+            .and_then(|k| k.rsplit_once(':').map(|(p, _)| p.to_string()))
+            .filter(|p| !p.trim().is_empty())
+    })?;
+    let quota_key = plan
+        .budget_key
+        .clone()
+        .unwrap_or_else(|| crate::plugins::boost::config::quota_key(&plugin_id, frozen_dl_id));
+    let cfg_val = state
+        .store
+        .get_plugin_config(&plugin_id)
+        .ok()
+        .flatten()
+        .map(|c| c.values)
+        .unwrap_or_else(|| serde_json::json!({}));
+    let cfg =
+        crate::plugins::boost::config::BoostConfig::from_layers(&[&cfg_val]).unwrap_or_default();
+    let budget_bytes = match (cfg.budget_bytes, budget_cap) {
+        (Some(cfg_b), Some(cap_b)) => cfg_b.min(cap_b.max(0)),
+        (Some(cfg_b), None) => cfg_b,
+        (None, Some(cap_b)) => cap_b.max(0),
+        (None, None) => i64::MAX / 2,
+    };
+    Some(BoostPolicyParams {
+        plugin_id,
+        quota_key,
+        budget_bytes,
+        max_add_per_hour: cfg.max_adds_per_hour,
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn prepare_boost_reservation(
     state: &ApiState,
@@ -346,30 +396,26 @@ fn prepare_boost_reservation(
     budget_cap: Option<i64>,
     now: i64,
 ) -> Result<Result<DownloadOperationRecord, DownloadOutcome>, DownloadSubmitError> {
-    let plugin_id = op
-        .plugin_id
-        .clone()
-        .unwrap_or_else(|| crate::plugins::boost::BUILTIN_BOOST_PLUGIN_ID.to_string());
-    let quota_key = plan
-        .budget_key
-        .clone()
-        .unwrap_or_else(|| format!("{plugin_id}:{frozen_dl_id}"));
-    let cfg_val = state
-        .store
-        .get_plugin_config(&plugin_id)
-        .ok()
-        .flatten()
-        .map(|c| c.values)
-        .unwrap_or_else(|| serde_json::json!({}));
-    let cfg = crate::plugins::boost::config::BuiltinBoostConfig::from_layers(&[&cfg_val])
-        .unwrap_or_default();
-    let budget_bytes = match (cfg.budget_bytes, budget_cap) {
-        (Some(cfg_b), Some(cap_b)) => cfg_b.min(cap_b.max(0)),
-        (Some(cfg_b), None) => cfg_b,
-        (None, Some(cap_b)) => cap_b.max(0),
-        (None, None) => i64::MAX / 2,
+    let Some(policy) = resolve_boost_policy_params(state, plan, op, frozen_dl_id, budget_cap)
+    else {
+        return Ok(Err(reject_boost_reservation_op(
+            state,
+            op,
+            current_op,
+            prepared,
+            frozen_dl_id,
+            "missing_boost_plugin",
+            "boost submission requires plugin_id",
+            now,
+        )));
     };
-    let max_add_per_hour = Some(cfg.max_adds_per_hour);
+    let BoostPolicyParams {
+        plugin_id,
+        quota_key,
+        budget_bytes,
+        max_add_per_hour,
+    } = policy;
+    let max_add_per_hour = Some(max_add_per_hour);
     let verified_bytes = prepared.verified_bytes.unwrap_or(0);
     if let Some(rejected) = validate_boost_payload_guards(
         state,
@@ -725,6 +771,7 @@ impl subscribe::SyncDownloadSubmitter for LibraryCancelSubmitter {
                 subscribe_id: Some(self.subscribe_id),
                 expected_subscribe: self.expected_subscribe.clone(),
                 control: self.control.clone(),
+                exclude_hook_plugin: None,
             })
             .submit_sync(plan, op)
     }

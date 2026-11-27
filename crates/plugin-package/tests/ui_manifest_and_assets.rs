@@ -665,6 +665,7 @@ fn ui_13_phase2_commands_rejected_in_ui_capabilities_by_default() {
         "downloader.delete-task",
         "downloader.prepare-cleanup",
         "downloader.delete-files",
+        "boost.run",
         "notify.send",
         "schedule.set",
         "schedule.disable",

@@ -230,10 +230,32 @@ async fn timezone_validation_and_dst_window_bounds_work_offline() {
     assert_eq!(ny_fall.window_end_utc - ny_fall.window_start_utc, 90_000);
 }
 
+async fn install_cm_checkin_task_plugin(env: &HttpEnv) -> String {
+    let pid = "cm.checkin";
+    env.enable_dev_mode().await;
+    let manifest = "manifest_version = 1\nid = \"cm.checkin\"\nname = \"Checkin\"\nversion = \"1.0.0\"\napi = \"1.0.0\"\nlicense = \"MIT\"\nauthors = [\"Test\"]\ndescription = \"Checkin task\"\nconfig_schema = \"schemas/config.schema.json\"\nstate_schema = 1\n[[components]]\nid = \"worker\"\nentry = \"components/worker.wasm\"\nworld = \"crawler:plugin/task-plugin@1.0.0\"\npermissions = [\"kv\"]\n[[components.tasks]]\nid = \"check-in\"\ninput_schema = \"schemas/task.schema.json\"\n[components.tasks.schedule]\nkind = \"interval\"\nseconds = 86400\n";
+    let cfg_schema = plugin_http_support::pkg::sample_schema(false, None);
+    let task_schema = r#"{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","additionalProperties":false,"properties":{"action":{"type":"string"}}}"#;
+    let pkg = plugin_http_support::pkg::build_stored_zip(&[
+        ("plugin.toml", manifest.as_bytes()),
+        ("schemas/config.schema.json", cfg_schema.as_bytes()),
+        ("schemas/task.schema.json", task_schema.as_bytes()),
+        (
+            "components/worker.wasm",
+            plugin_http_support::pkg::task_wasm(),
+        ),
+    ]);
+    let grants = json!([{ "capability": "kv", "scope": "Global", "sensitive": false }]);
+    let inst = env.install_pkg(&pkg, None, grants).await;
+    let rev = inst["revision"].as_i64().unwrap();
+    env.enable_plugin(pid, rev, "en-cm-checkin-task").await;
+    pid.to_string()
+}
+
 #[tokio::test]
 async fn builtin_plugins_bootstrap_idempotently_and_accept_site_maintenance_command() {
     let env = HttpEnv::new().await;
-    let (st, _, body) = env
+    let (st_gone, _, _) = env
         .send(req_json(
             "GET",
             "/api/v1/plugins/builtin.checkin",
@@ -242,10 +264,7 @@ async fn builtin_plugins_bootstrap_idempotently_and_accept_site_maintenance_comm
             None,
         ))
         .await;
-    let checkin = assert_ok(st, &body, StatusCode::OK);
-    assert_eq!(checkin["id"], "builtin.checkin");
-    assert_eq!(checkin["lifecycle"], "enabled");
-    assert_eq!(checkin["source"], "builtin");
+    assert_eq!(st_gone, StatusCode::NOT_FOUND);
 
     let (st, _, body) = env
         .send(req_json(
@@ -261,10 +280,11 @@ async fn builtin_plugins_bootstrap_idempotently_and_accept_site_maintenance_comm
     assert_eq!(maint["lifecycle"], "enabled");
     assert_eq!(maint["source"], "builtin");
 
+    let checkin_id = install_cm_checkin_task_plugin(&env).await;
     let (st, _, body) = env
         .send(req_json(
             "GET",
-            "/api/v1/plugins/builtin.checkin/tasks",
+            &format!("/api/v1/plugins/{checkin_id}/tasks"),
             Some(TOKEN),
             &[],
             None,
@@ -274,7 +294,7 @@ async fn builtin_plugins_bootstrap_idempotently_and_accept_site_maintenance_comm
     let t = items.iter().find(|i| i["id"] == "check-in").unwrap();
     assert_eq!(t["schedule"]["interval_secs"], 86400);
 
-    let rev = checkin["revision"].as_i64().unwrap();
+    let rev = maint["revision"].as_i64().unwrap();
     let etag = format!("\"{rev}\"");
     let srv = StubServer::start(|path, _| {
         if path.contains("attendance.php") {
@@ -293,11 +313,11 @@ async fn builtin_plugins_bootstrap_idempotently_and_accept_site_maintenance_comm
     let (st, _, body) = env
         .send(req_json(
             "POST",
-            "/api/v1/plugins/builtin.checkin/commands",
+            "/api/v1/plugins/builtin.nexusphp-maintenance/commands",
             Some(TOKEN),
             &[
                 ("if-match", &etag),
-                ("idempotency-key", "builtin-checkin-cmd-1"),
+                ("idempotency-key", "builtin-maint-cmd-1"),
             ],
             Some(json!({
                 "kind": "site.maintenance",

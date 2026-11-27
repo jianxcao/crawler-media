@@ -5,6 +5,8 @@
 mod arrivals_runtime;
 #[path = "bounded_work_acceptance.rs"]
 mod bounded_work_acceptance;
+#[path = "brushflow_boost.rs"]
+mod brushflow_boost;
 #[path = "builtin_boost_cycle.rs"]
 mod builtin_boost_cycle;
 #[path = "collections_api_reads.rs"]
@@ -57,6 +59,8 @@ mod plugin_http_lifecycle_upgrade;
 mod plugin_lifecycle_races;
 #[path = "plugin_p1c_recovery.rs"]
 mod plugin_p1c_recovery;
+#[path = "plugin_remote_repository.rs"]
+mod plugin_remote_repository;
 #[path = "plugin_security_remediation.rs"]
 mod plugin_security_remediation;
 #[path = "plugin_slice_d_r2.rs"]

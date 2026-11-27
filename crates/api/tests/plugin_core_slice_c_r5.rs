@@ -150,6 +150,8 @@ fn build_plan_and_ctx(
         imdb_id: None,
         detail_url: None,
         category: None,
+        free_2x: false,
+        free_until: None,
     };
     let plan = FrozenDownloadPlan {
         torrent,
@@ -425,7 +427,7 @@ async fn delete_task_tombstones_piggybacked_idem_keys_and_cleans_boost_facts() {
     let (b_plan, b_ctx) = build_plan_and_ctx(
         (site1, &enc1, "Piggy.Show.S01E01.1080p.WEB-DL"),
         SubmissionPurpose::Boost,
-        Some("builtin.boost"),
+        Some("cm.boost"),
         "pig-boost-1",
     );
     assert!(matches!(
@@ -514,7 +516,7 @@ async fn delete_subscription_tombstones_piggybacked_idem_keys_and_cleans_boost_f
     let (bp2, bc2) = build_plan_and_ctx(
         (site2, &enc2, "Piggy.Show.S01E02.1080p.WEB-DL"),
         SubmissionPurpose::Boost,
-        Some("builtin.boost"),
+        Some("cm.boost"),
         "pig-boost-2",
     );
     svc.submit_sync(bp2, bc2).unwrap();
@@ -629,7 +631,7 @@ async fn remove_task_falls_back_to_stored_pending_hash_when_client_identity_is_n
     let (b_plan, b_ctx) = build_plan_and_ctx(
         (site_id, &enc, "StoredHash.S01E01.1080p.WEB-DL"),
         SubmissionPurpose::Boost,
-        Some("builtin.boost"),
+        Some("cm.boost"),
         "sh-boost-1",
     );
     ApiDownloadService::new(env.state.clone())

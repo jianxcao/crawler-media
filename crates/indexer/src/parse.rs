@@ -1,10 +1,13 @@
 mod api;
+mod promo;
+
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use domain::{Site, Torrent};
 use scraper::{Html, Selector};
 
 use crate::IndexerError;
-use crate::profile::{Field, Framework, Profile, RssConfig};
+use crate::profile::{CategoryMapping, Field, Framework, Profile, RssConfig, normalize_category};
 
 pub(crate) use api::{
     parse_hdarea_download, parse_hdarea_torrents, parse_mteam_download, parse_mteam_items,
@@ -32,7 +35,17 @@ pub(crate) fn rss(
         .rss
         .as_ref()
         .ok_or_else(|| IndexerError::Parse(format!("{} has no rss mapping", profile.id)))?;
-    parse_rss(site, rss, body)
+    parse_rss(site, rss, profile.categories.as_ref(), body)
+}
+
+fn current_unix_secs() -> i64 {
+    i64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs(),
+    )
+    .unwrap_or(0)
 }
 
 pub(crate) fn parse_html(
@@ -81,6 +94,7 @@ pub(crate) fn parse_html(
     }
 
     let item_sel = selector(&profile.list.item)?;
+    let now = current_unix_secs();
     let mut torrents = Vec::new();
     for item in document.select(&item_sel) {
         let Some(title) =
@@ -100,6 +114,13 @@ pub(crate) fn parse_html(
             .and_then(|f| optional_text(item, Some(f)))
             .map(|d| join_url(join_base, &d));
         let enclosure_url = join_url(join_base, &enclosure);
+        let upload_time = optional_text(item, profile.fields.upload_time.as_ref());
+        let free_2x = promo::detect_free_2x(item);
+        let free = present(item, profile.fields.free.as_ref()) || free_2x;
+        let free_until =
+            promo::extract_free_until(item, site, profile, free, upload_time.as_deref(), now);
+        let category = optional_text(item, profile.fields.category.as_ref())
+            .and_then(|raw| normalize_category(&raw, profile.categories.as_ref()));
         torrents.push(Torrent {
             site_id: site.id,
             title,
@@ -108,7 +129,9 @@ pub(crate) fn parse_html(
                 .and_then(|s| parse_size(&s)),
             seeders: optional_text(item, profile.fields.seeders.as_ref())
                 .and_then(|s| s.parse().ok()),
-            free: present(item, profile.fields.free.as_ref()),
+            free,
+            free_2x,
+            free_until,
             hr: hr_present(item, profile.fields.hr.as_ref()),
             imdb_id: None,
             id: extract_id(&enclosure_url).or_else(|| detail_url.as_deref().and_then(extract_id)),
@@ -116,16 +139,21 @@ pub(crate) fn parse_html(
                 .and_then(|s| s.parse().ok()),
             snatched: optional_text(item, profile.fields.snatched.as_ref())
                 .and_then(|s| s.parse().ok()),
-            upload_time: optional_text(item, profile.fields.upload_time.as_ref()),
+            upload_time,
             detail_url,
-            category: optional_text(item, profile.fields.category.as_ref()),
+            category,
             poster_url: None,
         });
     }
     Ok(torrents)
 }
 
-fn parse_rss(site: &Site, rss: &RssConfig, body: &str) -> Result<Vec<Torrent>, IndexerError> {
+fn parse_rss(
+    site: &Site,
+    rss: &RssConfig,
+    categories: Option<&CategoryMapping>,
+    body: &str,
+) -> Result<Vec<Torrent>, IndexerError> {
     let document =
         roxmltree::Document::parse(body).map_err(|err| IndexerError::Parse(err.to_string()))?;
     let mut torrents = Vec::new();
@@ -145,6 +173,16 @@ fn parse_rss(site: &Site, rss: &RssConfig, body: &str) -> Result<Vec<Torrent>, I
             .and_then(|raw| extract_id(&raw).or(Some(raw)))
             .or_else(|| extract_id(&enclosure_url));
         let detail_url = id.as_deref().map(|raw| join_url(&site.url, raw));
+        let free_raw = rss.free.as_ref().and_then(|f| xml_field(item, f));
+        let free_2x = free_raw
+            .as_deref()
+            .is_some_and(|s| s.to_ascii_lowercase().contains("2x"));
+        let free = free_raw.as_deref().is_some_and(truthy) || free_2x;
+        let category = rss
+            .category
+            .as_ref()
+            .and_then(|f| xml_field(item, f))
+            .and_then(|raw| normalize_category(&raw, categories));
         torrents.push(Torrent {
             site_id: site.id,
             title,
@@ -159,11 +197,9 @@ fn parse_rss(site: &Site, rss: &RssConfig, body: &str) -> Result<Vec<Torrent>, I
                 .as_ref()
                 .and_then(|f| xml_field(item, f))
                 .and_then(|s| s.parse().ok()),
-            free: rss
-                .free
-                .as_ref()
-                .and_then(|f| xml_field(item, f))
-                .is_some_and(|s| truthy(&s)),
+            free,
+            free_2x,
+            free_until: None,
             hr: rss
                 .hr
                 .as_ref()
@@ -183,7 +219,7 @@ fn parse_rss(site: &Site, rss: &RssConfig, body: &str) -> Result<Vec<Torrent>, I
                 .and_then(|s| s.parse().ok()),
             upload_time: rss.upload_time.as_ref().and_then(|f| xml_field(item, f)),
             detail_url,
-            category: rss.category.as_ref().and_then(|f| xml_field(item, f)),
+            category,
             poster_url: None,
         });
     }

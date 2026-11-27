@@ -288,6 +288,8 @@ fn build_plan_and_ctx(
         imdb_id: None,
         detail_url: None,
         category: None,
+        free_2x: false,
+        free_until: None,
     };
     let plan = FrozenDownloadPlan {
         torrent,
@@ -545,6 +547,8 @@ impl IndexerProvider for CategoryCaptureProvider {
                     imdb_id: None,
                     detail_url: None,
                     category: None,
+                    free_2x: false,
+                    free_until: None,
                 })
                 .collect());
         }
@@ -565,6 +569,8 @@ impl IndexerProvider for CategoryCaptureProvider {
                 imdb_id: None,
                 detail_url: None,
                 category: None,
+                free_2x: false,
+                free_until: None,
             }]);
         }
         Ok(vec![])
@@ -680,7 +686,7 @@ async fn boost_task_fact_records_final_view_paused_patched_by_download_before() 
             "BoostPause.One.2026.1080p",
         ),
         SubmissionPurpose::Boost,
-        Some("builtin.boost"),
+        Some("cm.boost"),
         "bp-r6-1",
     );
     p1.paused = false;
@@ -706,7 +712,7 @@ async fn boost_task_fact_records_final_view_paused_patched_by_download_before() 
             "BoostPause.Two.2026.1080p",
         ),
         SubmissionPurpose::Boost,
-        Some("builtin.boost"),
+        Some("cm.boost"),
         "bp-r6-2",
     );
     p2.paused = true;

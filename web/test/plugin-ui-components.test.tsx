@@ -465,12 +465,12 @@ test("PluginTasksTab toggles task enable/run and PluginAppPage renders shell act
   try {
     render(
       <PluginTasksTab
-        pluginId="builtin.checkin"
+        pluginId="cm.checkin"
         tasks={[
           {
             id: "check-in",
             binding_id: "b1",
-            plugin_id: "builtin.checkin",
+            plugin_id: "cm.checkin",
             definition_revision: 1,
             enabled: false,
             schedule: { interval_secs: 86400 },
@@ -599,8 +599,8 @@ test("PluginSchemaForm renders declarative JSON schema + secret keep/replace/cle
 
     const member: SessionView = { ...ADMIN_SESSION, id: "user-member-1", role: "member" };
     assert.equal(accessiblePathFor(member, "/settings/plugins"), "/library");
-    assert.equal(accessiblePathFor(member, "/plugin-apps/builtin.checkin/app"), "/library");
-    assert.equal(accessiblePathFor(ADMIN_SESSION, "/plugin-apps/builtin.checkin/app"), "/plugin-apps/builtin.checkin/app");
+    assert.equal(accessiblePathFor(member, "/plugin-apps/cm.checkin/app"), "/library");
+    assert.equal(accessiblePathFor(ADMIN_SESSION, "/plugin-apps/cm.checkin/app"), "/plugin-apps/cm.checkin/app");
   } finally {
     cleanup();
   }

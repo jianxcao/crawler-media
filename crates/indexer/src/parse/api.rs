@@ -2,7 +2,7 @@ use domain::{Site, Torrent};
 use serde::Deserialize;
 
 use crate::IndexerError;
-use crate::profile::Profile;
+use crate::profile::{CategoryMapping, Profile, normalize_category};
 
 use super::{join_url, parse_size};
 
@@ -88,16 +88,28 @@ fn check_mteam_envelope(
 }
 
 impl MTeamItem {
-    pub(crate) fn into_torrent(self, site_id: domain::SiteId, enclosure: String) -> Torrent {
+    pub(crate) fn into_torrent(
+        self,
+        site_id: domain::SiteId,
+        enclosure: String,
+        categories: Option<&CategoryMapping>,
+    ) -> Torrent {
         let status = self.status.unwrap_or_default();
-        let free = status
+        let discount_upper = status
             .discount
             .as_deref()
-            .is_some_and(|d| d.eq_ignore_ascii_case("free"));
+            .map(str::to_ascii_uppercase)
+            .unwrap_or_default();
+        let free_2x = discount_upper == "_2X_FREE" || discount_upper == "2XFREE";
+        let free = free_2x || discount_upper == "FREE";
         let id = self.id.clone();
         let detail_url = id
             .as_deref()
             .map(|raw| format!("https://www.m-team.cc/torrent/{}", raw));
+        let category = self
+            .category
+            .as_deref()
+            .and_then(|raw| normalize_category(raw, categories));
         Torrent {
             site_id,
             title: combine_title_and_subtitle(self.name, self.small_descr),
@@ -105,6 +117,8 @@ impl MTeamItem {
             size_bytes: self.size.as_deref().and_then(parse_size),
             seeders: status.seeders.as_deref().and_then(|s| s.parse().ok()),
             free,
+            free_2x,
+            free_until: None,
             hr: status.hr,
             imdb_id: None,
             id,
@@ -112,7 +126,7 @@ impl MTeamItem {
             snatched: status.snatched.as_deref().and_then(|s| s.parse().ok()),
             upload_time: self.upload_time,
             detail_url,
-            category: None,
+            category,
             poster_url: self.image_list.into_iter().next(),
         }
     }
@@ -140,7 +154,7 @@ pub(crate) fn parse_hdarea_torrents(
     };
     Ok(items
         .into_iter()
-        .map(|item| item.into_torrent(site.id, &base))
+        .map(|item| item.into_torrent(site.id, &base, profile))
         .collect())
 }
 
@@ -310,6 +324,8 @@ pub(crate) struct MTeamItem {
     size: Option<String>,
     #[serde(default, alias = "createdDate", deserialize_with = "de_opt_string")]
     upload_time: Option<String>,
+    #[serde(default, deserialize_with = "de_opt_string")]
+    category: Option<String>,
     #[serde(default, rename = "imageList", deserialize_with = "de_image_list")]
     image_list: Vec<String>,
     #[serde(default)]
@@ -453,8 +469,10 @@ struct HdareaItem {
 }
 
 impl HdareaItem {
-    fn into_torrent(self, site_id: domain::SiteId, base: &str) -> Torrent {
-        let free = self.is_free == Some(true)
+    fn into_torrent(self, site_id: domain::SiteId, base: &str, profile: &Profile) -> Torrent {
+        let free_2x = self.sp_state == Some(4);
+        let free = free_2x
+            || self.is_free == Some(true)
             || self.download_volume_factor.is_some_and(|v| v == 0.0)
             || matches!(self.sp_state, Some(2 | 4));
         let id = self.id.filter(|s| !s.trim().is_empty());
@@ -478,6 +496,15 @@ impl HdareaItem {
                 id.as_deref()
                     .map(|raw| format!("{base}/details.php?id={raw}"))
             });
+        let category = self
+            .category_id
+            .as_deref()
+            .and_then(|cid| normalize_category(cid, profile.categories.as_ref()))
+            .or_else(|| {
+                self.category_name
+                    .as_deref()
+                    .and_then(|cname| normalize_category(cname, profile.categories.as_ref()))
+            });
         Torrent {
             site_id,
             title: combine_title_and_subtitle(self.name, self.small_descr),
@@ -485,6 +512,8 @@ impl HdareaItem {
             size_bytes: self.size.as_deref().and_then(parse_size),
             seeders: self.seeders,
             free,
+            free_2x,
+            free_until: None,
             hr: self.hr,
             imdb_id: self.imdb_id.filter(|s| !s.trim().is_empty()),
             id,
@@ -492,10 +521,7 @@ impl HdareaItem {
             snatched: self.times_completed,
             upload_time: self.added.filter(|s| !s.trim().is_empty()),
             detail_url,
-            category: self
-                .category_name
-                .filter(|s| !s.trim().is_empty())
-                .or_else(|| self.category_id.filter(|s| !s.trim().is_empty())),
+            category,
             poster_url: self.poster_url.filter(|s| !s.trim().is_empty()),
         }
     }

@@ -248,6 +248,8 @@ pub fn test_torrent(site_id: SiteId, id: Option<&str>, title: &str, enclosure: &
         imdb_id: None,
         detail_url: None,
         category: None,
+        free_2x: false,
+        free_until: None,
     }
 }
 

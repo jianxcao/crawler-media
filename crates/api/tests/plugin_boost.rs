@@ -1,7 +1,9 @@
-#[path = "plugin_http_support/mod.rs"]
-mod plugin_http_support;
+#[path = "builtin_boost/support.rs"]
+mod boost_support;
 #[path = "support/writer_hold.rs"]
 mod writer_hold;
+
+use boost_support::plugin_http_support;
 
 use std::io::Write;
 use std::sync::Arc;
@@ -110,7 +112,7 @@ async fn verify_boost_config_and_reenable(env: &HttpEnv, site_id: domain::SiteId
     let (st_dis, _, b_dis) = env
         .send(req_json(
             "POST",
-            "/api/v1/plugins/builtin.boost/disable",
+            "/api/v1/plugins/cm.boost/disable",
             Some(TOKEN),
             &[
                 ("If-Match", &format!("\"{rev}\"")),
@@ -125,7 +127,7 @@ async fn verify_boost_config_and_reenable(env: &HttpEnv, site_id: domain::SiteId
     let (st_cfg_get, _, b_cfg_get) = env
         .send(req_json(
             "GET",
-            "/api/v1/plugins/builtin.boost/config",
+            "/api/v1/plugins/cm.boost/config",
             Some(TOKEN),
             &[],
             None,
@@ -137,7 +139,7 @@ async fn verify_boost_config_and_reenable(env: &HttpEnv, site_id: domain::SiteId
     let (_, _, b_p2) = env
         .send(req_json(
             "GET",
-            "/api/v1/plugins/builtin.boost",
+            "/api/v1/plugins/cm.boost",
             Some(TOKEN),
             &[],
             None,
@@ -150,7 +152,7 @@ async fn verify_boost_config_and_reenable(env: &HttpEnv, site_id: domain::SiteId
     let (st_put, _, b_put) = env
         .send(req_json(
             "PUT",
-            "/api/v1/plugins/builtin.boost/config",
+            "/api/v1/plugins/cm.boost/config",
             Some(TOKEN),
             &[
                 ("If-Match", &format!("\"{rev2}\"")),
@@ -172,7 +174,7 @@ async fn verify_boost_config_and_reenable(env: &HttpEnv, site_id: domain::SiteId
     let (st_p3, _, b_p3) = env
         .send(req_json(
             "GET",
-            "/api/v1/plugins/builtin.boost",
+            "/api/v1/plugins/cm.boost",
             Some(TOKEN),
             &[],
             None,
@@ -185,7 +187,7 @@ async fn verify_boost_config_and_reenable(env: &HttpEnv, site_id: domain::SiteId
     let (st_en, _, b_en) = env
         .send(req_json(
             "POST",
-            "/api/v1/plugins/builtin.boost/enable",
+            "/api/v1/plugins/cm.boost/enable",
             Some(TOKEN),
             &[
                 ("If-Match", &format!("\"{rev3}\"")),
@@ -202,6 +204,7 @@ async fn verify_boost_config_and_reenable(env: &HttpEnv, site_id: domain::SiteId
 #[tokio::test]
 async fn legacy_boost_routes_return_404_and_builtin_boost_lifecycle_roundtrip() {
     let env = HttpEnv::new().await;
+    boost_support::install_cm_boost_plugin(env.state.store().as_ref());
     let site_id = env.insert_site("PT-Legacy");
 
     let (st_stats, _, _) = env
@@ -232,7 +235,7 @@ async fn legacy_boost_routes_return_404_and_builtin_boost_lifecycle_roundtrip() 
     let (st_get, _, b_get) = env
         .send(req_json(
             "GET",
-            "/api/v1/plugins/builtin.boost",
+            "/api/v1/plugins/cm.boost",
             Some(TOKEN),
             &[],
             None,
@@ -247,6 +250,7 @@ async fn legacy_boost_routes_return_404_and_builtin_boost_lifecycle_roundtrip() 
 #[tokio::test]
 async fn brush_state_and_cleanup_preview_contracts_and_lock_hygiene() {
     let env = HttpEnv::new().await;
+    boost_support::install_cm_boost_plugin(env.state.store().as_ref());
     let dl_id = DownloaderId::new();
     env.state
         .store()
@@ -269,7 +273,7 @@ async fn brush_state_and_cleanup_preview_contracts_and_lock_hygiene() {
     let (st_unauth, _, _) = env
         .send(req_json(
             "GET",
-            "/api/v1/plugins/builtin.boost/brush-state",
+            "/api/v1/plugins/cm.boost/brush-state",
             None,
             &[],
             None,
@@ -280,7 +284,7 @@ async fn brush_state_and_cleanup_preview_contracts_and_lock_hygiene() {
     let (st_mem, _, _) = env
         .send(req_json(
             "GET",
-            "/api/v1/plugins/builtin.boost/brush-state",
+            "/api/v1/plugins/cm.boost/brush-state",
             Some(&env.member_token),
             &[],
             None,
@@ -290,9 +294,9 @@ async fn brush_state_and_cleanup_preview_contracts_and_lock_hygiene() {
 
     // 400 on invalid query params for brush-cleanup-preview
     for bad_uri in [
-        "/api/v1/plugins/builtin.boost/brush-cleanup-preview",
-        "/api/v1/plugins/builtin.boost/brush-cleanup-preview?task_ids=t1&plan_handle=p1",
-        "/api/v1/plugins/builtin.boost/brush-cleanup-preview?unknown=1",
+        "/api/v1/plugins/cm.boost/brush-cleanup-preview",
+        "/api/v1/plugins/cm.boost/brush-cleanup-preview?task_ids=t1&plan_handle=p1",
+        "/api/v1/plugins/cm.boost/brush-cleanup-preview?unknown=1",
     ] {
         let (st, _, body) = env
             .send(req_json("GET", bad_uri, Some(TOKEN), &[], None))
@@ -314,7 +318,7 @@ async fn brush_state_and_cleanup_preview_contracts_and_lock_hygiene() {
     let (st_ok, _, b_ok) = env
         .send(req_json(
             "GET",
-            "/api/v1/plugins/builtin.boost/brush-state",
+            "/api/v1/plugins/cm.boost/brush-state",
             Some(TOKEN),
             &[],
             None,
@@ -350,7 +354,7 @@ async fn run_delete_task_phase(
         .env
         .send(req_json(
             "POST",
-            "/api/v1/plugins/builtin.boost/commands",
+            "/api/v1/plugins/cm.boost/commands",
             Some(TOKEN),
             &[
                 ("If-Match", &format!("\"{}\"", ctx.rev)),
@@ -375,7 +379,7 @@ async fn run_delete_task_phase(
         .env
         .send(req_json(
             "POST",
-            "/api/v1/plugins/builtin.boost/commands",
+            "/api/v1/plugins/cm.boost/commands",
             Some(TOKEN),
             &[
                 ("If-Match", &format!("\"{}\"", ctx.rev)),
@@ -401,7 +405,7 @@ async fn run_delete_task_phase(
         .send(req_json(
             "GET",
             &format!(
-                "/api/v1/plugins/builtin.boost/brush-state?site_id={}&downloader_id={}",
+                "/api/v1/plugins/cm.boost/brush-state?site_id={}&downloader_id={}",
                 ctx.site_id, ctx.dl_id
             ),
             Some(TOKEN),
@@ -418,7 +422,7 @@ async fn run_cleanup_plan_and_delete_phase(ctx: &BoostCtx<'_>, tid: &str) {
         .env
         .send(req_json(
             "GET",
-            &format!("/api/v1/plugins/builtin.boost/brush-cleanup-preview?task_ids={tid}"),
+            &format!("/api/v1/plugins/cm.boost/brush-cleanup-preview?task_ids={tid}"),
             Some(TOKEN),
             &[],
             None,
@@ -432,7 +436,7 @@ async fn run_cleanup_plan_and_delete_phase(ctx: &BoostCtx<'_>, tid: &str) {
         .env
         .send(req_json(
             "POST",
-            "/api/v1/plugins/builtin.boost/commands",
+            "/api/v1/plugins/cm.boost/commands",
             Some(TOKEN),
             &[
                 ("If-Match", &format!("\"{}\"", ctx.rev)),
@@ -460,9 +464,7 @@ async fn run_cleanup_plan_and_delete_phase(ctx: &BoostCtx<'_>, tid: &str) {
         .env
         .send(req_json(
             "GET",
-            &format!(
-                "/api/v1/plugins/builtin.boost/brush-cleanup-preview?plan_handle={plan_handle}"
-            ),
+            &format!("/api/v1/plugins/cm.boost/brush-cleanup-preview?plan_handle={plan_handle}"),
             Some(TOKEN),
             &[],
             None,
@@ -480,7 +482,7 @@ async fn run_delete_files_phase(ctx: &BoostCtx<'_>, plan_handle: &str, plan_rev:
         .env
         .send(req_json(
             "POST",
-            "/api/v1/plugins/builtin.boost/commands",
+            "/api/v1/plugins/cm.boost/commands",
             Some(TOKEN),
             &[
                 ("If-Match", &format!("\"{}\"", ctx.rev)),
@@ -506,7 +508,7 @@ async fn run_delete_files_phase(ctx: &BoostCtx<'_>, plan_handle: &str, plan_rev:
         .env
         .send(req_json(
             "POST",
-            "/api/v1/plugins/builtin.boost/commands",
+            "/api/v1/plugins/cm.boost/commands",
             Some(TOKEN),
             &[
                 ("If-Match", &format!("\"{}\"", ctx.rev)),
@@ -533,7 +535,7 @@ async fn run_delete_files_phase(ctx: &BoostCtx<'_>, plan_handle: &str, plan_rev:
         .send(req_json(
             "GET",
             &format!(
-                "/api/v1/plugins/builtin.boost/brush-state?site_id={}&downloader_id={}",
+                "/api/v1/plugins/cm.boost/brush-state?site_id={}&downloader_id={}",
                 ctx.site_id, ctx.dl_id
             ),
             Some(TOKEN),
@@ -555,7 +557,7 @@ async fn run_add_command_phase(
     let (st_add, _, b_add) = env
         .send(req_json(
             "POST",
-            "/api/v1/plugins/builtin.boost/commands",
+            "/api/v1/plugins/cm.boost/commands",
             Some(TOKEN),
             &[
                 ("If-Match", &format!("\"{rev}\"")),
@@ -579,7 +581,7 @@ async fn run_add_command_phase(
         .send(req_json(
             "GET",
             &format!(
-                "/api/v1/plugins/builtin.boost/brush-state?site_id={site_id}&downloader_id={dl_id}"
+                "/api/v1/plugins/cm.boost/brush-state?site_id={site_id}&downloader_id={dl_id}"
             ),
             Some(TOKEN),
             &[],
@@ -615,6 +617,7 @@ async fn boost_downloader_commands_cleanup_and_protections_end_to_end() {
         state,
         member_token: String::new(),
     };
+    boost_support::install_cm_boost_plugin(env.state.store().as_ref());
     let site_id = env.insert_site("PT-Boost");
     let dl_id = DownloaderId::new();
     env.state
@@ -637,7 +640,7 @@ async fn boost_downloader_commands_cleanup_and_protections_end_to_end() {
     let (st_p, _, b_p) = env
         .send(req_json(
             "GET",
-            "/api/v1/plugins/builtin.boost",
+            "/api/v1/plugins/cm.boost",
             Some(TOKEN),
             &[],
             None,

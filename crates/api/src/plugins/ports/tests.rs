@@ -3,10 +3,7 @@ use std::time::Duration;
 
 use plugin_api::{BrowserPurpose, ErrorCode, GuestRole, HttpRequest, LogLevel};
 use plugin_host::{HostPorts, Invocation};
-use store::plugins::{
-    CanonicalPluginRequest, PluginCommandCause, PluginConfig, PluginGrant, PluginGrantScope,
-    PluginSubject,
-};
+use store::plugins::{PluginCommandCause, PluginConfig, PluginSubject};
 
 use super::{ActiveAuth, ActiveInvocation, HostDeps, StoreHostPorts};
 use crate::plugins::PluginInvocationRole;
@@ -102,7 +99,7 @@ fn store_host_ports_lifecycle_mode_allows_base_and_blocks_state_or_commands() {
     );
 }
 
-struct NoopFetcher;
+pub(super) struct NoopFetcher;
 impl indexer::Fetcher for NoopFetcher {
     fn fetch(&self, _: &indexer::FetchRequest) -> Result<String, indexer::IndexerError> {
         Err(indexer::IndexerError::Fetch("noop".into()))
@@ -237,7 +234,7 @@ fn begin_invocation_propagates_and_enforces_real_plugin_invocation_role() {
     }
 }
 
-fn setup_enabled_plugin(
+pub(super) fn setup_enabled_plugin(
     state: &crate::ApiState,
     plugin_id: &str,
     grants: Vec<store::plugins::PluginGrant>,
@@ -319,18 +316,26 @@ fn read_boost_snapshot_and_downloader_commands_validate_live_targets() {
     let enabled = setup_enabled_plugin(&state, "boost.test.plugin", boost_and_dl_grants());
     let ports = state.plugins().ports();
 
-    let mut filter_inv = Invocation::new(enabled.plugin_id.clone(), Duration::from_secs(5));
-    filter_inv.generation = u64::try_from(enabled.generation).unwrap();
-    filter_inv.role = GuestRole::Filter;
-    let _fg = ports.begin_invocation(&filter_inv).unwrap();
+    let mut notify_inv = Invocation::new(enabled.plugin_id.clone(), Duration::from_secs(5));
+    notify_inv.generation = u64::try_from(enabled.generation).unwrap();
+    notify_inv.role = GuestRole::Notify;
+    let _ng = ports.begin_invocation(&notify_inv).unwrap();
     assert_eq!(
         ports
-            .boost_snapshot(&filter_inv, &[], &[])
+            .boost_snapshot(&notify_inv, &[], &[])
             .unwrap_err()
             .code,
         ErrorCode::WrongContext
     );
-    drop(_fg);
+    drop(_ng);
+
+    for hook_role in [GuestRole::Gate, GuestRole::Filter] {
+        let mut hook_inv = Invocation::new(enabled.plugin_id.clone(), Duration::from_secs(5));
+        hook_inv.generation = u64::try_from(enabled.generation).unwrap();
+        hook_inv.role = hook_role;
+        let _hg = ports.begin_invocation(&hook_inv).unwrap();
+        assert!(ports.boost_snapshot(&hook_inv, &[], &[]).is_ok());
+    }
 
     let mut task_inv = Invocation::new(enabled.plugin_id.clone(), Duration::from_secs(5));
     task_inv.generation = u64::try_from(enabled.generation).unwrap();
@@ -534,7 +539,7 @@ fn commands_submit_enforces_downloader_add_permission_before_resolution_and_obje
     }
 }
 
-fn seed_boost_fact(
+pub(super) fn seed_boost_fact(
     store: &crate::Store,
     plugin_id: &str,
     dl_id: domain::DownloaderId,
@@ -606,189 +611,6 @@ fn seed_boost_fact(
             now_utc: now,
         })
         .unwrap();
-}
-
-#[test]
-fn read_boost_grant_enforces_object_and_site_scope_filtering() {
-    let dir = tempfile::tempdir().unwrap();
-    let store = Arc::new(crate::Store::open(dir.path().join("data")).unwrap());
-    let dl = Arc::new(downloader::MemoryDownloader::new(dir.path().join("dl")));
-    let state = crate::ApiState::new_arc(
-        store,
-        "test-tok".into(),
-        indexer::RegistrySnapshot::builtin().unwrap(),
-        Arc::new(NoopFetcher),
-        dl,
-    )
-    .unwrap();
-
-    let s_allowed = domain::SiteId::new();
-    let s_denied = domain::SiteId::new();
-    let dl_allowed = domain::DownloaderId::new();
-
-    state
-        .store()
-        .insert_downloader(&store::DownloaderRow {
-            id: dl_allowed,
-            name: "dl-allowed".into(),
-            kind: "qbittorrent".into(),
-            url: "http://127.0.0.1:9".into(),
-            username: None,
-            password: None,
-            api_key: None,
-            category: None,
-            path_maps: vec![],
-            is_default: true,
-            enabled: true,
-        })
-        .unwrap();
-
-    let dl_scoped = setup_enabled_plugin(
-        &state,
-        "boost.dl.scoped",
-        vec![PluginGrant {
-            capability: "read:boost".into(),
-            scope: PluginGrantScope::Object {
-                kind: "site".into(),
-                id: s_allowed.to_string(),
-            },
-            sensitive: false,
-        }],
-    );
-
-    let now = 1_700_000_000i64;
-    seed_boost_fact(
-        state.store().as_ref(),
-        &dl_scoped.plugin_id,
-        dl_allowed,
-        s_allowed,
-        "1111111111111111111111111111111111111111",
-        "tag-allow",
-        now,
-    );
-    seed_boost_fact(
-        state.store().as_ref(),
-        &dl_scoped.plugin_id,
-        dl_allowed,
-        s_denied,
-        "2222222222222222222222222222222222222222",
-        "tag-deny",
-        now,
-    );
-
-    let ports = state.plugins().ports();
-    let mut inv = Invocation::new(dl_scoped.plugin_id.clone(), Duration::from_secs(5));
-    inv.generation = u64::try_from(dl_scoped.generation).unwrap();
-    inv.role = GuestRole::Task;
-    let _g = ports.begin_invocation(&inv).unwrap();
-    assert!(ports.authorized(&inv, "read:boost"));
-    let snap = ports.boost_snapshot(&inv, &[], &[]).unwrap();
-    assert_eq!(snap.tasks.len(), 1);
-    assert_eq!(snap.tasks[0].handle, "tf-tag-allow");
-
-    // Passing site_denied explicitly returns PermissionDenied on read:boost Object{kind:site}.
-    let err = ports
-        .boost_snapshot(&inv, &[s_denied.to_string()], &[])
-        .unwrap_err();
-    assert_eq!(err.code, ErrorCode::PermissionDenied);
-}
-
-#[test]
-fn downloader_commands_enforce_permission_before_supports_kind_on_rust_and_service_paths() {
-    let dir = tempfile::tempdir().unwrap();
-    let store = Arc::new(crate::Store::open(dir.path().join("data")).unwrap());
-    let dl = Arc::new(downloader::MemoryDownloader::new(dir.path().join("dl")));
-    let state = crate::ApiState::new_arc(
-        store,
-        "test-tok".into(),
-        indexer::RegistrySnapshot::builtin().unwrap(),
-        Arc::new(NoopFetcher),
-        dl,
-    )
-    .unwrap();
-    let no_dl_perm = setup_enabled_plugin(
-        &state,
-        "no.dl.perms",
-        vec![PluginGrant {
-            capability: "read:boost".into(),
-            scope: PluginGrantScope::Global,
-            sensitive: false,
-        }],
-    );
-    let ports = state.plugins().ports();
-    let mut inv = Invocation::new(no_dl_perm.plugin_id.clone(), Duration::from_secs(5));
-    inv.generation = u64::try_from(no_dl_perm.generation).unwrap();
-    inv.role = GuestRole::Task;
-    let _g = ports.begin_invocation(&inv).unwrap();
-
-    for (idx, action) in [
-        plugin_api::CommandAction::DownloaderControl {
-            target: plugin_api::OwnedRevision {
-                handle: "not-even-resolved".into(),
-                revision: 1,
-            },
-            control: plugin_api::TaskControl::Pause,
-        },
-        plugin_api::CommandAction::DownloaderDeleteTask {
-            downloader_id: "invalid-uuid".into(),
-            revision: 1,
-            task_handle: "t-1".into(),
-        },
-        plugin_api::CommandAction::DownloaderPrepareCleanup {
-            targets: vec![],
-            reason: "quota".into(),
-        },
-        plugin_api::CommandAction::DownloaderDeleteFiles {
-            target: plugin_api::OwnedRevision {
-                handle: "t-1".into(),
-                revision: 1,
-            },
-            plan_handle: "missing".into(),
-        },
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        let err = ports
-            .commands_submit(
-                &inv,
-                plugin_api::CommandRequest {
-                    action,
-                    idempotency_key: format!("deny-first-{idx}"),
-                    expected_revision: None,
-                },
-            )
-            .unwrap_err();
-        assert_eq!(err.code, ErrorCode::PermissionDenied);
-    }
-
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    let err_admin = rt
-        .block_on(state.plugins().submit_admin_command(
-            &state,
-            &no_dl_perm.plugin_id,
-            crate::plugins::SubmitAdminCommandInput {
-                actor_user_id: domain::UserId::new(),
-                kind: "downloader.delete-files".into(),
-                targets: vec![store::plugins::PluginCommandTarget::Global],
-                payload: serde_json::json!({ "task_id": "t-1", "plan_handle": "p-1" }),
-                evidence_ref: None,
-                idempotency_key: "admin-deny-first".into(),
-                expected_revision: no_dl_perm.revision,
-                request: CanonicalPluginRequest {
-                    method: "POST".into(),
-                    path: format!("/api/v1/plugins/{}/commands", no_dl_perm.plugin_id),
-                    body_digest: [1u8; 32],
-                },
-            },
-        ))
-        .unwrap_err();
-    assert!(matches!(
-        err_admin,
-        crate::plugins::PluginServiceError::Store(store::StoreError::Plugin(
-            store::plugins::PluginError::Denied
-        ))
-    ));
 }
 
 #[path = "tests_boost.rs"]

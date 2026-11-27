@@ -377,19 +377,16 @@ fn build_boost_gate_input() -> GateInput {
 #[tokio::test]
 async fn builtin_boost_gate_and_maintenance_provider_enforce_live_plugin_authority() {
     let env = HttpEnv::new().await;
-    support::save_boost_config(
-        &env.state,
-        json!({ "enforce_budget_on_all": true, "budget_bytes": 0 }),
-    );
+    support::plugin_http_support::plugins_fixture::install_cm_boost(&env, false, true, false).await;
 
-    let boost_pid = "builtin.boost";
+    let boost_pid = "cm.boost";
+    let mut gate_in = build_boost_gate_input();
+    gate_in.handles = vec!["reject-me".into()];
     let pipe = api::build_hook_pipeline_for_test(&env.state, "download.before");
-    let (before_drain, _) = pipe
-        .gate_typed_with_trace("wf-r11-pre", &build_boost_gate_input())
-        .unwrap();
+    let (before_drain, _) = pipe.gate_typed_with_trace("wf-r11-pre", &gate_in).unwrap();
     assert!(
         matches!(before_drain, Gate::Reject(_)),
-        "sanity check: enabled boost gate with 1-byte budget rejects 1MB candidate"
+        "sanity check: enabled boost gate rejects reject-me candidate"
     );
 
     let boost_en = env.state.store().get_plugin(boost_pid).unwrap().unwrap();
@@ -397,12 +394,10 @@ async fn builtin_boost_gate_and_maintenance_provider_enforce_live_plugin_authori
         .store()
         .begin_plugin_lifecycle(boost_pid, boost_en.revision, Uuid::new_v4(), false)
         .unwrap();
-    let (decision, _) = pipe
-        .gate_typed_with_trace("wf-r11", &build_boost_gate_input())
-        .unwrap();
+    let (decision, _) = pipe.gate_typed_with_trace("wf-r11", &gate_in).unwrap();
     assert!(
         matches!(decision, Gate::Allow | Gate::Abstain),
-        "Draining builtin.boost gate must abstain rather than rejecting downloads, got {decision:?}"
+        "Draining cm.boost gate must abstain rather than rejecting downloads, got {decision:?}"
     );
 
     let maint_pid = "builtin.nexusphp-maintenance";

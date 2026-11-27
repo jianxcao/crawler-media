@@ -2,6 +2,7 @@
 
 #[path = "../plugin_p1c_support/pkg.rs"]
 pub mod pkg;
+pub mod plugins_fixture;
 
 use std::str::FromStr;
 use std::sync::Arc;

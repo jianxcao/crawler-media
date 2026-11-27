@@ -296,3 +296,25 @@ pub(super) struct SubmitCommandRequest {
     #[serde(default)]
     pub evidence_ref: Option<String>,
 }
+
+fn default_repo_enabled() -> bool {
+    true
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct PluginRepositoryRequestItem {
+    pub id: String,
+    pub name: String,
+    pub index_url: String,
+    #[serde(default = "default_repo_enabled")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub builtin: Option<bool>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct SavePluginRepositoriesRequest {
+    pub repositories: Vec<PluginRepositoryRequestItem>,
+}

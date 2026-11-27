@@ -105,6 +105,8 @@ fn memory_downloader_remember_identity_remove_owned_allows_resubmit_and_preserve
         imdb_id: None,
         detail_url: None,
         category: None,
+        free_2x: false,
+        free_until: None,
     };
 
     assert_eq!(
@@ -532,6 +534,8 @@ fn submit_verified_exact_owned_merges_extra_tags_for_memory_and_qbit() {
         imdb_id: None,
         detail_url: None,
         category: None,
+        free_2x: false,
+        free_until: None,
     };
     let enc_tag_1 = downloader::ownership_tag("https://pt.example/download.php?id=111");
     let enc_tag_2 = downloader::ownership_tag(&torrent_2.enclosure);
@@ -650,6 +654,8 @@ fn submit_verified_exact_owned_merges_extra_tags_for_transmission() {
         imdb_id: None,
         detail_url: None,
         category: None,
+        free_2x: false,
+        free_until: None,
     };
     let enc_tag_1 = downloader::ownership_tag("https://pt.example/download.php?id=111");
     let enc_tag_2 = downloader::ownership_tag(&torrent_2.enclosure);

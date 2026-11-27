@@ -395,9 +395,64 @@ async fn browser_availability_and_checks_routes_enforce_contracts() {
     assert!(op["operation_id"].is_string());
 }
 
+async fn install_cm_checkin_maint_plugin(env: &HttpEnv) -> String {
+    const MAINT_WASM: &[u8] =
+        include_bytes!("../../plugin-host/tests/fixtures/maintenance_fixture.wasm");
+    let pid = "cm.checkin";
+    env.enable_dev_mode().await;
+    let manifest = format!(
+        r#"manifest_version = 1
+id = "{pid}"
+name = "Checkin Plugin"
+version = "1.0.0"
+api = "1.0.0"
+license = "MIT"
+authors = ["Test"]
+description = "Maintenance fixture"
+config_schema = "config.schema.json"
+state_schema = 1
+credential_binding = "invocation-site"
+
+[[components]]
+id = "maint"
+entry = "maint.wasm"
+world = "crawler:plugin/maintenance-plugin@1.0.0"
+permissions = ["http", "http:site-auth", "read:sites", "maintenance:provide", "browser:maintenance", "command:site.maintenance", "command:site.check-in"]
+
+[[components.maintenance]]
+id = "default"
+actions = ["verify-session", "check-in"]
+"#
+    );
+    let schema = r#"{"type":"object","additionalProperties":false,"properties":{}}"#;
+    let zip = build_stored_zip(&[
+        ("plugin.toml", manifest.as_bytes()),
+        ("config.schema.json", schema.as_bytes()),
+        ("maint.wasm", MAINT_WASM),
+    ]);
+    let inst = env
+        .install_pkg(
+            &zip,
+            None,
+            json!([
+                { "capability": "http", "scope": "Global", "sensitive": false },
+                { "capability": "http:site-auth", "scope": "Global", "sensitive": false },
+                { "capability": "read:sites", "scope": "Global", "sensitive": false },
+                { "capability": "maintenance:provide", "scope": "Global", "sensitive": false },
+                { "capability": "command:site.maintenance", "scope": "Global", "sensitive": false },
+                { "capability": "command:site.check-in", "scope": "Global", "sensitive": false }
+            ]),
+        )
+        .await;
+    let rev = inst["revision"].as_i64().unwrap();
+    env.enable_plugin(pid, rev, "en-cm-checkin").await;
+    pid.to_string()
+}
+
 #[tokio::test]
-async fn builtin_checkin_accepts_site_scoped_browser_maintenance_grant() {
+async fn checkin_plugin_accepts_site_scoped_browser_maintenance_grant() {
     let env = HttpEnv::new().await;
+    let pid = install_cm_checkin_maint_plugin(&env).await;
     let (st_site, _, b_site) = env
         .send(req_json(
             "POST",
@@ -421,7 +476,9 @@ async fn builtin_checkin_accepts_site_scoped_browser_maintenance_grant() {
     let (st_av0, _, b_av0) = env
         .send(req_json(
             "GET",
-            &format!("/api/v1/plugins/builtin.checkin/browser-availability?site_id={site_id}&purpose=maintenance"),
+            &format!(
+                "/api/v1/plugins/{pid}/browser-availability?site_id={site_id}&purpose=maintenance"
+            ),
             Some(TOKEN),
             &[],
             None,
@@ -435,13 +492,13 @@ async fn builtin_checkin_accepts_site_scoped_browser_maintenance_grant() {
         "scope": { "Site": site_id },
         "sensitive": true
     }]);
-    let rev = env.get_plugin_rev("builtin.checkin").await;
-    env.disable_plugin("builtin.checkin", rev, "dis-bm").await;
-    let rev_dis = env.get_plugin_rev("builtin.checkin").await;
+    let rev = env.get_plugin_rev(&pid).await;
+    env.disable_plugin(&pid, rev, "dis-bm").await;
+    let rev_dis = env.get_plugin_rev(&pid).await;
     let (st_prep, _, b_prep) = env
         .send(req_json(
             "POST",
-            "/api/v1/plugins/builtin.checkin/permissions/prepare",
+            &format!("/api/v1/plugins/{pid}/permissions/prepare"),
             Some(TOKEN),
             &[],
             Some(json!({ "requested_grants": grants })),
@@ -451,7 +508,7 @@ async fn builtin_checkin_accepts_site_scoped_browser_maintenance_grant() {
     let (st_gr, _, b_gr) = env
         .send(req_json(
             "POST",
-            "/api/v1/plugins/builtin.checkin/permissions/grant",
+            &format!("/api/v1/plugins/{pid}/permissions/grant"),
             Some(TOKEN),
             &[
                 ("if-match", &format!("\"{rev_dis}\"")),
@@ -467,13 +524,15 @@ async fn builtin_checkin_accepts_site_scoped_browser_maintenance_grant() {
         assert_ok(st_gr, &b_gr, StatusCode::ACCEPTED)["state"],
         "succeeded"
     );
-    let rev_gr = env.get_plugin_rev("builtin.checkin").await;
-    env.enable_plugin("builtin.checkin", rev_gr, "en-bm").await;
+    let rev_gr = env.get_plugin_rev(&pid).await;
+    env.enable_plugin(&pid, rev_gr, "en-bm").await;
 
     let (st_av1, _, b_av1) = env
         .send(req_json(
             "GET",
-            &format!("/api/v1/plugins/builtin.checkin/browser-availability?site_id={site_id}&purpose=maintenance"),
+            &format!(
+                "/api/v1/plugins/{pid}/browser-availability?site_id={site_id}&purpose=maintenance"
+            ),
             Some(TOKEN),
             &[],
             None,

@@ -199,7 +199,7 @@ class TestContext:
                 self.client.request("DELETE", f"/api/v1/downloaders/{dl_id}")
             except Exception:
                 pass
-        for b_pid in ("builtin.checkin", "builtin.boost"):
+        for b_pid in ("builtin.nexusphp-maintenance", "cm.checkin", "cm.boost"):
             try:
                 cur = self.client.request("GET", f"/api/v1/plugins/{b_pid}")
                 if isinstance(cur, dict) and cur.get("lifecycle") in ("disabled", "installed-disabled"):

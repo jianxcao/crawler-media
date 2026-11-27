@@ -219,6 +219,13 @@ impl exports::crawler::plugin::hooks::Guest for Policy {
                 }
                 return Ok(GateDecision::Allow);
             }
+            if db.candidate.title == "boost-gate-check" {
+                let snap = crawler::plugin::boost::snapshot(&[], &[])?;
+                if snap.disk.available_bytes == Some(0) {
+                    return Ok(GateDecision::Reject(String::from("disk-empty")));
+                }
+                return Ok(GateDecision::Allow);
+            }
         }
         match input.handles.first().map(String::as_str) {
             Some("reject-me") => Ok(GateDecision::Reject(String::from("wasm-reject"))),

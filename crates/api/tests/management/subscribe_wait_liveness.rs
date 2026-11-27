@@ -96,6 +96,8 @@ async fn setup() -> Setup {
             detail_url: None,
             category: None,
             poster_url: None,
+            free_2x: false,
+            free_until: None,
         },
         release_override: None,
         downloader_id: None,

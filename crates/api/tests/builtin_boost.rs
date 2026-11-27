@@ -93,7 +93,7 @@ fn quota_accounting_and_concurrent_reservation_cas() {
 
     let snap = state
         .store()
-        .get_boost_snapshot_for_plugin("builtin.boost", &[], &[])
+        .get_boost_snapshot_for_plugin(BOOST_PLUGIN_ID, &[], &[])
         .unwrap();
     let used: i64 = snap.tasks.iter().map(|t| t.occupied_bytes).sum();
     let retained: i64 = snap.tasks.iter().map(|t| t.retained_bytes).sum();
@@ -135,7 +135,7 @@ fn unknown_size_magnet_rejected_and_unknown_outcome_holds_reservation_across_res
 
     let reopened = Store::open(dir.path().join("data")).unwrap();
     let snap = reopened
-        .get_boost_snapshot_for_plugin("builtin.boost", &[], &[])
+        .get_boost_snapshot_for_plugin(BOOST_PLUGIN_ID, &[], &[])
         .unwrap();
     assert_eq!(snap.reservations.len(), 1);
     assert_eq!(
@@ -145,6 +145,126 @@ fn unknown_size_magnet_rejected_and_unknown_outcome_holds_reservation_across_res
     assert_eq!(snap.reservations[0].reserved_bytes, 4096);
 }
 
+fn install_dev_policy_gate_plugin(store: &Store, plugin_id: &str) {
+    const POLICY_WASM: &[u8] = include_bytes!("../../plugin-host/tests/fixtures/policy.wasm");
+    let rel = format!("plugins/pkg/{plugin_id}/v1");
+    let dir = store.data_dir().join(&rel);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("policy.wasm"), POLICY_WASM).unwrap();
+    let manifest_json = serde_json::json!({
+        "manifest_version": 1,
+        "id": plugin_id,
+        "name": format!("Policy {plugin_id}"),
+        "version": "1.0.0",
+        "api": "1.0.0",
+        "license": "MIT",
+        "authors": ["test"],
+        "description": "DownloadBefore test gate",
+        "config_schema": "config.schema.json",
+        "state_schema": 1,
+        "components": [{
+            "id": "policy",
+            "entry": "policy.wasm",
+            "world": plugin_api::HOOK_WORLD,
+            "permissions": ["hooks:download.before", "read:boost"],
+            "hooks": [{ "id": "download.before", "priority": 10 }]
+        }]
+    })
+    .to_string();
+    let p = store
+        .register_plugin_version(
+            &PluginVersionMetadata {
+                plugin_id: plugin_id.into(),
+                package_hash: format!("{plugin_id}:test:1.0.0"),
+                version: "1.0.0".into(),
+                manifest_json,
+                config_schema_json:
+                    r#"{"type":"object","additionalProperties":false,"properties":{}}"#.into(),
+                state_schema: "1".into(),
+                artifact_path: rel,
+                signing_key_id: None,
+                signature_status: "development".into(),
+                ui_metadata_ref: None,
+                credential_bound: false,
+            },
+            0,
+        )
+        .unwrap();
+    let grants = [
+        PluginGrant {
+            capability: "hooks:download.before".into(),
+            scope: PluginGrantScope::Global,
+            sensitive: false,
+        },
+        PluginGrant {
+            capability: "read:boost".into(),
+            scope: PluginGrantScope::Global,
+            sensitive: false,
+        },
+    ];
+    let _ = store
+        .replace_plugin_grants(&p.plugin_id, &p.package_hash, p.revision, &grants)
+        .unwrap();
+    set_plugin_enabled(store, plugin_id, true);
+}
+
+fn set_plugin_enabled(store: &Store, plugin_id: &str, enable: bool) {
+    let p = store.get_plugin(plugin_id).unwrap().unwrap();
+    let op = store
+        .begin_plugin_lifecycle(&p.plugin_id, p.revision, uuid::Uuid::new_v4(), enable)
+        .unwrap();
+    let _ = store
+        .finalize_plugin_lifecycle(&PluginLifecycleObservation {
+            plugin_id: op.plugin_id,
+            operation_id: op.active_operation_id.unwrap(),
+            revision: op.revision,
+            generation: op.generation,
+            workers_exited: true,
+            unknown_effects_reconciled: true,
+            validation_succeeded: true,
+        })
+        .unwrap();
+}
+
+async fn run_boost_cycle_http(
+    env: &HttpEnv,
+    site_id: domain::SiteId,
+    dl_id: domain::DownloaderId,
+    dry_run: bool,
+    idem: &str,
+) -> serde_json::Value {
+    let rev = env
+        .state
+        .store()
+        .get_plugin(BOOST_PLUGIN_ID)
+        .unwrap()
+        .unwrap()
+        .revision;
+    let (st, _, body) = env
+        .send(req_json(
+            "POST",
+            &format!("/api/v1/plugins/{BOOST_PLUGIN_ID}/commands"),
+            Some(TOKEN),
+            &[
+                ("If-Match", &format!("\"{rev}\"")),
+                ("Idempotency-Key", idem),
+            ],
+            Some(json!({
+                "kind": "boost.run",
+                "payload": {
+                    "site_id": site_id.to_string(),
+                    "downloader_id": dl_id.to_string(),
+                    "dry_run": dry_run
+                }
+            })),
+        ))
+        .await;
+    assert_eq!(st, StatusCode::ACCEPTED);
+    let op = poll_op(env, body["data"]["operation_id"].as_str().unwrap()).await;
+    assert_eq!(op["state"], "succeeded");
+    op["result"].clone()
+}
+
 #[tokio::test]
 async fn disk_space_pause_and_download_before_gate_boost_vs_abstain() {
     let dir = tempfile::tempdir_in("/tmp").unwrap();
@@ -152,7 +272,7 @@ async fn disk_space_pause_and_download_before_gate_boost_vs_abstain() {
     let srv = StubTorrentServer::start(Vec::new());
     let (state, site_id, dl_id) = setup_state(dir.path(), dl.clone(), Some(&srv));
 
-    // Unconfigured builtin.boost MUST abstain on Manual downloads even when disk unavailable.
+    // Manual downloads must still succeed even when disk space is unavailable and boost is unconfigured.
     dl.set_disk(DiskSpaceStatus::Unavailable, None);
     let manual_plan = FrozenDownloadPlan {
         purpose: SubmissionPurpose::Manual,
@@ -166,65 +286,65 @@ async fn disk_space_pause_and_download_before_gate_boost_vs_abstain() {
         .unwrap();
     assert!(matches!(manual_res, DownloadOutcome::Submitted { .. }));
 
+    // WASM download.before policy hook enforces snapshot-backed disk gate and Defer decisions.
+    install_dev_policy_gate_plugin(state.store().as_ref(), "cm.gate");
+    dl.set_disk(DiskSpaceStatus::Available, Some(0));
+    let gate_rej = ApiDownloadService::new(state.clone())
+        .submit(
+            boost_plan(
+                site_id,
+                dl_id,
+                &srv.url("g-rej.torrent"),
+                "boost-gate-check",
+            ),
+            boost_ctx("gate-rej"),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(gate_rej, DownloadOutcome::Rejected { .. }));
+    let gate_def = ApiDownloadService::new(state.clone())
+        .submit(
+            boost_plan(site_id, dl_id, &srv.url("g-def.torrent"), "DeferDownload-1"),
+            boost_ctx("gate-def"),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(gate_def, DownloadOutcome::Deferred { .. }));
+    set_plugin_enabled(state.store().as_ref(), "cm.gate", false);
+
+    // Boost cycle skips auto-add when disk is unavailable/unknown/insufficient, then admits under hourly cap.
     save_boost_config(
         &state,
-        json!({ "budget_bytes": 100_000, "min_free_disk_bytes": 50_000 }),
+        json!({
+            "sites": [site_id.to_string()],
+            "downloader_id": dl_id.to_string(),
+            "budget_bytes": 100_000,
+            "min_free_disk_bytes": 50_000,
+            "dry_run": false
+        }),
     );
-    for (status, avail) in [
-        (DiskSpaceStatus::Unavailable, None),
-        (DiskSpaceStatus::Unknown, None),
-        (DiskSpaceStatus::Available, Some(10_000)),
-    ] {
-        dl.set_disk(status, avail);
-        let res = ApiDownloadService::new(state.clone())
-            .submit(
-                boost_plan(
-                    site_id,
-                    dl_id,
-                    &srv.url("d.torrent"),
-                    &format!("Disk-{status:?}"),
-                ),
-                boost_ctx(&format!("disk-{status:?}")),
-            )
-            .await
-            .unwrap();
-        assert!(matches!(res, DownloadOutcome::Deferred { .. }));
-    }
-
-    dl.set_disk(DiskSpaceStatus::Available, Some(500_000));
     let env = HttpEnv {
         _dir: dir,
         state: state.clone(),
         app: router(state.clone()),
         member_token: String::new(),
     };
-    let rev = env
-        .state
-        .store()
-        .get_plugin("builtin.boost")
-        .unwrap()
-        .unwrap()
-        .revision;
-    let (st, _, body) = env
-        .send(req_json(
-            "POST",
-            "/api/v1/plugins/builtin.boost/commands",
-            Some(TOKEN),
-            &[
-                ("If-Match", &format!("\"{rev}\"")),
-                ("Idempotency-Key", "dry-run-1"),
-            ],
-            Some(json!({
-                "kind": "boost.run",
-                "payload": { "site_id": site_id.to_string(), "downloader_id": dl_id.to_string(), "dry_run": true }
-            })),
-        ))
-        .await;
-    assert_eq!(st, StatusCode::ACCEPTED);
-    let op_id = body["data"]["operation_id"].as_str().unwrap();
-    let op = poll_op(&env, op_id).await;
-    assert_eq!(op["state"], "succeeded");
-    assert_eq!(op["result"]["added"], 0);
+    for (status, avail) in [
+        (DiskSpaceStatus::Unavailable, None),
+        (DiskSpaceStatus::Unknown, None),
+        (DiskSpaceStatus::Available, Some(10_000)),
+    ] {
+        dl.set_disk(status, avail);
+        let res =
+            run_boost_cycle_http(&env, site_id, dl_id, false, &format!("disk-{status:?}")).await;
+        assert_eq!(res["skipped_disk"], true);
+        assert_eq!(res["added"], 0);
+    }
+
+    dl.set_disk(DiskSpaceStatus::Available, Some(500_000));
+    let dry = run_boost_cycle_http(&env, site_id, dl_id, true, "dry-run-1").await;
+    assert_eq!(dry["added"], 0);
+    assert_eq!(dry["skipped_disk"], false);
 
     save_boost_config(
         &env.state,
@@ -362,7 +482,7 @@ async fn protections_block_cleanup_and_expired_plan_reprepares() {
         .send(req_json(
             "GET",
             &format!(
-                "/api/v1/plugins/builtin.boost/brush-cleanup-preview?task_ids={hr_unknown_id},{hold_id},{lib_tf}"
+                "/api/v1/plugins/{BOOST_PLUGIN_ID}/brush-cleanup-preview?task_ids={hr_unknown_id},{hold_id},{lib_tf}"
             ),
             Some(TOKEN),
             &[],
@@ -377,14 +497,14 @@ async fn protections_block_cleanup_and_expired_plan_reprepares() {
     let rev = env
         .state
         .store()
-        .get_plugin("builtin.boost")
+        .get_plugin(BOOST_PLUGIN_ID)
         .unwrap()
         .unwrap()
         .revision;
     let (st_p, _, b_p) = env
         .send(req_json(
             "POST",
-            "/api/v1/plugins/builtin.boost/commands",
+            &format!("/api/v1/plugins/{BOOST_PLUGIN_ID}/commands"),
             Some(TOKEN),
             &[
                 ("If-Match", &format!("\"{rev}\"")),

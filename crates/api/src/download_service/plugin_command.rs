@@ -52,6 +52,8 @@ struct DownloaderAddPayload {
     sequential: bool,
     #[serde(default)]
     first_last_piece: bool,
+    #[serde(default)]
+    free_until: Option<i64>,
 }
 
 fn derived_download_op_id(plugin_op_id: PluginOperationId, attempt: i64) -> PluginOperationId {
@@ -64,6 +66,7 @@ fn build_plugin_download_plan(
     payload: DownloaderAddPayload,
     downloader_id: DownloaderId,
     source: TorrentSource,
+    has_boost_grant: bool,
 ) -> (FrozenDownloadPlan, DownloadOpContext, Option<i64>) {
     let dl_op_id = derived_download_op_id(ctx.operation_id, ctx.attempt);
     let parsed_site_id = payload
@@ -71,10 +74,11 @@ fn build_plugin_download_plan(
         .as_deref()
         .and_then(|s| SiteId::from_str(s.trim()).ok())
         .unwrap_or_else(|| SiteId::from_uuid(Uuid::nil()));
-    let is_boost = ctx.plugin_id == Some(crate::plugins::boost::BUILTIN_BOOST_PLUGIN_ID)
-        || !parsed_site_id.as_uuid().is_nil();
-    let has_budget_policy =
-        is_boost || payload.budget_bytes.is_some() || payload.advertised_size_bytes.is_some();
+    let is_boost = has_boost_grant || !parsed_site_id.as_uuid().is_nil();
+    let has_budget_policy = is_boost
+        || payload.budget_bytes.is_some()
+        || payload.advertised_size_bytes.is_some()
+        || payload.free_until.is_some();
     let title = payload
         .title
         .filter(|t| !t.trim().is_empty())
@@ -101,14 +105,15 @@ fn build_plugin_download_plan(
         imdb_id: None,
         detail_url: None,
         category: payload.category.clone(),
+        free_2x: false,
+        free_until: payload.free_until,
     };
-    let budget_key = has_budget_policy.then(|| {
-        format!(
-            "{}:{downloader_id}",
+    let budget_key = has_budget_policy
+        .then(|| {
             ctx.plugin_id
-                .unwrap_or(crate::plugins::boost::BUILTIN_BOOST_PLUGIN_ID)
-        )
-    });
+                .map(|pid| crate::plugins::boost::config::quota_key(pid, downloader_id))
+        })
+        .flatten();
     let plan = FrozenDownloadPlan {
         torrent,
         source,
@@ -322,6 +327,11 @@ pub(crate) fn execute_plugin_command_step(
     if ctx.kind != "downloader.add" {
         return super::plugin_command_ops::execute_downloader_command_step(state, ctx);
     }
+    let Some(plugin_id) = ctx.plugin_id else {
+        return ExternalEffectStep::Rejected {
+            phase: "missing-plugin-id".into(),
+        };
+    };
     let Some(raw) = ctx.payload else {
         return ExternalEffectStep::Rejected {
             phase: "missing-payload".into(),
@@ -403,8 +413,13 @@ pub(crate) fn execute_plugin_command_step(
             phase: "invalid-download-ref".into(),
         };
     };
+    let has_boost_grant = state
+        .store
+        .get_plugin_grants(plugin_id)
+        .ok()
+        .is_some_and(|gs| gs.iter().any(|g| g.capability == "read:boost"));
     let (plan, op_ctx, budget_cap) =
-        build_plugin_download_plan(ctx, payload, downloader_id, source);
+        build_plugin_download_plan(ctx, payload, downloader_id, source, has_boost_grant);
     let res = ApiDownloadService::new(state.clone())
         .submit_sync_with_budget_cap(plan, op_ctx, budget_cap);
     map_download_outcome(ctx.operation_id, res)
@@ -508,18 +523,18 @@ mod tests {
         let dl_id = DownloaderId::new();
         let site_id = SiteId::new();
         let subject = store::plugins::PluginSubject::Task {
-            plugin_id: "builtin.boost".into(),
+            plugin_id: "org.example.boost".into(),
             task_id: "traffic-cycle".into(),
         };
         let cause = store::plugins::PluginCommandCause::root("test-cmd");
         let ctx = PluginEffectContext {
             operation_id: PluginOperationId::new(),
-            plugin_id: Some("builtin.boost"),
+            plugin_id: Some("org.example.boost"),
             kind: "downloader.add",
             attempt: 1,
             generation: Some(1),
             subject: &subject,
-            canonical_method: "POST /plugins/builtin.boost/commands",
+            canonical_method: "POST /plugins/org.example.boost/commands",
             targets: &[],
             cause: &cause,
             payload: None,
@@ -532,7 +547,8 @@ mod tests {
         }))
         .unwrap();
         let src = TorrentSource::from_site_enclosure(&default_payload.download_ref).unwrap();
-        let (plan_default, _, _) = build_plugin_download_plan(&ctx, default_payload, dl_id, src);
+        let (plan_default, _, _) =
+            build_plugin_download_plan(&ctx, default_payload, dl_id, src, true);
         assert_eq!(plan_default.torrent.id, None);
         assert_eq!(plan_default.torrent.hr, Some(false));
 
@@ -545,7 +561,8 @@ mod tests {
         }))
         .unwrap();
         let src2 = TorrentSource::from_site_enclosure(&explicit_payload.download_ref).unwrap();
-        let (plan_explicit, _, _) = build_plugin_download_plan(&ctx, explicit_payload, dl_id, src2);
+        let (plan_explicit, _, _) =
+            build_plugin_download_plan(&ctx, explicit_payload, dl_id, src2, true);
         assert_eq!(plan_explicit.torrent.id.as_deref(), Some("98765"));
         assert_eq!(plan_explicit.torrent.hr, Some(true));
 
@@ -554,7 +571,7 @@ mod tests {
         let targets = vec![PluginCommandTarget::Downloader(dl_id)];
         let bad = validate_admin_downloader_add(
             &store,
-            "builtin.boost",
+            "org.example.boost",
             &targets,
             &serde_json::json!({
                 "downloader_id": dl_id.to_string(),

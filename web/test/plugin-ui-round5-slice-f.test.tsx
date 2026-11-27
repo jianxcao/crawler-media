@@ -1,9 +1,7 @@
 import "./plugin-ui-env";
 
 import assert from "node:assert/strict";
-import path from "node:path";
 import test from "node:test";
-import { pathToFileURL } from "node:url";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import React, { useState } from "react";
 import { MemoryRouter } from "react-router-dom";
@@ -13,6 +11,7 @@ import {
   usePluginOperation,
   type Operation,
   type PluginHostSDK,
+  type PluginSurfaceProps,
 } from "@crawler-media/plugin-ui-sdk";
 import { PluginSchemaForm, schemaHasSecrets } from "../components/plugins/PluginSchemaForm";
 import { PluginSurfaceHost } from "../components/plugins/PluginSurfaceHost";
@@ -21,12 +20,12 @@ import type { PluginUiContract, UiDescriptorView } from "../lib/api/plugins";
 import {
   clearFederationCache,
   loadFederatedSurface,
+  type FederatedContainer,
 } from "../lib/plugins/federation-loader";
 import { createPluginHostSdk } from "../lib/plugins/sdk";
 import { mapHttpToSdkError } from "../lib/plugins/sdk-helpers";
 import { SessionProvider } from "../lib/session";
 
-const REPO_ROOT = path.resolve(import.meta.dirname, "../..");
 const GIB = 1024 ** 3;
 
 const ADMIN_SESSION: SessionView = {
@@ -238,23 +237,98 @@ test("R5-F2: boost Config avoids setState-in-updater under StrictMode and preser
   try {
     const savedPayloads: Array<Record<string, unknown>> = [];
     let externalPush: ((vals: Record<string, unknown>) => void) | null = null;
-    const boostDist = path.join(REPO_ROOT, "examples/plugins/boost/ui/ui-dist");
     const boostDesc = makeDescriptor({
-      plugin_id: "builtin.boost",
-      source: "builtin",
-      remote_name: "cmBuiltinBoost",
-      package_hash: "builtin:boost:1.0.0",
-      package_sha256: "builtin:boost:1.0.0",
+      plugin_id: "cm.boost",
+      source: "external",
+      remote_name: "cmBoost",
+      package_hash: "cm:boost:1.0.0",
+      package_sha256: "cm:boost:1.0.0",
     });
-    const boostLoader = (descriptor: UiDescriptorView, expose: string) =>
-      loadFederatedSurface(
-        {
-          ...descriptor,
-          entry_url: pathToFileURL(path.join(boostDist, "ui/assets/remoteEntry.js")).href,
-        },
-        expose,
-        { fetchManifest: async () => [], importRemote: (u) => import(`${u}?t=${Date.now()}`) },
+    const BoostConfigStrictStub: React.FC<PluginSurfaceProps> = ({ config }) => {
+      const vals = config?.values ?? {};
+      const extSig = `${String(vals.min_free_disk_bytes ?? "")}:${String(vals.max_active ?? "")}`;
+      const [lastEchoSig, setLastEchoSig] = React.useState(extSig);
+      const [minFreeText, setMinFreeText] = React.useState(
+        typeof vals.min_free_disk_bytes === "number" ? String(vals.min_free_disk_bytes / GIB) : "",
       );
+      const [maxActiveText, setMaxActiveText] = React.useState(
+        typeof vals.max_active === "number" ? String(vals.max_active) : "",
+      );
+      const localEchoRef = React.useRef<string | null>(null);
+      React.useEffect(() => {
+        if (extSig === lastEchoSig) return;
+        setLastEchoSig(extSig);
+        if (localEchoRef.current === extSig) {
+          localEchoRef.current = null;
+          return;
+        }
+        setMinFreeText(
+          typeof vals.min_free_disk_bytes === "number" ? String(vals.min_free_disk_bytes / GIB) : "",
+        );
+        setMaxActiveText(typeof vals.max_active === "number" ? String(vals.max_active) : "");
+      }, [extSig, lastEchoSig, vals.max_active, vals.min_free_disk_bytes]);
+
+      const emitDraft = (nextMin: string, nextMax: string) => {
+        const parsedMin = Number(nextMin);
+        const minBytes =
+          nextMin.trim() && Number.isFinite(parsedMin)
+            ? Math.round(parsedMin * GIB)
+            : vals.min_free_disk_bytes;
+        const parsedMax = Number(nextMax);
+        const maxAct =
+          nextMax.trim() && Number.isFinite(parsedMax) ? Math.trunc(parsedMax) : vals.max_active;
+        localEchoRef.current = `${String(minBytes ?? "")}:${String(maxAct ?? "")}`;
+        config?.onDraftChange({ ...vals, min_free_disk_bytes: minBytes, max_active: maxAct });
+      };
+
+      return (
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            const out: Record<string, unknown> = { ...vals };
+            if (minFreeText.trim() && Number.isFinite(Number(minFreeText))) {
+              out.min_free_disk_bytes = Math.round(Number(minFreeText) * GIB);
+            }
+            if (maxActiveText.trim() && Number.isFinite(Number(maxActiveText))) {
+              out.max_active = Math.trunc(Number(maxActiveText));
+            }
+            void config?.save(out);
+          }}
+        >
+          <h2>自动刷流策略与配额设置</h2>
+          <label>
+            磁盘最低保留空闲 (GiB)
+            <input
+              value={minFreeText}
+              onChange={(e) => {
+                setMinFreeText(e.target.value);
+                emitDraft(e.target.value, maxActiveText);
+              }}
+            />
+          </label>
+          <label>
+            最大活动任务数
+            <input
+              value={maxActiveText}
+              onChange={(e) => {
+                setMaxActiveText(e.target.value);
+                emitDraft(minFreeText, e.target.value);
+              }}
+            />
+          </label>
+          <button type="submit">保存刷流配置</button>
+        </form>
+      );
+    };
+    const container: FederatedContainer = {
+      init: () => {},
+      get: async () => () => ({ default: BoostConfigStrictStub }),
+    };
+    const boostLoader = (descriptor: UiDescriptorView, expose: string) =>
+      loadFederatedSurface(descriptor, expose, {
+        fetchManifest: async () => [],
+        importRemote: async () => container,
+      });
 
     function StatefulHostHarness() {
       const [vals, setVals] = useState<Record<string, unknown>>({
@@ -264,7 +338,7 @@ test("R5-F2: boost Config avoids setState-in-updater under StrictMode and preser
       externalPush = setVals;
       return (
         <PluginSurfaceHost
-          pluginId="builtin.boost"
+          pluginId="cm.boost"
           surfaceId="settings"
           expectedKind="config"
           config={{

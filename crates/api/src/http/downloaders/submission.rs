@@ -226,6 +226,8 @@ fn build_submit_torrent(body: &SubmitInput) -> (Torrent, Release, Vec<Value>) {
         detail_url: None,
         category: body.category.clone(),
         poster_url: None,
+        free_2x: false,
+        free_until: None,
     };
     let parsed = release::parse(&torrent.title);
     let units = match parsed.covered_episodes().as_slice() {

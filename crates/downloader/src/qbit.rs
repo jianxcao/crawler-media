@@ -129,6 +129,16 @@ struct TorrentInfo {
     dlspeed: u64,
     #[serde(default)]
     upspeed: u64,
+    #[serde(default)]
+    ratio: f64,
+    #[serde(default)]
+    seeding_time: u64,
+    #[serde(default)]
+    added_on: i64,
+    #[serde(default)]
+    completion_on: i64,
+    #[serde(default)]
+    last_activity: i64,
 }
 
 #[derive(Debug, PartialEq, Eq)]

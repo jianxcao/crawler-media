@@ -8,6 +8,8 @@ pub struct Torrent {
     pub size_bytes: Option<u64>,
     pub seeders: Option<u32>,
     pub free: bool,
+    pub free_2x: bool,
+    pub free_until: Option<i64>,
     /// None 表示站点未提供可确认的 H&R 状态。
     pub hr: Option<bool>,
     pub imdb_id: Option<String>,

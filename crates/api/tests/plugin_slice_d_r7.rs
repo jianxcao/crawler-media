@@ -494,11 +494,15 @@ async fn config_validation_accepts_empty_optional_site_id_and_trimmed_sites_arra
     let env = HttpEnv::new().await;
     env.enable_dev_mode().await;
     let site_id = env.insert_site("R7-CfgSite");
+    support::plugin_http_support::plugins_fixture::install_cm_checkin(
+        &env, false, false, false, false,
+    )
+    .await;
 
     let (st_chk, _, checkin_cfg) = env
         .send(req_json(
             "GET",
-            "/api/v1/plugins/builtin.checkin/config",
+            "/api/v1/plugins/cm.checkin/config",
             Some(TOKEN),
             &[],
             None,
@@ -509,7 +513,7 @@ async fn config_validation_accepts_empty_optional_site_id_and_trimmed_sites_arra
     let (st_val, _, b_val) = env
         .send(req_json(
             "POST",
-            "/api/v1/plugins/builtin.checkin/config/validate",
+            "/api/v1/plugins/cm.checkin/config/validate",
             Some(TOKEN),
             &[],
             Some(json!({

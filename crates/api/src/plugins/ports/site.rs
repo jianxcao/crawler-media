@@ -158,16 +158,57 @@ pub(super) fn site_get(
     Ok(redacted_site_view(obs.site()))
 }
 
+const SITE_STATS_CACHE_TTL_SECS: i64 = 300;
+
 pub(super) fn site_stats(
     ports: &StoreHostPorts,
     inv: &Invocation,
     handle: &str,
 ) -> Result<StatsView, ApiError> {
-    let _obs = load_scoped_site(ports, inv, handle)?;
-    Ok(StatsView {
-        uploaded: None,
-        downloaded: None,
-    })
+    let obs = load_scoped_site(ports, inv, handle)?;
+    let ctx = ports.lookup(inv)?;
+    let site = obs.site();
+    let cache_key = (site.id, obs.credential_epoch().storage_key().to_string());
+    let now = crate::job_loop::unix_now();
+    {
+        let cache = ports.site_stats_cache.lock();
+        if let Some((cached_at, cached)) = cache.get(&cache_key)
+            && now >= *cached_at
+            && now - *cached_at < SITE_STATS_CACHE_TTL_SECS
+        {
+            return Ok(*cached);
+        }
+    }
+    let indexer = ctx
+        .deps
+        .indexer
+        .upgrade()
+        .ok_or_else(|| api_err(ErrorCode::Upstream, "indexer unavailable"))?;
+    let stats = indexer.fetch_user_stats(site).map_err(|err| match err {
+        indexer::IndexerError::UnknownProfile(_)
+        | indexer::IndexerError::UnsupportedCapability { .. } => {
+            api_err(ErrorCode::Unsupported, &err.to_string())
+        }
+        indexer::IndexerError::ProviderDisabled { .. } => {
+            api_err(ErrorCode::Conflict, &err.to_string())
+        }
+        indexer::IndexerError::InvalidInput(_) => {
+            api_err(ErrorCode::InvalidArgument, &err.to_string())
+        }
+        other => api_err(ErrorCode::Upstream, &other.to_string()),
+    })?;
+    let view = match stats {
+        Some((u, d)) => StatsView {
+            uploaded: Some(u),
+            downloaded: Some(d),
+        },
+        None => StatsView {
+            uploaded: None,
+            downloaded: None,
+        },
+    };
+    ports.site_stats_cache.lock().insert(cache_key, (now, view));
+    Ok(view)
 }
 
 pub(super) fn site_credential_epoch(

@@ -8,7 +8,7 @@ use indexer::{IndexerError, RegistrySnapshot};
 use serde_json::{Value, json};
 
 use crate::run_boost_cmd;
-use crate::support::plugin_http_support::{HttpEnv, TOKEN, assert_ok, req_json};
+use crate::support::plugin_http_support::{ADMIN_PASS, HttpEnv, TOKEN, assert_ok, req_json};
 use crate::support::{BoostTestDownloader, NoopFetcher, StubTorrentServer};
 
 struct CountingRssProvider {
@@ -54,6 +54,8 @@ impl indexer::IndexerProvider for CountingRssProvider {
             imdb_id: None,
             detail_url: None,
             category: None,
+            free_2x: false,
+            free_until: None,
         }])
     }
     fn resolve_download(
@@ -67,10 +69,10 @@ impl indexer::IndexerProvider for CountingRssProvider {
 }
 
 async fn revoke_boost_cap(env: &HttpEnv, cap: &str, idem: &str) {
-    let rev0 = env.get_plugin_rev("builtin.boost").await;
-    env.disable_plugin("builtin.boost", rev0, &format!("{idem}-dis"))
+    let rev0 = env.get_plugin_rev("cm.boost").await;
+    env.disable_plugin("cm.boost", rev0, &format!("{idem}-dis"))
         .await;
-    let rev_dis = env.get_plugin_rev("builtin.boost").await;
+    let rev_dis = env.get_plugin_rev("cm.boost").await;
     let grants = json!([{
         "capability": cap,
         "scope": "Global",
@@ -79,7 +81,7 @@ async fn revoke_boost_cap(env: &HttpEnv, cap: &str, idem: &str) {
     let (st_rv, _, b_rv) = env
         .send(req_json(
             "POST",
-            "/api/v1/plugins/builtin.boost/permissions/revoke",
+            "/api/v1/plugins/cm.boost/permissions/revoke",
             Some(TOKEN),
             &[
                 ("if-match", &format!("\"{rev_dis}\"")),
@@ -89,16 +91,16 @@ async fn revoke_boost_cap(env: &HttpEnv, cap: &str, idem: &str) {
         ))
         .await;
     assert_ok(st_rv, &b_rv, StatusCode::ACCEPTED);
-    let rev_rv = env.get_plugin_rev("builtin.boost").await;
-    env.enable_plugin("builtin.boost", rev_rv, &format!("{idem}-en"))
+    let rev_rv = env.get_plugin_rev("cm.boost").await;
+    env.enable_plugin("cm.boost", rev_rv, &format!("{idem}-en"))
         .await;
 }
 
 async fn grant_boost_cap(env: &HttpEnv, cap: &str, idem: &str) {
-    let rev0 = env.get_plugin_rev("builtin.boost").await;
-    env.disable_plugin("builtin.boost", rev0, &format!("{idem}-dis"))
+    let rev0 = env.get_plugin_rev("cm.boost").await;
+    env.disable_plugin("cm.boost", rev0, &format!("{idem}-dis"))
         .await;
-    let rev_dis = env.get_plugin_rev("builtin.boost").await;
+    let rev_dis = env.get_plugin_rev("cm.boost").await;
     let grants = json!([{
         "capability": cap,
         "scope": "Global",
@@ -107,7 +109,7 @@ async fn grant_boost_cap(env: &HttpEnv, cap: &str, idem: &str) {
     let (st_prep, _, b_prep) = env
         .send(req_json(
             "POST",
-            "/api/v1/plugins/builtin.boost/permissions/prepare",
+            "/api/v1/plugins/cm.boost/permissions/prepare",
             Some(TOKEN),
             &[],
             Some(json!({ "requested_grants": grants })),
@@ -117,7 +119,7 @@ async fn grant_boost_cap(env: &HttpEnv, cap: &str, idem: &str) {
     let (st_gr, _, b_gr) = env
         .send(req_json(
             "POST",
-            "/api/v1/plugins/builtin.boost/permissions/grant",
+            "/api/v1/plugins/cm.boost/permissions/grant",
             Some(TOKEN),
             &[
                 ("if-match", &format!("\"{rev_dis}\"")),
@@ -127,8 +129,8 @@ async fn grant_boost_cap(env: &HttpEnv, cap: &str, idem: &str) {
         ))
         .await;
     assert_ok(st_gr, &b_gr, StatusCode::ACCEPTED);
-    let rev_gr = env.get_plugin_rev("builtin.boost").await;
-    env.enable_plugin("builtin.boost", rev_gr, &format!("{idem}-en"))
+    let rev_gr = env.get_plugin_rev("cm.boost").await;
+    env.enable_plugin("cm.boost", rev_gr, &format!("{idem}-en"))
         .await;
 }
 
@@ -178,9 +180,10 @@ async fn slice_e_r5_item6_boost_cycle_enforces_indexer_rss_and_search_grants() {
         )
     };
 
-    let state = ApiState::new_arc(
+    let state = ApiState::new_arc_with_admin_password(
         store,
         TOKEN.into(),
+        Some(ADMIN_PASS.into()),
         RegistrySnapshot::builtin().unwrap(),
         Arc::new(NoopFetcher),
         dl,
@@ -234,6 +237,10 @@ async fn slice_e_r5_item6_boost_cycle_enforces_indexer_rss_and_search_grants() {
         state,
         member_token: String::new(),
     };
+    crate::support::plugin_http_support::plugins_fixture::install_cm_boost(
+        &env, false, false, false,
+    )
+    .await;
 
     // Case A: search granted, rss revoked -> search runs (empty), RSS fallback MUST NOT run!
     revoke_boost_cap(&env, "command:indexer.rss", "r5-rev-rss").await;

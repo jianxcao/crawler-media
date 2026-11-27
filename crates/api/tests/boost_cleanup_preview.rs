@@ -99,7 +99,10 @@ async fn brush_cleanup_preview_selection_never_elevates_to_plan_mode() {
         let (st, _, b) = env
             .send(req_json(
                 "GET",
-                &format!("/api/v1/plugins/builtin.boost/brush-cleanup-preview?task_ids={tid}"),
+                &format!(
+                    "/api/v1/plugins/{}/brush-cleanup-preview?task_ids={tid}",
+                    support::BOOST_PLUGIN_ID
+                ),
                 Some(TOKEN),
                 &[],
                 None,
@@ -115,7 +118,10 @@ async fn brush_cleanup_preview_selection_never_elevates_to_plan_mode() {
     let (st_act, _, b_act) = env
         .send(req_json(
             "GET",
-            "/api/v1/plugins/builtin.boost/brush-cleanup-preview?plan_handle=act-handle",
+            &format!(
+                "/api/v1/plugins/{}/brush-cleanup-preview?plan_handle=act-handle",
+                support::BOOST_PLUGIN_ID
+            ),
             Some(TOKEN),
             &[],
             None,
@@ -128,7 +134,10 @@ async fn brush_cleanup_preview_selection_never_elevates_to_plan_mode() {
     let (st_exp, _, b_exp) = env
         .send(req_json(
             "GET",
-            "/api/v1/plugins/builtin.boost/brush-cleanup-preview?plan_handle=exp-handle",
+            &format!(
+                "/api/v1/plugins/{}/brush-cleanup-preview?plan_handle=exp-handle",
+                support::BOOST_PLUGIN_ID
+            ),
             Some(TOKEN),
             &[],
             None,
