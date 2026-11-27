@@ -12,8 +12,15 @@ struct MockDownloader {
 }
 
 impl Downloader for MockDownloader {
-    fn add(&self, _torrent: &Torrent) -> Result<(), DownloaderError> {
-        Ok(())
+    fn submit_verified(
+        &self,
+        payload: &downloader::SubmitPayload,
+        _options: &downloader::SubmitOptions,
+    ) -> Result<downloader::ClientSubmitResult, DownloaderError> {
+        Ok(downloader::ClientSubmitResult::Added {
+            already_owned: false,
+            info_hash: payload.info_hash().to_string(),
+        })
     }
     fn remove(&self, _torrent: &Torrent, _delete_files: bool) -> Result<(), DownloaderError> {
         Ok(())
@@ -120,10 +127,13 @@ fn season_pack_retry_only_reconciles_mapped_slots_without_forging_facts() {
         transfer_mode: Some(library::TransferMode::Copy),
         scrape: false,
         hooks: None,
+        policy_hooks: None,
+        submitter: None,
         naming: Some(&naming),
         preserve_removed: true,
         overlap: Default::default(),
         absolute: None,
+        renamed_destinations: Default::default(),
     };
 
     let added = Added {
@@ -147,8 +157,15 @@ fn season_pack_retry_only_reconciles_mapped_slots_without_forging_facts() {
             completed: false,
             submission_errors: vec![],
             torrents_added: vec![],
+            deferred_enclosures: vec![],
+            unknown_enclosures: vec![],
+            submitted_meta: Default::default(),
         },
         broken: Vec::new(),
+        deferred: Vec::new(),
+        select_deferred: Vec::new(),
+        unknown: Vec::new(),
+        submitted_meta: Default::default(),
     };
 
     let outcome = collect_completed_with_destinations(
@@ -221,10 +238,13 @@ fn stale_facts_pointing_at_missing_file_are_reconciled_to_new_destination() {
         transfer_mode: Some(library::TransferMode::Copy),
         scrape: false,
         hooks: None,
+        policy_hooks: None,
+        submitter: None,
         naming: Some(&naming),
         preserve_removed: true,
         overlap: Default::default(),
         absolute: None,
+        renamed_destinations: Default::default(),
     };
 
     let added = Added {
@@ -248,8 +268,15 @@ fn stale_facts_pointing_at_missing_file_are_reconciled_to_new_destination() {
             completed: false,
             submission_errors: vec![],
             torrents_added: vec![],
+            deferred_enclosures: vec![],
+            unknown_enclosures: vec![],
+            submitted_meta: Default::default(),
         },
         broken: Vec::new(),
+        deferred: Vec::new(),
+        select_deferred: Vec::new(),
+        unknown: Vec::new(),
+        submitted_meta: Default::default(),
     };
 
     let outcome = collect_completed_with_destinations(

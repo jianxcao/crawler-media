@@ -5,6 +5,8 @@ use serde::Deserialize;
 
 use crate::{Downloader, DownloaderError, PathMap, agent_for_url, apply_maps};
 
+mod auth;
+mod boost_ops;
 mod downloader;
 
 #[derive(Clone, PartialEq, Eq)]
@@ -74,12 +76,6 @@ pub struct QbitDownloader {
     login_lock: parking_lot::Mutex<()>,
 }
 
-fn http_agent() -> ureq::Agent {
-    let config = ureq::config::Config::builder()
-        .timeout_global(Some(std::time::Duration::from_secs(20)))
-        .build();
-    ureq::Agent::new_with_config(config)
-}
 fn read_body(response: ureq::http::Response<ureq::Body>) -> Result<String, DownloaderError> {
     response
         .into_body()
@@ -116,6 +112,8 @@ struct TorrentInfo {
     save_path: String,
     #[serde(default)]
     tags: String,
+    #[serde(default)]
+    category: String,
     #[serde(default)]
     name: String,
     #[serde(default)]
@@ -185,6 +183,8 @@ struct TorrentFile {
     index: Option<usize>,
     name: String,
     progress: f64,
+    #[serde(default)]
+    size: u64,
     /// 0 = do not download (F-1 selective files).
     #[serde(default = "default_priority")]
     priority: i64,

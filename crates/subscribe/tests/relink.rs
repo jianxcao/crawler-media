@@ -105,10 +105,13 @@ fn transfer_once(
         transfer_mode: Some(TransferMode::Hardlink),
         scrape: false,
         hooks: None,
+        policy_hooks: None,
+        submitter: None,
         naming: None,
         preserve_removed: false,
         overlap: Default::default(),
         absolute: None,
+        renamed_destinations: Default::default(),
     };
     let added = Added {
         input,
@@ -131,8 +134,15 @@ fn transfer_once(
             collection_errors: vec![],
             submission_errors: vec![],
             torrents_added: vec![],
+            deferred_enclosures: vec![],
+            unknown_enclosures: vec![],
+            submitted_meta: Default::default(),
         },
         broken: Vec::new(),
+        deferred: Vec::new(),
+        select_deferred: Vec::new(),
+        unknown: Vec::new(),
+        submitted_meta: Default::default(),
     };
     collect_completed(added, &Ffprobe::default()).unwrap()
 }

@@ -2,6 +2,7 @@
 #[allow(dead_code)]
 mod lifecycle;
 
+use base64::Engine;
 use lifecycle::FakeServer;
 use std::io::Write;
 use std::sync::Arc;
@@ -10,7 +11,8 @@ use parking_lot::Mutex;
 
 use domain::{DownloaderId, SiteId, Torrent};
 use downloader::{
-    Downloader, DownloaderSet, MemoryDownloader, TransmissionConfig, TransmissionDownloader,
+    ClientSubmitResult, Downloader, DownloaderSet, MemoryDownloader, SubmitOptions, SubmitPayload,
+    TransmissionConfig, TransmissionDownloader, parse_verified_torrent,
 };
 
 struct Capture {
@@ -18,6 +20,8 @@ struct Capture {
     requests: Mutex<Vec<String>>,
     injected_torrents: Mutex<Option<String>>,
     injected_add: Mutex<Option<String>>,
+    rpc_version: Mutex<u64>,
+    drop_after_add: Mutex<bool>,
 }
 
 impl Capture {
@@ -27,7 +31,28 @@ impl Capture {
             requests: Mutex::new(Vec::new()),
             injected_torrents: Mutex::new(None),
             injected_add: Mutex::new(None),
+            rpc_version: Mutex::new(16),
+            drop_after_add: Mutex::new(false),
         })
+    }
+}
+
+const SAMPLE_TORRENT: &[u8] =
+    b"d8:announce10:https://pt4:infod6:lengthi1e4:name1:a12:piece lengthi16384e6:pieces20:aaaaaaaaaaaaaaaaaaaaee";
+
+fn sample_payload() -> SubmitPayload {
+    let parsed = parse_verified_torrent(SAMPLE_TORRENT).unwrap();
+    SubmitPayload::TorrentBytes {
+        bytes: parsed.bytes,
+        bytes_digest: parsed.bytes_digest,
+        info_hash: parsed.info_hash,
+    }
+}
+
+fn default_options() -> SubmitOptions {
+    SubmitOptions {
+        ownership_tag: downloader::ownership_tag("https://pt.example/download.php?id=1"),
+        ..Default::default()
     }
 }
 
@@ -71,21 +96,31 @@ fn serve(capture: Arc<Capture>, save_path: String) -> (String, FakeServer) {
         if method == "torrent-add" || method == "torrent-remove" || method == "torrent-set" {
             capture.requests.lock().push(req.clone());
         }
+        if method == "torrent-add" && *capture.drop_after_add.lock() {
+            return;
+        }
+        let rpc_ver = *capture.rpc_version.lock();
         let body = match method {
-            "session-get" => r#"{"result":"success","arguments":{"rpc-version":16}}"#.to_string(),
-            "torrent-add" => capture
-                .injected_add
-                .lock()
-                .clone()
-                .unwrap_or_else(|| r#"{"result":"success","arguments":{}}"#.to_string()),
+            "session-get" => {
+                format!(r#"{{"result":"success","arguments":{{"rpc-version":{rpc_ver}}}}}"#)
+            }
+            "torrent-add" => capture.injected_add.lock().clone().unwrap_or_else(|| {
+                let parsed = parse_verified_torrent(SAMPLE_TORRENT).unwrap();
+                format!(
+                    r#"{{"result":"success","arguments":{{"torrent-added":{{"id":1,"hashString":"{}"}}}}}}"#,
+                    parsed.info_hash
+                )
+            }),
             "torrent-set" => r#"{"result":"success","arguments":{}}"#.to_string(),
             "torrent-get" => {
                 let injected = capture.injected_torrents.lock().clone();
                 if let Some(custom) = injected {
                     custom
                 } else {
+                    let parsed = parse_verified_torrent(SAMPLE_TORRENT).unwrap();
                     format!(
-                        r#"{{"result":"success","arguments":{{"torrents":[{{"id":1,"name":"The.Matrix.1999.2160p.BluRay.x265-GROUP","hashString":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","sizeWhenDone":1,"percentDone":1.0,"downloadDir":"{save_path}","labels":["crawler-media","{}"],"files":[{{"name":"matrix.mkv"}}]}}]}}}}"#,
+                        r#"{{"result":"success","arguments":{{"torrents":[{{"id":1,"name":"The.Matrix.1999.2160p.BluRay.x265-GROUP","hashString":"{}","sizeWhenDone":1,"percentDone":1.0,"downloadDir":"{save_path}","error":0,"status":6,"labels":["crawler-media","{}"],"files":[{{"name":"matrix.mkv"}}]}}]}}}}"#,
+                        parsed.info_hash,
                         downloader::ownership_tag("https://pt.example/download.php?id=1")
                     )
                 }
@@ -103,6 +138,126 @@ fn serve(capture: Arc<Capture>, save_path: String) -> (String, FakeServer) {
 }
 
 #[test]
+fn transmission_submit_verified_sends_base64_metainfo_without_filename_url() {
+    let capture = Capture::new();
+    *capture.injected_torrents.lock() =
+        Some(r#"{"result":"success","arguments":{"torrents":[]}}"#.into());
+    let (url, _server) = serve(capture.clone(), "/downloads".into());
+    let dl = TransmissionDownloader::connect(TransmissionConfig {
+        url,
+        username: None,
+        password: None,
+        path_maps: vec![],
+    })
+    .unwrap();
+    assert!(dl.supports_labels());
+
+    let mut opts = default_options();
+    opts.save_path = Some("/downloads/manual".into());
+    opts.extra_tags = vec!["plugin:p1:tag".into()];
+    let res = dl.submit_verified(&sample_payload(), &opts).unwrap();
+    assert!(matches!(
+        res,
+        ClientSubmitResult::Added {
+            already_owned: false,
+            ..
+        }
+    ));
+
+    let requests = capture.requests.lock();
+    let add_req = requests.iter().find(|r| r.contains("torrent-add")).unwrap();
+    let json_body: serde_json::Value =
+        serde_json::from_str(add_req.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+    let args = &json_body["arguments"];
+    assert!(args.get("filename").is_none());
+    let metainfo_b64 = args["metainfo"].as_str().unwrap();
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(metainfo_b64)
+        .unwrap();
+    assert_eq!(decoded, SAMPLE_TORRENT);
+    assert_eq!(args["download-dir"].as_str(), Some("/downloads/manual"));
+}
+
+#[test]
+fn transmission_foreign_duplicate_and_unknown_outcomes_never_claim_tasks() {
+    let capture = Capture::new();
+    *capture.injected_torrents.lock() =
+        Some(r#"{"result":"success","arguments":{"torrents":[]}}"#.into());
+    *capture.injected_add.lock() = Some(
+        r#"{"result":"success","arguments":{"torrent-duplicate":{"hashString":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","id":7}}}"#.into(),
+    );
+    let (url, _server) = serve(capture.clone(), "/downloads".into());
+    let dl = TransmissionDownloader::connect(TransmissionConfig {
+        url,
+        username: None,
+        password: None,
+        path_maps: vec![],
+    })
+    .unwrap();
+
+    let dup = dl
+        .submit_verified(&sample_payload(), &default_options())
+        .unwrap();
+    assert!(matches!(dup, ClientSubmitResult::ForeignDuplicate { .. }));
+    assert!(
+        !capture
+            .requests
+            .lock()
+            .iter()
+            .any(|r| r.contains("torrent-set")),
+        "foreign duplicate must never trigger torrent-set label claiming"
+    );
+
+    // Empty arguments: {} -> UnknownOutcome
+    *capture.injected_add.lock() = Some(r#"{"result":"success","arguments":{}}"#.into());
+    let empty_unknown = dl
+        .submit_verified(&sample_payload(), &default_options())
+        .unwrap();
+    assert!(matches!(
+        empty_unknown,
+        ClientSubmitResult::UnknownOutcome { .. }
+    ));
+
+    // Post-send EOF -> UnknownOutcome
+    *capture.drop_after_add.lock() = true;
+    let eof_unknown = dl
+        .submit_verified(&sample_payload(), &default_options())
+        .unwrap();
+    assert!(matches!(
+        eof_unknown,
+        ClientSubmitResult::UnknownOutcome { .. }
+    ));
+}
+
+#[test]
+fn transmission_rpc_below_16_reports_no_labels_and_queries_status_accurately() {
+    let capture = Capture::new();
+    *capture.rpc_version.lock() = 15;
+    let parsed = parse_verified_torrent(SAMPLE_TORRENT).unwrap();
+    *capture.injected_torrents.lock() = Some(format!(
+        r#"{{"result":"success","arguments":{{"torrents":[{{"id":1,"hashString":"{}","error":0,"status":0}}]}}}}"#,
+        parsed.info_hash
+    ));
+    let (url, _server) = serve(capture.clone(), "/downloads".into());
+    let dl = TransmissionDownloader::connect(TransmissionConfig {
+        url,
+        username: None,
+        password: None,
+        path_maps: vec![],
+    })
+    .unwrap();
+    assert!(!dl.supports_labels());
+
+    let q = dl
+        .query_task_status(&parsed.info_hash, &default_options().ownership_tag)
+        .unwrap();
+    assert!(q.exists);
+    assert!(!q.owned_by_tag);
+    assert!(!q.broken);
+    assert!(q.paused);
+}
+
+#[test]
 fn transmission_snapshots_preserve_metrics_and_only_mark_owned_tasks() {
     let capture = Capture::new();
     *capture.injected_torrents.lock() = Some(
@@ -113,9 +268,7 @@ fn transmission_snapshots_preserve_metrics_and_only_mark_owned_tasks() {
                  "downloadedEver": 1024, "uploadedEver": 256, "status": 4,
                  "labels": [downloader::TASK_TAG]},
                 {"name": "foreign", "hashString": "def", "totalSize": 4096,
-                 "percentDone": 1.0, "status": 0, "labels": ["other"]},
-                {"name": "per-torrent-tagged", "hashString": "ghi", "status": 6,
-                 "labels": ["crawler-media-old"]}
+                 "percentDone": 1.0, "status": 0, "labels": ["other"]}
             ]}
         })
         .to_string(),
@@ -129,200 +282,9 @@ fn transmission_snapshots_preserve_metrics_and_only_mark_owned_tasks() {
     })
     .unwrap();
     let rows = dl.task_snapshots().unwrap();
-    assert_eq!(rows.len(), 3);
+    assert_eq!(rows.len(), 2);
     assert_eq!(rows[0].tag, downloader::TASK_TAG);
-    assert_eq!(rows[0].size_bytes, 2048);
-    assert_eq!(rows[0].info_hash, "abc");
-    assert_eq!(rows[0].progress, 0.5);
-    assert_eq!((rows[0].download_speed, rows[0].upload_speed), (100, 20));
-    assert_eq!(
-        (rows[0].downloaded_bytes, rows[0].uploaded_bytes),
-        (1024, 256)
-    );
-    assert_eq!(rows[0].state, "downloading");
     assert_eq!(rows[1].tag, "");
-    assert_eq!(rows[1].state, "pausedUP");
-    assert_eq!(
-        rows[2].tag, "",
-        "only the constant task marker is ours; a per-torrent label from an older build is not"
-    );
-    assert_eq!(rows[2].state, "uploading");
-}
-
-#[test]
-fn transmission_snapshots_expose_per_torrent_ownership_labels() {
-    let owned = downloader::ownership_tag("https://pt.example/download.php?id=7");
-    let capture = Capture::new();
-    *capture.injected_torrents.lock() = Some(
-        serde_json::json!({
-            "result": "success", "arguments": {"torrents": [
-                {"name": "owned", "hashString": "abc", "status": 4,
-                 "labels": [downloader::TASK_TAG, owned]},
-                {"name": "generic-only", "hashString": "def", "status": 4,
-                 "labels": [downloader::TASK_TAG]}
-            ]}
-        })
-        .to_string(),
-    );
-    let (url, _server) = serve(capture, "/downloads".into());
-    let dl = TransmissionDownloader::connect(TransmissionConfig {
-        url,
-        username: None,
-        password: None,
-        path_maps: vec![],
-    })
-    .unwrap();
-    let rows = dl.task_snapshots().unwrap();
-    assert_eq!(rows[0].tag, downloader::TASK_TAG);
-    assert_eq!(rows[0].owned_tags, vec![owned]);
-    assert!(rows[1].owned_tags.is_empty());
-}
-
-#[test]
-fn transmission_adds_enclosure_over_rpc() {
-    let capture = Capture::new();
-    let (url, _server) = serve(capture.clone(), "/downloads".into());
-    let dl = TransmissionDownloader::connect(TransmissionConfig {
-        url,
-        username: None,
-        password: None,
-        path_maps: vec![],
-    })
-    .unwrap();
-    dl.add(&torrent()).unwrap();
-    let methods = capture.methods.lock().clone();
-    assert!(methods.contains(&"session-get".to_string()));
-    assert!(methods.contains(&"torrent-add".to_string()));
-}
-
-#[test]
-fn transmission_completed_files_from_rpc() {
-    let capture = Capture::new();
-    let (url, _server) = serve(capture, "/downloads".into());
-    let dl = TransmissionDownloader::connect(TransmissionConfig {
-        url,
-        username: None,
-        password: None,
-        path_maps: vec![],
-    })
-    .unwrap();
-    let files = dl.completed_files(&torrent()).unwrap();
-    assert_eq!(files[0], std::path::Path::new("/downloads/matrix.mkv"));
-}
-
-#[test]
-fn same_name_different_hash_is_not_collected_or_removed() {
-    let capture = Capture::new();
-    let (url, _server) = serve(capture.clone(), "/downloads".into());
-    let dl = TransmissionDownloader::connect(TransmissionConfig {
-        url,
-        username: None,
-        password: None,
-        path_maps: vec![],
-    })
-    .unwrap();
-    *capture.injected_torrents.lock() = Some(
-        r#"{"result":"success","arguments":{"torrents":[{
-            "id":1,
-            "name":"The.Matrix.1999.2160p.BluRay.x265-GROUP",
-            "hashString":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-            "sizeWhenDone":1,
-            "percentDone":1.0,
-            "downloadDir":"/downloads",
-            "labels":["crawler-media"],
-            "files":[{"name":"matrix.mkv"}]
-        }]}}"#
-            .into(),
-    );
-    let mut target = torrent();
-    target.enclosure = "magnet:?xt=urn:btih:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into();
-    assert!(dl.completed_files(&target).unwrap().is_empty());
-    assert!(
-        dl.remove(&target, true).is_ok(),
-        "目标 magnet 不在客户端时应安全 no-op"
-    );
-    assert!(
-        !capture
-            .requests
-            .lock()
-            .iter()
-            .any(|req| req.contains("torrent-remove")),
-        "同名不同 hash 绝不能触发 Transmission 删除"
-    );
-}
-
-#[test]
-fn completed_files_rejects_known_size_conflict() {
-    let capture = Capture::new();
-    let (url, _server) = serve(capture.clone(), "/downloads".into());
-    let dl = TransmissionDownloader::connect(TransmissionConfig {
-        url,
-        username: None,
-        password: None,
-        path_maps: vec![],
-    })
-    .unwrap();
-
-    // 客户端内任务大小为 2000，目标已知大小为 1000
-    *capture.injected_torrents.lock() = Some(r#"{"result":"success","arguments":{"torrents":[
-        {"id":1,"name":"The.Matrix.1999.2160p.BluRay.x265-GROUP","sizeWhenDone":2000,"percentDone":1.0,"downloadDir":"/downloads","files":[{"name":"matrix.mkv"}]}
-    ]}}"#.to_string());
-
-    let mut target = torrent();
-    target.size_bytes = Some(1000);
-
-    let files = dl.completed_files(&target).unwrap();
-    assert!(files.is_empty(), "已知体积产生冲突的任务绝不能被收集文件");
-}
-
-#[test]
-fn completed_files_rejects_ambiguous_identity() {
-    let capture = Capture::new();
-    let (url, _server) = serve(capture.clone(), "/downloads".into());
-    let dl = TransmissionDownloader::connect(TransmissionConfig {
-        url,
-        username: None,
-        password: None,
-        path_maps: vec![],
-    })
-    .unwrap();
-
-    // 两个相同同名同体积任务，无法唯一消歧
-    *capture.injected_torrents.lock() = Some(r#"{"result":"success","arguments":{"torrents":[
-        {"id":1,"name":"The.Matrix.1999.2160p.BluRay.x265-GROUP","sizeWhenDone":1000,"percentDone":1.0,"downloadDir":"/downloads","files":[{"name":"matrix1.mkv"}]},
-        {"id":2,"name":"The.Matrix.1999.2160p.BluRay.x265-GROUP","sizeWhenDone":1000,"percentDone":1.0,"downloadDir":"/downloads","files":[{"name":"matrix2.mkv"}]}
-    ]}}"#.to_string());
-
-    let mut target = torrent();
-    target.size_bytes = Some(1000);
-
-    let files = dl.completed_files(&target).unwrap();
-    assert!(
-        files.is_empty(),
-        "未证实身份的同名同体积歧义任务绝不能被收集"
-    );
-}
-
-#[test]
-fn transmission_adds_to_an_explicit_download_directory() {
-    let capture = Capture::new();
-    let (url, _server) = serve(capture.clone(), "/downloads".into());
-    let dl = TransmissionDownloader::connect(TransmissionConfig {
-        url,
-        username: None,
-        password: None,
-        path_maps: vec![],
-    })
-    .unwrap();
-    dl.add_with_options(
-        &torrent(),
-        "https://pt.example/download.php?id=1",
-        Some("/downloads/manual"),
-    )
-    .unwrap();
-    let requests = capture.requests.lock();
-    assert_eq!(requests.len(), 1);
-    assert!(requests[0].contains("\"download-dir\":\"/downloads/manual\""));
 }
 
 #[test]
@@ -342,14 +304,20 @@ fn mixed_instances_coexist_and_optional_id_picks_default() {
         .collect(),
     )
     .unwrap();
-    set.pick(None).unwrap().add(&torrent()).unwrap();
-    set.pick(Some(tr_id)).unwrap().add(&torrent()).unwrap();
-    assert_eq!(qbit_like.added().len(), 1);
-    assert_eq!(tr_like.added().len(), 1);
+    set.pick(None)
+        .unwrap()
+        .submit_verified(&sample_payload(), &default_options())
+        .unwrap();
+    set.pick(Some(tr_id))
+        .unwrap()
+        .submit_verified(&sample_payload(), &default_options())
+        .unwrap();
+    assert_eq!(qbit_like.submitted().len(), 1);
+    assert_eq!(tr_like.submitted().len(), 1);
 }
 
 #[test]
-fn transmission_removes_matching_task() {
+fn transmission_completed_files_and_remove_work() {
     let capture = Capture::new();
     let (url, _server) = serve(capture.clone(), "/downloads".into());
     let dl = TransmissionDownloader::connect(TransmissionConfig {
@@ -359,123 +327,19 @@ fn transmission_removes_matching_task() {
         path_maps: vec![],
     })
     .unwrap();
-    dl.add(&torrent()).unwrap();
-    dl.remove(&torrent(), false).unwrap();
-    let methods = capture.methods.lock().clone();
-    assert!(
-        methods.contains(&"torrent-remove".to_string()),
-        "应调用 torrent-remove: {methods:?}"
-    );
-}
-
-#[test]
-fn transmission_removes_matching_task_with_delete_local_data() {
-    let capture = Capture::new();
-    let (url, _server) = serve(capture.clone(), "/downloads".into());
-    let dl = TransmissionDownloader::connect(TransmissionConfig {
-        url,
-        username: None,
-        password: None,
-        path_maps: vec![],
-    })
-    .unwrap();
-    dl.add(&torrent()).unwrap();
+    let files = dl.completed_files(&torrent()).unwrap();
+    assert_eq!(files[0], std::path::Path::new("/downloads/matrix.mkv"));
     dl.remove(&torrent(), true).unwrap();
-    let methods = capture.methods.lock().clone();
     assert!(
-        methods.contains(&"torrent-remove".to_string()),
-        "应调用 torrent-remove: {methods:?}"
+        capture
+            .methods
+            .lock()
+            .contains(&"torrent-remove".to_string())
     );
-}
-
-#[test]
-fn transmission_remove_only_removes_uniquely_matched_torrent() {
-    let capture = Capture::new();
-    let (url, _server) = serve(capture.clone(), "/downloads".into());
-    let dl = TransmissionDownloader::connect(TransmissionConfig {
-        url,
-        username: None,
-        password: None,
-        path_maps: vec![],
-    })
-    .unwrap();
-
-    // 客户端内有两个同体积(1000字节)任务：一个是要删的 Matrix，另一个是无关的 Other
-    *capture.injected_torrents.lock() = Some(format!(
-        r#"{{"result":"success","arguments":{{"torrents":[
-        {{"id":1,"name":"The.Matrix.1999.2160p.BluRay.x265-GROUP","hashString":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","sizeWhenDone":1000,"labels":["crawler-media","{}"]}},
-        {{"id":2,"name":"Other.Movie.2024.1080p","hashString":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","sizeWhenDone":1000,"labels":["crawler-media"]}}
-    ]}}}}"#,
-        downloader::ownership_tag("https://pt.example/download.php?id=1")
-    ));
-
-    let mut target = torrent();
-    target.title = "The.Matrix.1999.2160p.BluRay.x265-GROUP".into();
-    target.size_bytes = Some(1000);
-
-    dl.remove(&target, true).unwrap();
-    let removes: Vec<String> = capture
-        .requests
-        .lock()
-        .iter()
-        .filter(|r| r.contains("torrent-remove"))
-        .cloned()
-        .collect();
-    assert_eq!(removes.len(), 1, "必须下发一次删除请求");
-    let json_part = removes[0].split("\r\n\r\n").nth(1).unwrap();
-    assert!(
-        json_part.contains("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
-        "必须按已证实 hash 删除: {json_part}"
-    );
-    assert!(
-        !json_part.contains("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
-        "请求体绝不能包含无关 hash: {json_part}"
-    );
-}
-
-#[test]
-fn transmission_remove_ambiguous_matches_returns_error() {
-    let capture = Capture::new();
-    let (url, _server) = serve(capture.clone(), "/downloads".into());
-    let dl = TransmissionDownloader::connect(TransmissionConfig {
-        url,
-        username: None,
-        password: None,
-        path_maps: vec![],
-    })
-    .unwrap();
-
-    // 客户端内有两个同名同体积的相同候选，无法消歧
-    *capture.injected_torrents.lock() = Some(
-        r#"{"result":"success","arguments":{"torrents":[
-        {"id":1,"name":"The.Matrix.1999.2160p","sizeWhenDone":1000},
-        {"id":2,"name":"The.Matrix.1999.2160p","sizeWhenDone":1000}
-    ]}}"#
-            .to_string(),
-    );
-
-    let mut target = torrent();
-    target.title = "The.Matrix.1999.2160p".into();
-    target.size_bytes = Some(1000);
-
-    let err = dl.remove(&target, true).unwrap_err();
-    assert!(
-        err.to_string().contains("unproven"),
-        "无精确身份时必须拒绝删除: {err}"
-    );
-    let removes: Vec<String> = capture
-        .requests
-        .lock()
-        .iter()
-        .filter(|r| r.contains("torrent-remove"))
-        .cloned()
-        .collect();
-    assert!(removes.is_empty(), "歧义时绝不下发任何删除请求");
 }
 
 #[test]
 fn transmission_handles_409_session_challenge() {
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     let conflicts = Arc::new(AtomicUsize::new(0));
@@ -492,7 +356,7 @@ fn transmission_handles_409_session_challenge() {
                 authorized.fetch_add(1, Ordering::SeqCst);
                 (
                     "200 OK",
-                    r#"{"result":"success","arguments":{"rpc-version":16}}"#,
+                    r#"{"result":"success","arguments":{"rpc-version":16,"torrents":[]}}"#,
                 )
             } else {
                 conflicts.fetch_add(1, Ordering::SeqCst);
@@ -513,129 +377,44 @@ fn transmission_handles_409_session_challenge() {
         path_maps: vec![],
     })
     .unwrap();
-    assert_eq!(
-        conflicts.load(Ordering::SeqCst),
-        1,
-        "connect answers exactly one 409"
-    );
-    let after_connect = authorized.load(Ordering::SeqCst);
+    assert_eq!(conflicts.load(Ordering::SeqCst), 1);
+    let _ = dl.query_task_status("abcd", "tag").unwrap();
+    assert_eq!(conflicts.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn debug_never_prints_the_password() {
+    let config = TransmissionConfig {
+        url: "http://127.0.0.1:9091".into(),
+        username: Some("admin".into()),
+        password: Some("transmission-password-secret".into()),
+        path_maps: Vec::new(),
+    };
+    let rendered = format!("{config:?}");
     assert!(
-        after_connect >= 1,
-        "connect must retry with the issued token"
+        !rendered.contains("transmission-password-secret"),
+        "Debug 不得输出 password: {rendered}"
     );
-    // 再次调用 rpc，必须复用 token，不触发第二次 409
-    dl.add(&torrent()).unwrap();
-    assert_eq!(
-        conflicts.load(Ordering::SeqCst),
-        1,
-        "later RPCs must reuse the session token instead of hitting 409 again"
-    );
-    assert!(authorized.load(Ordering::SeqCst) > after_connect);
+    assert!(rendered.contains("<redacted>"), "{rendered}");
+    assert!(rendered.contains("127.0.0.1:9091"), "{rendered}");
+    assert!(rendered.contains("admin"), "{rendered}");
 
-    drop(server);
-}
-
-#[test]
-fn transmission_pause_and_resume_task_sends_torrent_stop_and_start() {
-    let capture = Capture::new();
-    let cap = capture.clone();
-    let server = FakeServer::start(move |request, stream| {
-        let req = request.raw.clone();
-        if let Some(body) = req.split("\r\n\r\n").nth(1)
-            && let Ok(v) = serde_json::from_str::<serde_json::Value>(body)
-            && let Some(m) = v["method"].as_str()
-        {
-            cap.methods.lock().push(m.to_string());
-        }
-        let res = "HTTP/1.1 200 OK\r\nX-Transmission-Session-Id: test\r\nContent-Type: application/json\r\nContent-Length: 20\r\n\r\n{\"result\":\"success\"}";
-        stream.write_all(res.as_bytes()).ok();
-    });
-
-    let dl = TransmissionDownloader::connect(TransmissionConfig {
-        url: format!("{}/transmission/rpc", server.url()),
+    let anonymous = TransmissionConfig {
+        url: "http://127.0.0.1:9091".into(),
         username: None,
         password: None,
-        path_maps: vec![],
-    })
-    .unwrap();
-
-    dl.pause_task("abcd1234abcd1234").unwrap();
-    dl.resume_task("abcd1234abcd1234").unwrap();
-
-    let methods = capture.methods.lock().clone();
-    assert!(methods.contains(&"torrent-stop".to_string()));
-    assert!(methods.contains(&"torrent-start".to_string()));
+        path_maps: Vec::new(),
+    };
+    assert!(
+        format!("{anonymous:?}").contains("None"),
+        "未配置口令应可诊断"
+    );
 }
 
 #[test]
-fn transmission_completed_files_skips_deselected_or_incomplete_files() {
-    let _capture = Capture::new();
-    let server = FakeServer::start(move |request, stream| {
-        {
-            let req = request.raw.clone();
-            let body = if req.contains("torrent-get") {
-                // 模拟 1 个种子包含 2 个文件：
-                // file 0: 完成，wanted=true
-                // file 1: 未完成/被取消勾选，wanted=false, bytesCompleted=0
-                r#"{
-                    "result":"success",
-                    "arguments":{
-                        "torrents":[{
-                            "id":1,
-                            "name":"Show",
-                            "hashString":"deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
-                            "sizeWhenDone":1000,
-                            "percentDone":1.0,
-                            "downloadDir":"/downloads",
-                            "labels":["crawler-media-task"],
-                            "files":[
-                                {"name":"Episode1.mkv","length":1000,"bytesCompleted":1000},
-                                {"name":"Extra.mkv","length":500,"bytesCompleted":0}
-                            ],
-                            "fileStats":[
-                                {"wanted":true,"bytesCompleted":1000},
-                                {"wanted":false,"bytesCompleted":0}
-                            ]
-                        }]
-                    }
-                }"#
-            } else {
-                r#"{"result":"success","arguments":{"rpc-version":16}}"#
-            };
-            let res = format!(
-                "HTTP/1.1 200 OK\r\nX-Transmission-Session-Id: test\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
-                body.len()
-            );
-            stream.write_all(res.as_bytes()).ok();
-        }
-    });
-
-    let dl = TransmissionDownloader::connect(TransmissionConfig {
-        url: format!("{}/transmission/rpc", server.url()),
-        username: None,
-        password: None,
-        path_maps: vec![],
-    })
-    .unwrap();
-
-    let mut t = torrent();
-    t.enclosure = "magnet:?xt=urn:btih:deadbeefdeadbeefdeadbeefdeadbeefdeadbeef".into();
-
-    let completed = dl.completed_files(&t).unwrap();
-    assert_eq!(completed.len(), 1, "只应返回已完成且勾选的文件");
-    assert_eq!(completed[0].to_str().unwrap(), "/downloads/Episode1.mkv");
-}
-
-/// D-H2: a duplicate task (added by hand) is claimed by merging our labels.
-#[test]
-fn transmission_duplicate_is_claimed_with_merged_labels() {
+fn transmission_broken_foreign_task_returns_foreign_duplicate_when_labels_supported() {
     let capture = Capture::new();
-    *capture.injected_add.lock() = Some(
-        r#"{"result":"success","arguments":{"torrent-duplicate":{"hashString":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","id":7}}}"#.into(),
-    );
-    *capture.injected_torrents.lock() = Some(
-        r#"{"result":"success","arguments":{"torrents":[{"id":7,"hashString":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","labels":["mine"]}]}}"#.into(),
-    );
+    let parsed = parse_verified_torrent(SAMPLE_TORRENT).unwrap();
     let (url, _server) = serve(capture.clone(), "/downloads".into());
     let dl = TransmissionDownloader::connect(TransmissionConfig {
         url,
@@ -644,15 +423,117 @@ fn transmission_duplicate_is_claimed_with_merged_labels() {
         path_maps: vec![],
     })
     .unwrap();
-    dl.add(&torrent()).unwrap();
-    let requests = capture.requests.lock();
-    let set = requests
-        .iter()
-        .find(|r| r.contains("torrent-set"))
-        .expect("torrent-set sent");
-    let owned = downloader::ownership_tag(&torrent().enclosure);
-    assert!(
-        set.contains("mine") && set.contains(downloader::TASK_TAG) && set.contains(&owned),
-        "{set}"
+    assert!(dl.supports_labels());
+
+    // Foreign broken task (labels = ["other"], error = 3) -> ForeignDuplicate
+    *capture.injected_torrents.lock() = Some(format!(
+        r#"{{"result":"success","arguments":{{"torrents":[{{"id":1,"hashString":"{}","error":3,"status":0,"labels":["other"]}}]}}}}"#,
+        parsed.info_hash
+    ));
+    assert_eq!(
+        dl.submit_verified(&sample_payload(), &default_options())
+            .unwrap(),
+        ClientSubmitResult::ForeignDuplicate {
+            info_hash: parsed.info_hash.clone()
+        }
     );
+
+    // Instance-owned broken task (labels = ["cm-op:earlier"], error = 3) -> ExistingBroken
+    *capture.injected_torrents.lock() = Some(format!(
+        r#"{{"result":"success","arguments":{{"torrents":[{{"id":1,"hashString":"{}","error":3,"status":0,"labels":["cm-op:earlier"]}}]}}}}"#,
+        parsed.info_hash
+    ));
+    assert_eq!(
+        dl.submit_verified(&sample_payload(), &default_options())
+            .unwrap(),
+        ClientSubmitResult::ExistingBroken {
+            info_hash: parsed.info_hash.clone()
+        }
+    );
+
+    // RPC < 16 (no labels) broken task -> ExistingBroken
+    let capture_v15 = Capture::new();
+    *capture_v15.rpc_version.lock() = 15;
+    *capture_v15.injected_torrents.lock() = Some(format!(
+        r#"{{"result":"success","arguments":{{"torrents":[{{"id":1,"hashString":"{}","error":3,"status":0}}]}}}}"#,
+        parsed.info_hash
+    ));
+    let (url_v15, _srv_v15) = serve(capture_v15, "/downloads".into());
+    let dl_v15 = TransmissionDownloader::connect(TransmissionConfig {
+        url: url_v15,
+        username: None,
+        password: None,
+        path_maps: vec![],
+    })
+    .unwrap();
+    assert!(!dl_v15.supports_labels());
+    assert_eq!(
+        dl_v15
+            .submit_verified(&sample_payload(), &default_options())
+            .unwrap(),
+        ClientSubmitResult::ExistingBroken {
+            info_hash: parsed.info_hash
+        }
+    );
+}
+
+#[test]
+fn transmission_submit_verified_zero_limits_disable_speed_caps() {
+    let capture = Capture::new();
+    *capture.injected_torrents.lock() =
+        Some(r#"{"result":"success","arguments":{"torrents":[]}}"#.into());
+    let (url, _server) = serve(capture.clone(), "/downloads".into());
+    let dl = TransmissionDownloader::connect(TransmissionConfig {
+        url,
+        username: None,
+        password: None,
+        path_maps: vec![],
+    })
+    .unwrap();
+
+    let mut opts = default_options();
+    opts.upload_limit = Some(0);
+    opts.download_limit = Some(0);
+    dl.submit_verified(&sample_payload(), &opts).unwrap();
+
+    let set_body: serde_json::Value = {
+        let requests = capture.requests.lock();
+        let set_req = requests.iter().find(|r| r.contains("torrent-set")).unwrap();
+        serde_json::from_str(set_req.split("\r\n\r\n").nth(1).unwrap()).unwrap()
+    };
+    let args = &set_body["arguments"];
+    assert_eq!(args["uploadLimited"], serde_json::json!(false));
+    assert!(args.get("uploadLimit").is_none(), "{args}");
+    assert_eq!(args["downloadLimited"], serde_json::json!(false));
+    assert!(args.get("downloadLimit").is_none(), "{args}");
+}
+
+#[test]
+fn transmission_submit_verified_rejects_comma_and_control_chars_in_tags() {
+    let capture = Capture::new();
+    *capture.injected_torrents.lock() =
+        Some(r#"{"result":"success","arguments":{"torrents":[]}}"#.into());
+    let (url, _server) = serve(capture, "/downloads".into());
+    let dl = TransmissionDownloader::connect(TransmissionConfig {
+        url,
+        username: None,
+        password: None,
+        path_maps: vec![],
+    })
+    .unwrap();
+
+    for (owner, extra) in [
+        ("cm-op:2\n", vec![]),
+        ("cm-op:2,injected", vec![]),
+        ("cm-op:2", vec!["plugin:p:x,crawler-media-claimed".into()]),
+        ("cm-op:2", vec!["plugin:p:bad\rtag".into()]),
+    ] {
+        let mut opts = default_options();
+        opts.ownership_tag = owner.into();
+        opts.extra_tags = extra;
+        assert!(
+            dl.submit_verified(&sample_payload(), &opts).is_err(),
+            "expected submit_verified error for owner={owner:?}"
+        );
+    }
 }

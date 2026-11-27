@@ -24,9 +24,10 @@ impl RetryFixture {
             library_root: &self.root, library_id: Some(domain::LibraryId::new()),
             root_id: Some("test-root".into()), config_revision: None,
             transfer_mode: Some(library::TransferMode::Copy),
-            scrape: false, hooks: None, naming: Some(&self.naming), preserve_removed: true,
+            scrape: false, hooks: None, policy_hooks: None, submitter: None, naming: Some(&self.naming), preserve_removed: true,
             overlap: Default::default(),
             absolute: None,
+            renamed_destinations: Default::default(),
         };
         let added = make_added(input, self.torrent.clone(), release::parse(&self.torrent.title));
         collect_completed_with_destinations(added, &library::Ffprobe::default(), mappings).unwrap()

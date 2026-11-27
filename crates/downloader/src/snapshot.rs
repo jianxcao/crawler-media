@@ -25,17 +25,72 @@ pub struct TaskSnapshot {
     pub owned_tags: Vec<String>,
 }
 
-/// Collect `crawler-media-owned-*` ownership tags from client tag/label values.
+/// Collect `crawler-media-owned-*` and `cm-op:*` ownership tags from client tag/label values.
 pub fn owned_tags_from<'a>(tags: impl IntoIterator<Item = &'a str>) -> Vec<String> {
     tags.into_iter()
         .map(str::trim)
-        .filter(|tag| tag.starts_with(OWNED_TAG_PREFIX))
+        .filter(|tag| tag.starts_with(OWNED_TAG_PREFIX) || tag.starts_with("cm-op:"))
         .map(str::to_string)
         .collect()
 }
 
+/// Validate a downloader category name against control characters and path traversal.
+/// Empty `""` is allowed (clears category assignment in qBittorrent).
+pub fn validate_category_name(category: &str) -> Result<(), &'static str> {
+    if category.is_empty() {
+        return Ok(());
+    }
+    if category.trim() != category || category.chars().any(char::is_control) {
+        return Err("download category contains leading/trailing whitespace or control characters");
+    }
+    if category.contains('\\')
+        || category.starts_with('/')
+        || category.ends_with('/')
+        || category.contains("//")
+    {
+        return Err(
+            "download category must be a clean relative name without backslashes or leading/trailing slashes",
+        );
+    }
+    for seg in category.split('/') {
+        if seg.is_empty()
+            || seg.trim() != seg
+            || seg == "."
+            || seg == ".."
+            || seg.as_bytes().get(1) == Some(&b':')
+        {
+            return Err("download category contains path traversal or drive prefix");
+        }
+    }
+    Ok(())
+}
+
+/// Whether a single client tag/label proves the task belongs to this crawler-media instance.
+pub(crate) fn is_instance_owned_tag(tag: &str, ownership_tag: &str) -> bool {
+    let t = tag.trim();
+    if t.is_empty() {
+        return false;
+    }
+    let expected = ownership_tag.trim();
+    (!expected.is_empty() && t == expected)
+        || t == TASK_TAG
+        || t.starts_with("cm-op:")
+        || t.starts_with(OWNED_TAG_PREFIX)
+}
+
 /// Prefix of [`crate::ownership_tag`] values.
 pub const OWNED_TAG_PREFIX: &str = "crawler-media-owned-";
+
+/// Whether `tag` uses any reserved host/system tag or namespace prefix.
+pub fn is_reserved_system_tag(tag: &str) -> bool {
+    let t = tag.trim();
+    t == TASK_TAG
+        || t == CLAIMED_TAG
+        || t.starts_with("crawler-media-")
+        || t.starts_with("cm-")
+        || t.starts_with("cm:")
+        || t.starts_with("cm_")
+}
 
 /// The one tag every crawler-media delivery carries inside a download client.
 ///

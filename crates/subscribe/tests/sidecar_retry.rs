@@ -9,8 +9,15 @@ struct MockDownloader {
 }
 
 impl Downloader for MockDownloader {
-    fn add(&self, _torrent: &Torrent) -> Result<(), DownloaderError> {
-        Ok(())
+    fn submit_verified(
+        &self,
+        payload: &downloader::SubmitPayload,
+        _options: &downloader::SubmitOptions,
+    ) -> Result<downloader::ClientSubmitResult, DownloaderError> {
+        Ok(downloader::ClientSubmitResult::Added {
+            already_owned: false,
+            info_hash: payload.info_hash().to_string(),
+        })
     }
     fn remove(&self, _torrent: &Torrent, _delete_files: bool) -> Result<(), DownloaderError> {
         Ok(())
@@ -106,7 +113,14 @@ fn make_added<'a>(
             collection_errors: vec![],
             submission_errors: vec![],
             torrents_added: vec![],
+            deferred_enclosures: vec![],
+            unknown_enclosures: vec![],
+            submitted_meta: Default::default(),
         },
         broken: Vec::new(),
+        deferred: Vec::new(),
+        select_deferred: Vec::new(),
+        unknown: Vec::new(),
+        submitted_meta: Default::default(),
     }
 }

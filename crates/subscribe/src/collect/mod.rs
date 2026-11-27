@@ -1,3 +1,4 @@
+mod plan;
 mod recover;
 mod select;
 mod transfer;
@@ -11,6 +12,7 @@ use library::MediaProbe;
 use crate::add::Added;
 use crate::choose::is_complete;
 use crate::{RunOutcome, SubscribeError};
+pub use plan::plan_torrent_destinations;
 use select::{collect_scored_torrent, reconcile_mapping_facts};
 
 /// Durable final-path reservation around filesystem publication. Implementations
@@ -119,5 +121,8 @@ pub fn collect_completed_recorded<D: Downloader + ?Sized>(
         collection_errors: output.collection_errors,
         submission_errors: added.add_errors,
         torrents_added: added.outcome.torrents_added,
+        deferred_enclosures: added.outcome.deferred_enclosures,
+        unknown_enclosures: added.outcome.unknown_enclosures,
+        submitted_meta: added.submitted_meta,
     })
 }

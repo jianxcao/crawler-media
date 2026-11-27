@@ -54,8 +54,9 @@ pub use tracks::{
 };
 pub use watch::{
     FileError, ScanIssue, ScanReport, ScanRootReport, ScanRootStatus, TransferredFile,
-    Unidentified, VIDEO_EXTENSIONS, WatchJob, WatchKind, WatchOutcome, is_video_file, scan_watch,
-    scan_watch_intake_controlled, scan_watch_reported,
+    Unidentified, VIDEO_EXTENSIONS, WatchIntakeCandidate, WatchJob, WatchKind, WatchOutcome,
+    is_video_file, plan_watch_intake_candidates, scan_watch, scan_watch_intake_controlled,
+    scan_watch_intake_controlled_with_destinations, scan_watch_reported,
 };
 pub use watch::{ScanChunk, ScanWalkBudget, ScanWalker};
 

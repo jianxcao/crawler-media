@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use domain::{AtomRule, Filter, FilterAtom, FilterId, Site, SiteId, Torrent};
-use indexer::{FetchRequest, Fetcher, Indexer, IndexerError, ProfileSet};
+use indexer::{FetchRequest, Fetcher, Indexer, IndexerError, RegistrySnapshot};
 
 fn demo_site() -> Site {
     Site {
@@ -18,6 +18,8 @@ fn demo_site() -> Site {
         downloader_id: None,
         enabled: true,
         maintenance_via: domain::MaintenanceVia::Http,
+        browser_search: false,
+        timezone: "UTC".into(),
     }
 }
 
@@ -33,7 +35,7 @@ fn search_demo() -> Vec<Torrent> {
     let site = demo_site();
     let html = include_str!("../../indexer/tests/fixtures/nexusphp.html");
     let indexer = Indexer::new(
-        ProfileSet::load(None).unwrap(),
+        RegistrySnapshot::builtin().unwrap(),
         Arc::new(Injected(html.to_string())),
     );
     let outcome = indexer.search(&[site], "matrix");

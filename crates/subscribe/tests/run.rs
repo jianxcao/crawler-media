@@ -1,3 +1,6 @@
+#[path = "test_submitter/mod.rs"]
+mod test_submitter;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -6,9 +9,9 @@ use domain::{
     Subscribe, SubscribeId, Torrent, UserId,
 };
 use domain::{QualityFact, SubscribeFacts};
-use downloader::MemoryDownloader;
 use library::{FileQuality, MediaProbe, TransferMode};
 use subscribe::{RunInput, run, run_with_probe};
+use test_submitter::TestMemoryDownloader as MemoryDownloader;
 
 struct FixedProbe;
 
@@ -190,9 +193,12 @@ fn run_input<'a>(
         transfer_mode: Some(TransferMode::Copy),
         scrape: false,
         hooks: None,
+        policy_hooks: None,
+        submitter: Some(downloader),
         naming: None,
         preserve_removed: false,
         overlap: Default::default(),
         absolute: None,
+        renamed_destinations: Default::default(),
     }
 }

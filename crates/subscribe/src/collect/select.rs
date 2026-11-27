@@ -593,13 +593,20 @@ fn reserve_destination<D: Downloader + ?Sized>(
         None => {
             let mut attempts = 0;
             loop {
-                let dest = dest_path(
-                    added.input.library_root,
-                    added.input.media,
-                    release,
-                    src,
-                    added.input.naming,
-                )?;
+                let dest = if let Some(pre) =
+                    added.input.renamed_destinations.get(src).filter(|d| {
+                        super::transfer::valid_transfer_destination(d, added.input.library_root)
+                    }) {
+                    super::transfer::free_renamed_dest(pre, src)?
+                } else {
+                    dest_path(
+                        added.input.library_root,
+                        added.input.media,
+                        release,
+                        src,
+                        added.input.naming,
+                    )?
+                };
                 if added.input.facts.entries().any(|(_, f)| {
                     f.path
                         .as_deref()

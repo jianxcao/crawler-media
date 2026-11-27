@@ -234,3 +234,151 @@ fn genuine_episode_ranges_still_parse() {
         assert_eq!((r.episode, r.episode_to), (Some(from), Some(to)), "{raw}");
     }
 }
+
+#[test]
+fn alphanumeric_acronyms_are_not_episodes() {
+    for (raw, expected_title) in [
+        ("E2E Demo Movie 2026 1080p WEB-DL", "E2E Demo Movie"),
+        ("E3D.Adventure.2025.1080p.BluRay", "E3D Adventure"),
+        ("EC2.Cloud.2026.720p.WEB-DL", "EC2 Cloud"),
+        ("ED2K.Guide.2024.WEB-DL", "ED2K Guide"),
+    ] {
+        let r = release::parse(raw);
+        assert_eq!(r.title, expected_title, "{raw}");
+        assert_eq!(
+            (r.season, r.episode, r.episode_to),
+            (None, None, None),
+            "{raw}"
+        );
+    }
+}
+
+#[test]
+fn non_eight_digit_standalone_e_tokens_do_not_panic() {
+    for raw in [
+        "Show.E0.1080p.mkv",
+        "Show.E00.1080p.mkv",
+        "Show.E1000.1080p.mkv",
+        "Show.E1234567.1080p.mkv",
+        "Show.E123456789.1080p.mkv",
+    ] {
+        let r = release::parse(raw);
+        assert_eq!(
+            (r.season, r.episode, r.episode_to),
+            (None, None, None),
+            "{raw}"
+        );
+    }
+}
+
+#[test]
+fn version_suffix_on_ep_or_leading_se_tokens_is_not_parsed_as_episode_range() {
+    for (raw, expected_season, expected_ep, expected_to) in [
+        ("Show.EP01v3.1080p.WEB-DL.mkv", Some(1), Some(1), None),
+        ("[SubGroup] S01E01v2 1080p.mkv", Some(1), Some(1), None),
+        ("E01v2.1080p.mkv", Some(1), Some(1), None),
+        ("Show.EP02v2-EP05v2.1080p.mkv", Some(1), Some(2), Some(5)),
+        (
+            "[SubGroup] S02E03v2-E06v2 1080p.mkv",
+            Some(2),
+            Some(3),
+            Some(6),
+        ),
+    ] {
+        let r = release::parse(raw);
+        assert_eq!(
+            (r.season, r.episode, r.episode_to),
+            (expected_season, expected_ep, expected_to),
+            "{raw}"
+        );
+    }
+}
+
+#[test]
+fn boundary_version_suffix_ranges_and_resolution_suffixes_parse_accurately() {
+    for (raw, expected_season, expected_ep, expected_to) in [
+        ("Show.S02E03v2-E06v2.1080p.mkv", Some(2), Some(3), Some(6)),
+        (
+            "[SubGroup] Show Name S02E03v2-E06v2 1080p.mkv",
+            Some(2),
+            Some(3),
+            Some(6),
+        ),
+        ("Show.S02E03-E06v2.1080p.mkv", Some(2), Some(3), Some(6)),
+        ("Show.E02v2-E05v2.1080p.mkv", Some(1), Some(2), Some(5)),
+        ("Show.E02-E05v2.1080p.mkv", Some(1), Some(2), Some(5)),
+        ("Show.S01.E2E.1080p.WEB-DL.mkv", Some(1), None, None),
+        ("Show.S01.E3D.1080p.BluRay.mkv", Some(1), None, None),
+        ("Show.EP05-720p.WEB-DL.mkv", Some(1), Some(5), None),
+        ("Show.EP05-480p.mkv", Some(1), Some(5), None),
+        ("[SubGroup] S01E05-720p.mkv", Some(1), Some(5), None),
+        ("[SubGroup] S01E01x264.mkv", Some(1), Some(1), None),
+    ] {
+        let r = release::parse(raw);
+        assert_eq!(
+            (r.season, r.episode, r.episode_to),
+            (expected_season, expected_ep, expected_to),
+            "{raw}"
+        );
+    }
+}
+
+#[test]
+fn season_packs_with_audio_channel_tags_do_not_misparse_as_single_episode() {
+    for (raw, expected_season, expected_ep, expected_to) in [
+        (
+            "Show.Name.Season.1.1080p.WEB-DL.AAC.2.0-GROUP",
+            Some(1),
+            None,
+            None,
+        ),
+        (
+            "Show.Name.Season.1.1080p.BluRay.DTS-HD.MA.5.1-GROUP",
+            Some(1),
+            None,
+            None,
+        ),
+        (
+            "Show.Name.Season.1.1080p.WEB-DL.DDP5.1-NTb",
+            Some(1),
+            None,
+            None,
+        ),
+        (
+            "[SubGroup] S01 1080p WEB-DL AAC 2.0-GROUP",
+            Some(1),
+            None,
+            None,
+        ),
+        ("[SubGroup] S01 01v2-02v2 1080p", Some(1), Some(1), Some(2)),
+        ("Show.Name.Season.2.03-04.1080p", Some(2), Some(3), Some(4)),
+    ] {
+        let r = release::parse(raw);
+        assert_eq!(
+            (r.season, r.episode, r.episode_to),
+            (expected_season, expected_ep, expected_to),
+            "{raw}"
+        );
+    }
+}
+
+#[test]
+fn deeply_chained_episode_tokens_do_not_overflow_small_worker_stack() {
+    let handle = std::thread::Builder::new()
+        .name("small-stack-release".into())
+        .stack_size(256 * 1024)
+        .spawn(|| {
+            let chained = "E1".repeat(25_000);
+            let r1 = release::parse(&format!("[Sub] {chained}"));
+            assert_eq!(r1.episode, None);
+            let r2 = release::parse(&format!("Show.S01{chained}.1080p"));
+            assert_eq!(r2.episode, None);
+            let ok = release::parse("Show.S01E01E02E03.1080p");
+            assert_eq!(
+                (ok.season, ok.episode, ok.episode_to),
+                (Some(1), Some(1), Some(3))
+            );
+        })
+        .unwrap();
+    handle.join().unwrap();
+}

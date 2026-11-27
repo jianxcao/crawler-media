@@ -1,11 +1,20 @@
-use std::path::{Path, PathBuf};
+#[path = "transmission_boost.rs"]
+mod boost_ops;
+#[path = "transmission_helpers.rs"]
+mod helpers;
+use helpers::{RpcResponse, base64_basic, extract_item_files, is_transmission_post_send_err};
 
+use std::path::PathBuf;
+
+use base64::Engine as _;
 use domain::Torrent;
-use serde::Deserialize;
 use serde_json::{Value, json};
 use ureq::typestate::WithBody;
 
-use crate::{Downloader, DownloaderError, PathMap, agent_for_url, apply_maps};
+use crate::{
+    ClientSubmitResult, ClientTaskQuery, Downloader, DownloaderError, PathMap, SubmitOptions,
+    SubmitPayload, agent_for_url,
+};
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct TransmissionConfig {
@@ -32,40 +41,6 @@ impl std::fmt::Debug for TransmissionConfig {
     }
 }
 
-#[cfg(test)]
-mod debug_tests {
-    use super::TransmissionConfig;
-
-    #[test]
-    fn debug_never_prints_the_password() {
-        let config = TransmissionConfig {
-            url: "http://127.0.0.1:9091".into(),
-            username: Some("admin".into()),
-            password: Some("transmission-password-secret".into()),
-            path_maps: Vec::new(),
-        };
-        let rendered = format!("{config:?}");
-        assert!(
-            !rendered.contains("transmission-password-secret"),
-            "Debug 不得输出 password: {rendered}"
-        );
-        assert!(rendered.contains("<redacted>"), "{rendered}");
-        assert!(rendered.contains("127.0.0.1:9091"), "{rendered}");
-        assert!(rendered.contains("admin"), "{rendered}");
-
-        let anonymous = TransmissionConfig {
-            url: "http://127.0.0.1:9091".into(),
-            username: None,
-            password: None,
-            path_maps: Vec::new(),
-        };
-        assert!(
-            format!("{anonymous:?}").contains("None"),
-            "未配置口令应可诊断"
-        );
-    }
-}
-
 pub struct TransmissionDownloader {
     config: TransmissionConfig,
     session: parking_lot::Mutex<Option<String>>,
@@ -74,31 +49,6 @@ pub struct TransmissionDownloader {
 }
 
 impl TransmissionDownloader {
-    fn claim_duplicate(&self, hash: &str, torrent: &Torrent) -> Result<(), DownloaderError> {
-        let got = self.rpc(
-            "torrent-get",
-            json!({ "ids": [hash], "fields": ["labels"] }),
-        )?;
-        let mut labels: Vec<String> = got["torrents"][0]["labels"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|v| v.as_str().map(str::to_string))
-            .collect();
-        for wanted in [
-            crate::TASK_TAG.to_string(),
-            crate::ownership_tag(&torrent.enclosure),
-            crate::CLAIMED_TAG.to_string(),
-        ] {
-            if !labels.contains(&wanted) {
-                labels.push(wanted);
-            }
-        }
-        self.rpc("torrent-set", json!({ "ids": [hash], "labels": labels }))?;
-        tracing::info!(torrent = %torrent.title, %hash, "Transmission 已有同 hash 任务，补打标签认领");
-        Ok(())
-    }
-
     /// Review H-3: the task carries `CLAIMED_TAG` (unknown counts as claimed).
     fn hash_claimed(&self, hash: &str) -> bool {
         match self.rpc(
@@ -174,7 +124,9 @@ impl TransmissionDownloader {
 
     fn rpc(&self, method: &str, arguments: Value) -> Result<Value, DownloaderError> {
         let payload = json!({ "method": method, "arguments": arguments }).to_string();
-        let response = self.send(&payload)?;
+        let response = self
+            .send(&payload)
+            .map_err(|e| DownloaderError::Message(e.to_string()))?;
         if let Some(session) = response
             .headers()
             .get("X-Transmission-Session-Id")
@@ -194,7 +146,7 @@ impl TransmissionDownloader {
         Ok(parsed.arguments)
     }
 
-    fn send(&self, payload: &str) -> Result<ureq::http::Response<ureq::Body>, DownloaderError> {
+    fn send(&self, payload: &str) -> Result<ureq::http::Response<ureq::Body>, ureq::Error> {
         let agent = agent_for_url(&self.config.url, false);
         let make_req = |session_id: Option<&str>| {
             let mut request = agent.post(&self.config.url);
@@ -211,9 +163,7 @@ impl TransmissionDownloader {
         };
 
         let current_session = self.session.lock().clone();
-        let resp = make_req(current_session.as_deref())
-            .send(payload)
-            .map_err(|err| DownloaderError::Message(err.to_string()))?;
+        let resp = make_req(current_session.as_deref()).send(payload)?;
 
         if resp.status().as_u16() == 409 {
             return self.retry_after_409(&resp, payload, &make_req);
@@ -222,7 +172,7 @@ impl TransmissionDownloader {
         if !resp.status().is_success() {
             let status = resp.status();
             tracing::error!(url = %self.config.url, %status, "Transmission 响应非成功状态");
-            return Err(DownloaderError::Message(format!("HTTP error {status}")));
+            return Err(ureq::Error::StatusCode(status.as_u16()));
         }
         Ok(resp)
     }
@@ -232,39 +182,62 @@ impl TransmissionDownloader {
         resp: &ureq::http::Response<ureq::Body>,
         payload: &str,
         make_req: &F,
-    ) -> Result<ureq::http::Response<ureq::Body>, DownloaderError>
+    ) -> Result<ureq::http::Response<ureq::Body>, ureq::Error>
     where
         F: Fn(Option<&str>) -> ureq::RequestBuilder<WithBody>,
     {
-        let new_token = resp
+        let Some(new_token) = resp
             .headers()
             .get("X-Transmission-Session-Id")
             .and_then(|v| v.to_str().ok())
             .map(str::to_string)
-            .ok_or_else(|| {
-                tracing::error!(url = %self.config.url, "Transmission 409 响应缺少 X-Transmission-Session-Id");
-                DownloaderError::Message("missing X-Transmission-Session-Id on 409 response".into())
-            })?;
+        else {
+            tracing::error!(url = %self.config.url, "Transmission 409 响应缺少 X-Transmission-Session-Id");
+            return Err(ureq::Error::StatusCode(409));
+        };
         *self.session.lock() = Some(new_token.clone());
-        let retry_resp = make_req(Some(&new_token))
-            .send(payload)
-            .map_err(|err| DownloaderError::Message(err.to_string()))?;
+        let retry_resp = make_req(Some(&new_token)).send(payload)?;
         if retry_resp.status().as_u16() == 409 {
             tracing::error!(url = %self.config.url, "带新 Session ID 重试后 Transmission 仍然返回 409");
-            return Err(DownloaderError::Message(
-                "Transmission rejected session challenge token".into(),
-            ));
+            return Err(ureq::Error::StatusCode(409));
         }
         if !retry_resp.status().is_success() {
             let status = retry_resp.status();
             tracing::error!(url = %self.config.url, %status, "Transmission 重试响应非成功状态");
-            return Err(DownloaderError::Message(format!("HTTP error {status}")));
+            return Err(ureq::Error::StatusCode(status.as_u16()));
         }
         Ok(retry_resp)
+    }
+
+    fn fetch_task_row(&self, info_hash: &str) -> Result<Option<Value>, DownloaderError> {
+        let normalized = info_hash.trim().to_ascii_lowercase();
+        let mut fields = vec!["id", "hashString", "error", "status"];
+        if self.labels_supported {
+            fields.push("labels");
+        }
+        let got = self.rpc(
+            "torrent-get",
+            json!({ "ids": [normalized], "fields": fields }),
+        )?;
+        let Some(items) = got["torrents"].as_array() else {
+            return Ok(None);
+        };
+        Ok(items
+            .iter()
+            .find(|row| {
+                row["hashString"]
+                    .as_str()
+                    .is_some_and(|h| h.eq_ignore_ascii_case(&normalized))
+            })
+            .cloned())
     }
 }
 
 impl Downloader for TransmissionDownloader {
+    fn supports_labels(&self) -> bool {
+        self.labels_supported
+    }
+
     fn remember_identity(&self, torrent: &Torrent, hash: &str) -> Result<(), DownloaderError> {
         if let Some(hash) = crate::owned::normalize_hash(hash) {
             self.identities
@@ -275,51 +248,64 @@ impl Downloader for TransmissionDownloader {
         Ok(())
     }
 
-    fn add(&self, torrent: &Torrent) -> Result<(), DownloaderError> {
-        self.add_resolved(torrent, &torrent.enclosure)
-    }
-
-    fn add_resolved(&self, torrent: &Torrent, download_url: &str) -> Result<(), DownloaderError> {
-        self.add_with_options(torrent, download_url, None)
-    }
-
-    fn add_with_options(
+    fn submit_verified(
         &self,
-        torrent: &Torrent,
-        download_url: &str,
-        save_path: Option<&str>,
-    ) -> Result<(), DownloaderError> {
-        tracing::info!(torrent = %torrent.title, download_url, "添加种子到 Transmission");
-        let mut arguments = json!({ "filename": download_url, "paused": false });
-        if let Some(save_path) = save_path.filter(|path| !path.trim().is_empty()) {
-            arguments["download-dir"] = json!(save_path);
+        payload: &SubmitPayload,
+        options: &SubmitOptions,
+    ) -> Result<ClientSubmitResult, DownloaderError> {
+        let info_hash = payload.info_hash().trim().to_ascii_lowercase();
+        boost_ops::validate_tr_submit_options(&info_hash, options)?;
+        if let Some(existing) = self.check_existing_task_before_add(&info_hash, options)? {
+            return Ok(existing);
         }
-        if self.labels_supported {
-            arguments["labels"] =
-                json!([crate::TASK_TAG, crate::ownership_tag(&torrent.enclosure)]);
-        }
-        let added = self.rpc("torrent-add", arguments).map_err(|e| {
-            tracing::error!(torrent = %torrent.title, error = %e, "添加种子到 Transmission 失败");
-            e
-        })?;
-        // D-H2: a duplicate (e.g. added by hand) keeps its old labels; add ours
-        // so ownership survives restarts. Existing labels are preserved.
-        if self.labels_supported
-            && let Some(hash) = added["torrent-duplicate"]["hashString"].as_str()
-        {
-            self.claim_duplicate(hash, torrent)?;
-        }
-        for field in ["torrent-added", "torrent-duplicate"] {
-            if let Some(hash) = added[field]["hashString"]
-                .as_str()
-                .and_then(crate::owned::normalize_hash)
-            {
-                self.identities
-                    .lock()
-                    .insert(torrent.enclosure.clone(), hash);
+        let arguments = self.build_torrent_add_arguments(payload, options);
+        let rpc_payload = json!({ "method": "torrent-add", "arguments": arguments }).to_string();
+        let response = match self.send(&rpc_payload) {
+            Ok(resp) => resp,
+            Err(err) => {
+                return if is_transmission_post_send_err(&err) {
+                    Ok(ClientSubmitResult::UnknownOutcome {
+                        reason: err.to_string(),
+                    })
+                } else {
+                    Err(DownloaderError::Message(err.to_string()))
+                };
             }
-        }
-        Ok(())
+        };
+        self.parse_torrent_add_response(response, &info_hash, options)
+    }
+
+    fn query_task_status(
+        &self,
+        info_hash: &str,
+        ownership_tag: &str,
+    ) -> Result<ClientTaskQuery, DownloaderError> {
+        let Some(row) = self.fetch_task_row(info_hash)? else {
+            return Ok(ClientTaskQuery::default());
+        };
+        let owned_by_tag = self.labels_supported
+            && !ownership_tag.trim().is_empty()
+            && row["labels"]
+                .as_array()
+                .is_some_and(|ls| ls.iter().any(|v| v.as_str() == Some(ownership_tag)));
+        let broken = row["error"].as_i64().unwrap_or(0) != 0;
+        let tr_status = row["status"].as_i64().unwrap_or(-1);
+        let paused = tr_status == 0;
+        let state = match tr_status {
+            0 => Some("stopped".into()),
+            1 | 2 => Some("checking".into()),
+            3 | 4 => Some("downloading".into()),
+            5 | 6 => Some("seeding".into()),
+            _ => None,
+        };
+        Ok(ClientTaskQuery {
+            exists: true,
+            info_hash: row["hashString"].as_str().map(|s| s.to_ascii_lowercase()),
+            owned_by_tag,
+            broken,
+            state,
+            paused,
+        })
     }
 
     fn remove(&self, torrent: &Torrent, delete_files: bool) -> Result<(), DownloaderError> {
@@ -602,72 +588,200 @@ impl Downloader for TransmissionDownloader {
         }
         Ok(snapshots)
     }
-}
 
-fn extract_item_files(item: &Value, path_maps: &[PathMap], files: &mut Vec<PathBuf>) {
-    let dir = item
-        .get("downloadDir")
-        .and_then(Value::as_str)
-        .unwrap_or("");
-    if let Some(listed) = item.get("files").and_then(Value::as_array) {
-        let file_stats = item.get("fileStats").and_then(Value::as_array);
-        for (i, file) in listed.iter().enumerate() {
-            let bytes_completed = file
-                .get("bytesCompleted")
-                .and_then(Value::as_u64)
-                .unwrap_or(0);
-            let length = file.get("length").and_then(Value::as_u64).unwrap_or(0);
-            // 验证是否被用户 deselect
-            let wanted = file_stats
-                .and_then(|stats| stats.get(i))
-                .and_then(|stat| stat.get("wanted"))
-                .and_then(Value::as_bool)
-                .unwrap_or(true);
-            if !wanted {
-                continue;
-            }
-            // 未完成下载的文件不收集
-            if length > 0 && bytes_completed < length {
-                continue;
-            }
-            let name = file.get("name").and_then(Value::as_str).unwrap_or("");
-            if !name.is_empty() {
-                files.push(apply_maps(&Path::new(dir).join(name), path_maps));
-            }
-        }
+    fn task_files_by_hash(
+        &self,
+        info_hash: &str,
+    ) -> Result<Option<crate::TaskFileSet>, DownloaderError> {
+        self.tr_task_files_by_hash(info_hash)
+    }
+
+    fn set_task_tags(&self, info_hash: &str, tags: &[String]) -> Result<(), DownloaderError> {
+        self.tr_set_task_tags(info_hash, tags)
+    }
+
+    fn set_task_limits(
+        &self,
+        info_hash: &str,
+        upload_limit: Option<u64>,
+        download_limit: Option<u64>,
+    ) -> Result<(), DownloaderError> {
+        self.tr_set_task_limits(info_hash, upload_limit, download_limit)
+    }
+
+    fn disk_free_space(&self) -> Result<crate::DiskSpaceInfo, DownloaderError> {
+        self.tr_disk_free_space()
     }
 }
 
-#[derive(Deserialize)]
-struct RpcResponse {
-    result: String,
-    #[serde(default)]
-    arguments: Value,
-}
-
-fn base64_basic(user: &str, pass: &str) -> String {
-    encode(format!("{user}:{pass}").as_bytes())
-}
-
-fn encode(input: &[u8]) -> String {
-    const T: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::new();
-    for chunk in input.chunks(3) {
-        let a = chunk[0];
-        let b = chunk.get(1).copied().unwrap_or(0);
-        let c = chunk.get(2).copied().unwrap_or(0);
-        out.push(T[(a >> 2) as usize] as char);
-        out.push(T[(((a & 3) << 4) | (b >> 4)) as usize] as char);
-        if chunk.len() > 1 {
-            out.push(T[(((b & 15) << 2) | (c >> 6)) as usize] as char);
-        } else {
-            out.push('=');
+impl TransmissionDownloader {
+    fn check_existing_task_before_add(
+        &self,
+        info_hash: &str,
+        options: &SubmitOptions,
+    ) -> Result<Option<ClientSubmitResult>, DownloaderError> {
+        let Some(row) = self.fetch_task_row(info_hash)? else {
+            return Ok(None);
+        };
+        let hash = info_hash.to_string();
+        if self.labels_supported {
+            let expected_tag = options.ownership_tag.trim();
+            let labels = row["labels"].as_array();
+            let exact_owned = labels.is_some_and(|ls| {
+                ls.iter()
+                    .filter_map(Value::as_str)
+                    .any(|t| t.trim() == expected_tag)
+            });
+            let instance_owned = exact_owned
+                || labels.is_some_and(|ls| {
+                    ls.iter()
+                        .filter_map(Value::as_str)
+                        .any(|t| crate::is_instance_owned_tag(t, expected_tag))
+                });
+            if !instance_owned {
+                return Ok(Some(ClientSubmitResult::ForeignDuplicate {
+                    info_hash: hash,
+                }));
+            }
+            if row["error"].as_i64().unwrap_or(0) != 0 {
+                return Ok(Some(ClientSubmitResult::ExistingBroken { info_hash: hash }));
+            }
+            if exact_owned {
+                self.tr_merge_missing_labels(info_hash, labels, options)?;
+                if row["status"].as_i64() == Some(0) && !options.paused {
+                    self.resume_task(info_hash)?;
+                }
+                return Ok(Some(ClientSubmitResult::Added {
+                    already_owned: true,
+                    info_hash: hash,
+                }));
+            }
+            return Ok(Some(ClientSubmitResult::ForeignDuplicate {
+                info_hash: hash,
+            }));
         }
-        if chunk.len() > 2 {
-            out.push(T[(c & 63) as usize] as char);
-        } else {
-            out.push('=');
+        if row["error"].as_i64().unwrap_or(0) != 0 {
+            return Ok(Some(ClientSubmitResult::ExistingBroken { info_hash: hash }));
+        }
+        Ok(Some(ClientSubmitResult::ForeignDuplicate {
+            info_hash: hash,
+        }))
+    }
+
+    fn build_torrent_add_arguments(
+        &self,
+        payload: &SubmitPayload,
+        options: &SubmitOptions,
+    ) -> Value {
+        let mut arguments = json!({ "paused": options.paused });
+        match payload {
+            SubmitPayload::TorrentBytes { bytes, .. } => {
+                arguments["metainfo"] =
+                    json!(base64::engine::general_purpose::STANDARD.encode(bytes));
+            }
+            SubmitPayload::Magnet { uri, .. } => {
+                arguments["filename"] = json!(uri);
+            }
+        }
+        if let Some(save_path) = options
+            .save_path
+            .as_deref()
+            .filter(|p| !p.trim().is_empty())
+        {
+            arguments["download-dir"] = json!(save_path);
+        }
+        if self.labels_supported {
+            let mut labels = vec![
+                crate::TASK_TAG.to_string(),
+                options.ownership_tag.trim().to_string(),
+            ];
+            for extra in &options.extra_tags {
+                let t = extra.trim();
+                if !t.is_empty() && !labels.iter().any(|l| l == t) {
+                    labels.push(t.to_string());
+                }
+            }
+            arguments["labels"] = json!(labels);
+        }
+        arguments
+    }
+
+    fn parse_torrent_add_response(
+        &self,
+        response: ureq::http::Response<ureq::Body>,
+        info_hash: &str,
+        options: &SubmitOptions,
+    ) -> Result<ClientSubmitResult, DownloaderError> {
+        if let Some(session) = response
+            .headers()
+            .get("X-Transmission-Session-Id")
+            .and_then(|v| v.to_str().ok())
+        {
+            *self.session.lock() = Some(session.to_string());
+        }
+        let body = match response.into_body().read_to_string() {
+            Ok(b) => b,
+            Err(err) => {
+                return Ok(ClientSubmitResult::UnknownOutcome {
+                    reason: err.to_string(),
+                });
+            }
+        };
+        let parsed: RpcResponse = match serde_json::from_str(&body) {
+            Ok(p) => p,
+            Err(err) => {
+                return Ok(ClientSubmitResult::UnknownOutcome {
+                    reason: err.to_string(),
+                });
+            }
+        };
+        if parsed.result != "success" {
+            return Err(DownloaderError::Message(parsed.result));
+        }
+        if parsed.arguments.get("torrent-duplicate").is_some() {
+            return Ok(ClientSubmitResult::ForeignDuplicate {
+                info_hash: info_hash.to_string(),
+            });
+        }
+        if let Some(added) = parsed.arguments.get("torrent-added") {
+            let resolved_hash = added["hashString"]
+                .as_str()
+                .and_then(crate::owned::normalize_hash)
+                .unwrap_or_else(|| info_hash.to_string());
+            self.apply_transmission_limits(&resolved_hash, options);
+            return Ok(ClientSubmitResult::Added {
+                already_owned: false,
+                info_hash: resolved_hash,
+            });
+        }
+        Ok(ClientSubmitResult::UnknownOutcome {
+            reason: "transmission torrent-add returned empty arguments".into(),
+        })
+    }
+
+    fn apply_transmission_limits(&self, info_hash: &str, options: &SubmitOptions) {
+        if options.upload_limit.is_none() && options.download_limit.is_none() {
+            return;
+        }
+        let mut set_args = json!({ "ids": [info_hash] });
+        if let Some(ul) = options.upload_limit {
+            if ul == 0 {
+                set_args["uploadLimited"] = json!(false);
+            } else {
+                set_args["uploadLimited"] = json!(true);
+                set_args["uploadLimit"] = json!((ul / 1024).max(1));
+            }
+        }
+        if let Some(dl) = options.download_limit {
+            if dl == 0 {
+                set_args["downloadLimited"] = json!(false);
+            } else {
+                set_args["downloadLimited"] = json!(true);
+                set_args["downloadLimit"] = json!((dl / 1024).max(1));
+            }
+        }
+        if let Err(err) = self.rpc("torrent-set", set_args) {
+            tracing::warn!(info_hash = %info_hash, error = %err, "Transmission torrent-set 限速失败");
         }
     }
-    out
 }

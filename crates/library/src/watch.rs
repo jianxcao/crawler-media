@@ -316,8 +316,97 @@ pub(crate) fn identify_local(
 
 fn intake(job: &WatchJob, media: &Media) -> Result<WatchOutcome, LibraryError> {
     let mut outcome = WatchOutcome::default();
-    walk_intake(&job.path, job, media, &mut outcome, None)?;
+    let empty = std::collections::HashMap::new();
+    walk_intake(&job.path, job, media, &mut outcome, None, &empty)?;
     Ok(outcome)
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WatchIntakeCandidate {
+    pub source_path: PathBuf,
+    pub target_root: PathBuf,
+    pub proposed_relative_path: PathBuf,
+    pub is_tv: bool,
+}
+
+pub fn plan_watch_intake_candidates(
+    job: &WatchJob,
+    media: &Media,
+) -> Result<Vec<WatchIntakeCandidate>, LibraryError> {
+    let mut candidates = Vec::new();
+    collect_intake_candidates(&job.path, job, media.kind, &mut candidates)?;
+    Ok(candidates)
+}
+
+fn identify_intake_file(
+    path: &std::path::Path,
+    job: &WatchJob,
+    media_kind: MediaKind,
+) -> (Release, Option<crate::NfoIdentity>, bool) {
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_default();
+    let mut parsed = release::parse(name);
+    if let Some(parent) = path.parent() {
+        enrich_from_ancestors(&mut parsed, parent, &job.path);
+    }
+    let local_kind = if parsed.season.is_some()
+        || parsed.episode.is_some()
+        || media_kind == MediaKind::Tv
+        || path
+            .parent()
+            .is_some_and(|dir| has_ancestor_tvshow_nfo(dir, &job.path))
+    {
+        MediaKind::Tv
+    } else {
+        media_kind
+    };
+    let nfo_identity = identify_local(&mut parsed, path, &job.path, local_kind);
+    let is_tv = local_kind == MediaKind::Tv || parsed.season.is_some() || parsed.episode.is_some();
+    (parsed, nfo_identity, is_tv)
+}
+
+fn collect_intake_candidates(
+    current_dir: &std::path::Path,
+    job: &WatchJob,
+    media_kind: domain::MediaKind,
+    out: &mut Vec<WatchIntakeCandidate>,
+) -> Result<(), LibraryError> {
+    for entry in fs::read_dir(current_dir)? {
+        let path = entry?.path();
+        let meta = match fs::symlink_metadata(&path) {
+            Ok(meta) => meta,
+            Err(_) => continue,
+        };
+        if meta.file_type().is_symlink() {
+            continue;
+        }
+        if meta.is_dir() {
+            collect_intake_candidates(&path, job, media_kind, out)?;
+            continue;
+        }
+        if !meta.is_file() || !is_video_file(&path) {
+            continue;
+        }
+        let (parsed, _, is_tv) = identify_intake_file(&path, job, media_kind);
+        if parsed.confidence == Confidence::Low {
+            continue;
+        }
+        let target_root = if is_tv {
+            job.tv_library_root.as_ref().unwrap_or(&job.library_root)
+        } else {
+            &job.library_root
+        };
+        let rel_path = path.strip_prefix(&job.path).unwrap_or(&path).to_path_buf();
+        out.push(WatchIntakeCandidate {
+            source_path: path,
+            target_root: target_root.clone(),
+            proposed_relative_path: rel_path,
+            is_tv,
+        });
+    }
+    Ok(())
 }
 
 pub fn scan_watch_intake_controlled(
@@ -326,9 +415,27 @@ pub fn scan_watch_intake_controlled(
     movie: &crate::WorkControl,
     tv: Option<&crate::WorkControl>,
 ) -> Result<WatchOutcome, LibraryError> {
+    let empty = std::collections::HashMap::new();
+    scan_watch_intake_controlled_with_destinations(job, media, movie, tv, &empty)
+}
+
+pub fn scan_watch_intake_controlled_with_destinations(
+    job: &WatchJob,
+    media: &Media,
+    movie: &crate::WorkControl,
+    tv: Option<&crate::WorkControl>,
+    renamed_destinations: &std::collections::HashMap<PathBuf, PathBuf>,
+) -> Result<WatchOutcome, LibraryError> {
     movie.check()?;
     let mut outcome = WatchOutcome::default();
-    walk_intake(&job.path, job, media, &mut outcome, Some((movie, tv)))?;
+    walk_intake(
+        &job.path,
+        job,
+        media,
+        &mut outcome,
+        Some((movie, tv)),
+        renamed_destinations,
+    )?;
     Ok(outcome)
 }
 
@@ -355,6 +462,7 @@ fn walk_intake(
     media: &Media,
     outcome: &mut WatchOutcome,
     controls: Option<(&crate::WorkControl, Option<&crate::WorkControl>)>,
+    renamed_destinations: &std::collections::HashMap<PathBuf, PathBuf>,
 ) -> Result<(), LibraryError> {
     for entry in fs::read_dir(current_dir)? {
         if let Some((movie, tv)) = controls {
@@ -372,15 +480,84 @@ fn walk_intake(
             continue;
         }
         if meta.is_dir() {
-            walk_intake(&path, job, media, outcome, controls)?;
+            walk_intake(&path, job, media, outcome, controls, renamed_destinations)?;
             continue;
         }
         if !meta.is_file() || !is_video_file(&path) {
             continue;
         }
-        intake_video_file(path, job, media, outcome, controls)?;
+        intake_video_file(path, job, media, outcome, controls, renamed_destinations)?;
     }
     Ok(())
+}
+
+fn canonicalize_watch_target_root(target_root: &std::path::Path) -> Option<PathBuf> {
+    let mut cur = target_root;
+    let mut missing = Vec::new();
+    loop {
+        if cur.as_os_str().is_empty() {
+            let mut canon = fs::canonicalize(".").ok()?;
+            for seg in missing.into_iter().rev() {
+                canon.push(seg);
+            }
+            return Some(canon);
+        }
+        match fs::symlink_metadata(cur) {
+            Ok(_) => {
+                let mut canon = fs::canonicalize(cur).ok()?;
+                for seg in missing.into_iter().rev() {
+                    canon.push(seg);
+                }
+                return Some(canon);
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                let name = cur.file_name()?.to_os_string();
+                if name == "." || name == ".." {
+                    return None;
+                }
+                missing.push(name);
+                cur = cur.parent()?;
+            }
+            Err(_) => return None,
+        }
+    }
+}
+
+fn valid_watch_destination(dest: &std::path::Path, target_root: &std::path::Path) -> bool {
+    let Ok(rel) = dest.strip_prefix(target_root) else {
+        return false;
+    };
+    if rel.as_os_str().is_empty()
+        || !rel
+            .components()
+            .all(|c| matches!(c, std::path::Component::Normal(_)))
+    {
+        return false;
+    }
+    let Some(canon_root) = canonicalize_watch_target_root(target_root) else {
+        return false;
+    };
+    let mut cur = canon_root.clone();
+    for comp in rel.components() {
+        let std::path::Component::Normal(name) = comp else {
+            return false;
+        };
+        cur.push(name);
+        match fs::symlink_metadata(&cur) {
+            Ok(_) => {
+                let Ok(resolved) = cur.canonicalize() else {
+                    return false;
+                };
+                if !resolved.starts_with(&canon_root) {
+                    return false;
+                }
+                cur = resolved;
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return false,
+        }
+    }
+    cur.starts_with(&canon_root) && cur != canon_root
 }
 
 fn intake_video_file(
@@ -389,27 +566,9 @@ fn intake_video_file(
     media: &Media,
     outcome: &mut WatchOutcome,
     controls: Option<(&crate::WorkControl, Option<&crate::WorkControl>)>,
+    renamed_destinations: &std::collections::HashMap<PathBuf, PathBuf>,
 ) -> Result<(), LibraryError> {
-    let name = path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or_default();
-    let mut parsed = release::parse(name);
-    if let Some(parent) = path.parent() {
-        enrich_from_ancestors(&mut parsed, parent, &job.path);
-    }
-    let local_kind = if parsed.season.is_some()
-        || parsed.episode.is_some()
-        || media.kind == MediaKind::Tv
-        || path
-            .parent()
-            .is_some_and(|dir| has_ancestor_tvshow_nfo(dir, &job.path))
-    {
-        MediaKind::Tv
-    } else {
-        media.kind
-    };
-    let nfo_identity = identify_local(&mut parsed, &path, &job.path, local_kind);
+    let (parsed, nfo_identity, is_tv) = identify_intake_file(&path, job, media.kind);
     if parsed.confidence == Confidence::Low {
         outcome.unidentified.push(Unidentified {
             path,
@@ -417,7 +576,6 @@ fn intake_video_file(
         });
         return Ok(());
     }
-    let is_tv = local_kind == MediaKind::Tv || parsed.season.is_some() || parsed.episode.is_some();
     let control = match controls {
         Some((_, None)) if is_tv => {
             return Err(LibraryError::Naming("TV Library is not configured".into()));
@@ -433,7 +591,26 @@ fn intake_video_file(
         &job.library_root
     };
     let rel_path = path.strip_prefix(&job.path).unwrap_or(&path);
-    let dest = target_root.join(rel_path);
+    let dest = renamed_destinations
+        .get(&path)
+        .filter(|d| valid_watch_destination(d, target_root))
+        .cloned()
+        .unwrap_or_else(|| target_root.join(rel_path));
+    if !valid_watch_destination(&dest, target_root) {
+        tracing::error!(
+            src = %path.display(),
+            dest = %dest.display(),
+            "Watch intake destination escapes target root"
+        );
+        outcome.errors.push(FileError {
+            path,
+            error: format!(
+                "watch intake destination escapes target root: {}",
+                dest.display()
+            ),
+        });
+        return Ok(());
+    }
     if dest.exists() {
         if same_entity(&path, &dest) {
             outcome.transferred.push(TransferredFile {

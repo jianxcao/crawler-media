@@ -11,15 +11,40 @@ use subscribe::{RunInput, admit_and_add};
 struct FailsOne;
 
 impl Downloader for FailsOne {
-    fn add(&self, torrent: &Torrent) -> Result<(), DownloaderError> {
-        if torrent.enclosure.ends_with("/bad") {
-            Err(DownloaderError::Message("injected failure".into()))
-        } else {
-            Ok(())
-        }
+    fn submit_verified(
+        &self,
+        payload: &downloader::SubmitPayload,
+        _options: &downloader::SubmitOptions,
+    ) -> Result<downloader::ClientSubmitResult, DownloaderError> {
+        Ok(downloader::ClientSubmitResult::Added {
+            already_owned: false,
+            info_hash: payload.info_hash().to_string(),
+        })
     }
     fn completed_files(&self, _: &Torrent) -> Result<Vec<PathBuf>, DownloaderError> {
         Ok(vec![])
+    }
+}
+
+impl subscribe::SyncDownloadSubmitter for FailsOne {
+    fn submit_sync(
+        &self,
+        plan: downloader::FrozenDownloadPlan,
+        op: downloader::DownloadOpContext,
+    ) -> Result<downloader::DownloadOutcome, downloader::DownloadSubmitError> {
+        if plan.torrent.enclosure.ends_with("/bad") {
+            return Err(downloader::DownloadSubmitError::Downloader(
+                DownloaderError::Message("injected failure".into()),
+            ));
+        }
+        Ok(downloader::DownloadOutcome::Submitted {
+            operation_id: op.operation_id,
+            downloader_id: plan.downloader_id,
+            info_hash: Some("0123456789abcdef0123456789abcdef01234567".into()),
+            bytes_digest: None,
+            verified_total_bytes: Some(1024),
+            already_owned: false,
+        })
     }
 }
 
@@ -116,10 +141,13 @@ fn successful_download_additions_are_returned_when_another_add_fails() {
         transfer_mode: None,
         scrape: false,
         hooks: None,
+        policy_hooks: None,
+        submitter: Some(&downloader),
         naming: None,
         preserve_removed: false,
         overlap: Default::default(),
         absolute: None,
+        renamed_destinations: Default::default(),
     })
     .unwrap();
 
@@ -135,22 +163,49 @@ struct FallbackDownloader {
 }
 
 impl Downloader for FallbackDownloader {
-    fn add(&self, torrent: &Torrent) -> Result<(), DownloaderError> {
-        self.calls.lock().unwrap().push(torrent.enclosure.clone());
-        if torrent.enclosure.ends_with(self.source_fail_suffix) {
-            return Err(DownloaderError::SourceRejected(
-                "HTTP 404 fetching .torrent".into(),
-            ));
-        }
-        if torrent.enclosure.ends_with(self.client_fail_suffix) {
-            return Err(DownloaderError::Message(
-                "qBittorrent connection refused".into(),
-            ));
-        }
-        Ok(())
+    fn submit_verified(
+        &self,
+        payload: &downloader::SubmitPayload,
+        _options: &downloader::SubmitOptions,
+    ) -> Result<downloader::ClientSubmitResult, DownloaderError> {
+        Ok(downloader::ClientSubmitResult::Added {
+            already_owned: false,
+            info_hash: payload.info_hash().to_string(),
+        })
     }
     fn completed_files(&self, _: &Torrent) -> Result<Vec<PathBuf>, DownloaderError> {
         Ok(vec![])
+    }
+}
+
+impl subscribe::SyncDownloadSubmitter for FallbackDownloader {
+    fn submit_sync(
+        &self,
+        plan: downloader::FrozenDownloadPlan,
+        op: downloader::DownloadOpContext,
+    ) -> Result<downloader::DownloadOutcome, downloader::DownloadSubmitError> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(plan.torrent.enclosure.clone());
+        if plan.torrent.enclosure.ends_with(self.source_fail_suffix) {
+            return Err(downloader::DownloadSubmitError::Downloader(
+                DownloaderError::SourceRejected("HTTP 404 fetching .torrent".into()),
+            ));
+        }
+        if plan.torrent.enclosure.ends_with(self.client_fail_suffix) {
+            return Err(downloader::DownloadSubmitError::Downloader(
+                DownloaderError::Message("qBittorrent connection refused".into()),
+            ));
+        }
+        Ok(downloader::DownloadOutcome::Submitted {
+            operation_id: op.operation_id,
+            downloader_id: plan.downloader_id,
+            info_hash: Some("0123456789abcdef0123456789abcdef01234567".into()),
+            bytes_digest: None,
+            verified_total_bytes: Some(1024),
+            already_owned: false,
+        })
     }
 }
 
@@ -227,10 +282,13 @@ fn source_rejected_falls_back_to_next_best_candidate_in_same_round() {
         transfer_mode: None,
         scrape: false,
         hooks: None,
+        policy_hooks: None,
+        submitter: Some(&downloader),
         naming: None,
         preserve_removed: false,
         overlap: Default::default(),
         absolute: None,
+        renamed_destinations: Default::default(),
     })
     .unwrap();
 
@@ -332,10 +390,13 @@ fn tv_source_rejected_falls_back_per_episode_without_retrying_client_errors() {
         transfer_mode: None,
         scrape: false,
         hooks: None,
+        policy_hooks: None,
+        submitter: Some(&downloader),
         naming: None,
         preserve_removed: false,
         overlap: Default::default(),
         absolute: None,
+        renamed_destinations: Default::default(),
     })
     .unwrap();
 
@@ -357,24 +418,60 @@ fn tv_source_rejected_falls_back_per_episode_without_retrying_client_errors() {
     );
 }
 
+struct BrokenAndRejectedDownloader;
+
+impl Downloader for BrokenAndRejectedDownloader {
+    fn submit_verified(
+        &self,
+        payload: &downloader::SubmitPayload,
+        _options: &downloader::SubmitOptions,
+    ) -> Result<downloader::ClientSubmitResult, DownloaderError> {
+        Ok(downloader::ClientSubmitResult::Added {
+            already_owned: false,
+            info_hash: payload.info_hash().to_string(),
+        })
+    }
+    fn completed_files(&self, _: &Torrent) -> Result<Vec<PathBuf>, DownloaderError> {
+        Ok(vec![])
+    }
+}
+
+impl subscribe::SyncDownloadSubmitter for BrokenAndRejectedDownloader {
+    fn submit_sync(
+        &self,
+        plan: downloader::FrozenDownloadPlan,
+        op: downloader::DownloadOpContext,
+    ) -> Result<downloader::DownloadOutcome, downloader::DownloadSubmitError> {
+        if plan.torrent.enclosure.ends_with("/broken") {
+            return Ok(downloader::DownloadOutcome::Rejected {
+                operation_id: op.operation_id,
+                reason: "existing_broken".into(),
+                broken_task_hash: Some("deadbeef".into()),
+            });
+        }
+        if plan.torrent.enclosure.ends_with("/rejected") {
+            return Err(downloader::DownloadSubmitError::Downloader(
+                DownloaderError::SourceRejected("HTTP 404".into()),
+            ));
+        }
+        if plan.torrent.enclosure.ends_with("/bad-metainfo") {
+            return Err(downloader::DownloadSubmitError::InvalidMetainfo(
+                downloader::TorrentParseError::InvalidInfoDict,
+            ));
+        }
+        Ok(downloader::DownloadOutcome::Submitted {
+            operation_id: op.operation_id,
+            downloader_id: plan.downloader_id,
+            info_hash: Some("0123456789abcdef0123456789abcdef01234567".into()),
+            bytes_digest: None,
+            verified_total_bytes: Some(1024),
+            already_owned: false,
+        })
+    }
+}
+
 #[test]
 fn collect_completed_and_run_preserve_submission_rejected_enclosures() {
-    struct BrokenAndRejectedDownloader;
-    impl Downloader for BrokenAndRejectedDownloader {
-        fn add(&self, torrent: &Torrent) -> Result<(), DownloaderError> {
-            if torrent.enclosure.ends_with("/broken") {
-                return Err(DownloaderError::ExistingTaskBroken("deadbeef".into()));
-            }
-            if torrent.enclosure.ends_with("/rejected") {
-                return Err(DownloaderError::SourceRejected("HTTP 404".into()));
-            }
-            Ok(())
-        }
-        fn completed_files(&self, _: &Torrent) -> Result<Vec<PathBuf>, DownloaderError> {
-            Ok(vec![])
-        }
-    }
-
     let tmp = tempfile::tempdir().unwrap();
     let media = Media {
         id: MediaId::new(),
@@ -404,8 +501,13 @@ fn collect_completed_and_run_preserve_submission_rejected_enclosures() {
                 exclude: false,
             },
             FilterAtom {
-                priority: 40,
+                priority: 60,
                 rule: AtomRule::Resolution("720p".into()),
+                exclude: false,
+            },
+            FilterAtom {
+                priority: 40,
+                rule: AtomRule::Resolution("480p".into()),
                 exclude: false,
             },
         ],
@@ -437,7 +539,8 @@ fn collect_completed_and_run_preserve_submission_rejected_enclosures() {
         torrents: vec![
             torrent("The.Matrix.1999.2160p.BluRay", "broken"),
             torrent("The.Matrix.1999.1080p.BluRay", "rejected"),
-            torrent("The.Matrix.1999.720p.BluRay", "usable"),
+            torrent("The.Matrix.1999.720p.BluRay", "bad-metainfo"),
+            torrent("The.Matrix.1999.480p.BluRay", "usable"),
         ],
         search_keywords: vec![],
         facts: SubscribeFacts::default(),
@@ -449,10 +552,13 @@ fn collect_completed_and_run_preserve_submission_rejected_enclosures() {
         transfer_mode: None,
         scrape: false,
         hooks: None,
+        policy_hooks: None,
+        submitter: Some(&downloader),
         naming: None,
         preserve_removed: false,
         overlap: Default::default(),
         absolute: None,
+        renamed_destinations: Default::default(),
     })
     .unwrap();
 
@@ -466,6 +572,172 @@ fn collect_completed_and_run_preserve_submission_rejected_enclosures() {
         vec![
             "https://pt.example/broken".to_string(),
             "https://pt.example/rejected".to_string(),
+            "https://pt.example/bad-metainfo".to_string(),
         ]
+    );
+}
+
+struct FetchClassificationDownloader {
+    calls: std::sync::Mutex<Vec<String>>,
+}
+
+impl Downloader for FetchClassificationDownloader {
+    fn submit_verified(
+        &self,
+        payload: &downloader::SubmitPayload,
+        _options: &downloader::SubmitOptions,
+    ) -> Result<downloader::ClientSubmitResult, DownloaderError> {
+        Ok(downloader::ClientSubmitResult::Added {
+            already_owned: false,
+            info_hash: payload.info_hash().to_string(),
+        })
+    }
+    fn completed_files(&self, _: &Torrent) -> Result<Vec<PathBuf>, DownloaderError> {
+        Ok(vec![])
+    }
+}
+
+impl subscribe::SyncDownloadSubmitter for FetchClassificationDownloader {
+    fn submit_sync(
+        &self,
+        plan: downloader::FrozenDownloadPlan,
+        op: downloader::DownloadOpContext,
+    ) -> Result<downloader::DownloadOutcome, downloader::DownloadSubmitError> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(plan.torrent.enclosure.clone());
+        if plan.torrent.enclosure.ends_with("/ep1-html") {
+            return Err(downloader::DownloadSubmitError::Fetch(
+                downloader::TorrentFetchError::Parse(
+                    downloader::TorrentParseError::MalformedBencode {
+                        offset: 0,
+                        reason: "expected dictionary",
+                    },
+                ),
+            ));
+        }
+        if plan.torrent.enclosure.ends_with("/ep2-waf") {
+            return Err(downloader::DownloadSubmitError::Fetch(
+                downloader::TorrentFetchError::Transient("cloudflare challenge".into()),
+            ));
+        }
+        Ok(downloader::DownloadOutcome::Submitted {
+            operation_id: op.operation_id,
+            downloader_id: plan.downloader_id,
+            info_hash: Some("0123456789abcdef0123456789abcdef01234567".into()),
+            bytes_digest: None,
+            verified_total_bytes: Some(1024),
+            already_owned: false,
+        })
+    }
+}
+
+#[test]
+fn transient_fetch_does_not_downgrade_slot_or_drop_partial_error_while_parse_error_falls_back() {
+    let media = Media {
+        id: MediaId::new(),
+        kind: MediaKind::Tv,
+        title: "The Expanse".into(),
+        year: None,
+        original_title: None,
+        aliases: Vec::new(),
+        tmdb_id: None,
+        douban_id: None,
+        tvdb_id: None,
+        bangumi_id: None,
+        anilist_id: None,
+    };
+    let filter = Filter {
+        id: FilterId::new(),
+        name: "hd".into(),
+        atoms: vec![
+            FilterAtom {
+                priority: 100,
+                rule: AtomRule::Resolution("2160p".into()),
+                exclude: false,
+            },
+            FilterAtom {
+                priority: 50,
+                rule: AtomRule::Resolution("1080p".into()),
+                exclude: false,
+            },
+        ],
+        keep_old_versions: false,
+    };
+    let subscribe = Subscribe {
+        id: SubscribeId::new(),
+        user_id: UserId::new(),
+        media_id: media.id,
+        coverage: Coverage::Tv {
+            season: 1,
+            episode_from: 1,
+            episode_to: Some(2),
+        },
+        fetch_mode: FetchMode::Search,
+        filter_id: filter.id,
+        wash_cut: false,
+        keep_old_versions: false,
+        wash_cut_filter_id: None,
+        full_season_pack: false,
+        downloader_id: None,
+        library_id: None,
+        tracking_state: "active".into(),
+        follow_future: false,
+        search_interval_secs: 1800,
+    };
+    let downloader = FetchClassificationDownloader {
+        calls: std::sync::Mutex::new(Vec::new()),
+    };
+    let added = admit_and_add(RunInput {
+        subscribe: &subscribe,
+        media: &media,
+        filter: &filter,
+        wash_filter: None,
+        torrents: vec![
+            torrent("The.Expanse.S01E01.2160p.WEB-DL", "ep1-html"),
+            torrent("The.Expanse.S01E01.1080p.WEB-DL", "ep1-backup"),
+            torrent("The.Expanse.S01E02.2160p.WEB-DL", "ep2-waf"),
+            torrent("The.Expanse.S01E02.1080p.WEB-DL", "ep2-inferior"),
+        ],
+        search_keywords: vec![],
+        facts: SubscribeFacts::default(),
+        downloader: &downloader,
+        library_root: std::path::Path::new("/tmp/library"),
+        library_id: None,
+        root_id: None,
+        config_revision: None,
+        transfer_mode: None,
+        scrape: false,
+        hooks: None,
+        policy_hooks: None,
+        submitter: Some(&downloader),
+        naming: None,
+        preserve_removed: false,
+        overlap: Default::default(),
+        absolute: None,
+        renamed_destinations: Default::default(),
+    })
+    .unwrap();
+
+    assert_eq!(added.chosen.len(), 1);
+    assert_eq!(
+        added.chosen[0].torrent.enclosure,
+        "https://pt.example/ep1-backup"
+    );
+    assert_eq!(
+        added.outcome.rejected_enclosures,
+        vec!["https://pt.example/ep1-html".to_string()]
+    );
+    assert_eq!(
+        added.add_errors.len(),
+        1,
+        "partial transient error on EP2 must not be swallowed when EP1 succeeded: {:?}",
+        added.add_errors
+    );
+    let calls = downloader.calls.lock().unwrap();
+    assert!(
+        !calls.iter().any(|u| u.ends_with("/ep2-inferior")),
+        "transient WAF on preferred 2160p must not downgrade to 1080p: {calls:?}"
     );
 }

@@ -1,3 +1,6 @@
+#[path = "test_submitter/mod.rs"]
+mod test_submitter;
+
 use std::fs;
 
 use domain::SubscribeFacts;
@@ -70,7 +73,7 @@ fn attachments_are_not_treated_as_video() {
         id: None,
         site_id: SiteId::new(),
         title: "The.Matrix.1999.2160p.BluRay.x265.mkv".into(),
-        enclosure: "magnet:?xt=urn:btih:attachments-test".into(),
+        enclosure: "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567".into(),
         size_bytes: Some(1_000),
         seeders: Some(1),
         free: false,
@@ -108,10 +111,13 @@ fn attachments_are_not_treated_as_video() {
         transfer_mode: Some(TransferMode::Copy),
         scrape: false,
         hooks: None,
+        policy_hooks: None,
+        submitter: Some(&test_submitter::DirectTestSubmitter(&dl)),
         naming: None,
         preserve_removed: false,
         overlap: Default::default(),
         absolute: None,
+        renamed_destinations: Default::default(),
     })
     .unwrap();
 

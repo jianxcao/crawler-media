@@ -1,3 +1,6 @@
+#[path = "test_submitter/mod.rs"]
+mod test_submitter;
+
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::thread;
@@ -179,10 +182,13 @@ fn finished_qbittorrent_task_transfers_into_library_ledger() {
         transfer_mode: Some(TransferMode::Copy),
         scrape: false,
         hooks: None,
+        policy_hooks: None,
+        submitter: Some(&test_submitter::DirectTestSubmitter(&qbit)),
         naming: None,
         preserve_removed: false,
         overlap: Default::default(),
         absolute: None,
+        renamed_destinations: Default::default(),
     })
     .unwrap();
 

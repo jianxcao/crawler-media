@@ -1,3 +1,6 @@
+#[path = "test_submitter/mod.rs"]
+mod test_submitter;
+
 use domain::{Coverage, MediaKind};
 use domain::{QualityFact, SubscribeFacts};
 use library::TransferMode;
@@ -94,10 +97,13 @@ fn run_wash_cut_test(
         transfer_mode: Some(TransferMode::Copy),
         scrape: false,
         hooks: None,
+        policy_hooks: None,
+        submitter: Some(&test_submitter::DirectTestSubmitter(dl)),
         naming: None,
         preserve_removed: false,
         overlap: Default::default(),
         absolute: None,
+        renamed_destinations: Default::default(),
     })
     .unwrap()
 }
@@ -248,10 +254,13 @@ fn wash_cut_does_not_delete_merged_file_still_referenced_by_other_slots() {
             transfer_mode: Some(TransferMode::Copy),
             scrape: false,
             hooks: None,
+            policy_hooks: None,
+            submitter: Some(&test_submitter::DirectTestSubmitter(&dl)),
             naming: None,
             preserve_removed: false,
             overlap: Default::default(),
             absolute: None,
+            renamed_destinations: Default::default(),
         },
         &Probed1080,
     )

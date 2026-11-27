@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use domain::{FileCoverage, LedgerId, QualitySource, Release, UnitKey};
 use downloader::Downloader;
 use filter::ScoredTorrent;
-use hooks::{HookEvent, Step};
+use hooks::GateContext;
 use library::{resolve_mode, scrape_beside, transfer_file_controlled};
 
 use super::TransferControl;
@@ -80,6 +80,18 @@ pub(super) fn reserve_and_publish<D: Downloader + ?Sized>(
         path_key: String::new(),
         units,
     };
+    {
+        control.check()?;
+        if !valid_transfer_destination(dest, added.input.library_root) {
+            return Err(SubscribeError::Library(library::LibraryError::Io(
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "invalid Transfer destination",
+                ),
+            )));
+        }
+        control.check()?;
+    }
     if let Some(recorder) = recorder {
         candidate = recorder.prepare(&candidate, src, mode)?;
     }
@@ -132,14 +144,24 @@ fn publish_video<D: Downloader + ?Sized>(
 ) -> Result<(), SubscribeError> {
     let mode = resolve_mode(src, added.input.library_root, added.input.transfer_mode);
     tracing::info!(src = %src.display(), dest = %dest.display(), ?mode, "将已完成的媒体文件转入媒体库");
-    emit(added.input.hooks, Step::Rename)?;
-    emit(added.input.hooks, Step::Transfer)?;
     transfer_file_controlled(src, dest, mode, control).map_err(|e| {
         tracing::error!(src = %src.display(), dest = %dest.display(), error = %e, "文件转移失败");
         SubscribeError::Library(e)
     })?;
     control.check()?;
-    emit(added.input.hooks, Step::Scrape)?;
+    let relative_path = dest.strip_prefix(added.input.library_root).map_err(|_| {
+        SubscribeError::Library(library::LibraryError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "Scrape destination outside Library root",
+        )))
+    })?;
+    crate::add::gate(
+        added.input.hooks,
+        GateContext::Scrape {
+            media_id: added.input.media.id,
+            relative_path: relative_path.to_path_buf(),
+        },
+    )?;
     control.check()?;
     if let Err(error) = control.publish(|| {
         scrape_beside(dest, added.input.media, added.input.scrape, None).map_err(|e| e.to_string())
@@ -207,6 +229,100 @@ pub(super) fn commit_video_facts<D: Downloader + ?Sized>(
     Ok(())
 }
 
+fn canonicalize_target_root(target_root: &Path) -> Option<PathBuf> {
+    let mut cur = target_root;
+    let mut missing = Vec::new();
+    loop {
+        if cur.as_os_str().is_empty() {
+            let mut canon = fs::canonicalize(".").ok()?;
+            for seg in missing.into_iter().rev() {
+                canon.push(seg);
+            }
+            return Some(canon);
+        }
+        match fs::symlink_metadata(cur) {
+            Ok(_) => {
+                let mut canon = fs::canonicalize(cur).ok()?;
+                for seg in missing.into_iter().rev() {
+                    canon.push(seg);
+                }
+                return Some(canon);
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                let name = cur.file_name()?.to_os_string();
+                if name == "." || name == ".." {
+                    return None;
+                }
+                missing.push(name);
+                cur = cur.parent()?;
+            }
+            Err(_) => return None,
+        }
+    }
+}
+
+pub(super) fn valid_transfer_destination(dest: &Path, target_root: &Path) -> bool {
+    let Ok(rel) = dest.strip_prefix(target_root) else {
+        return false;
+    };
+    if rel.as_os_str().is_empty()
+        || !rel
+            .components()
+            .all(|c| matches!(c, std::path::Component::Normal(_)))
+    {
+        return false;
+    }
+    let Some(canon_root) = canonicalize_target_root(target_root) else {
+        return false;
+    };
+    let mut cursor = target_root.to_path_buf();
+    for comp in rel.components() {
+        let std::path::Component::Normal(seg) = comp else {
+            return false;
+        };
+        cursor.push(seg);
+        match fs::symlink_metadata(&cursor) {
+            Ok(_) => {
+                let Ok(canon) = fs::canonicalize(&cursor) else {
+                    return false;
+                };
+                if !canon.starts_with(&canon_root) {
+                    return false;
+                }
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => break,
+            Err(_) => return false,
+        }
+    }
+    true
+}
+
+pub(super) fn free_renamed_dest(dest: &Path, src: &Path) -> Result<PathBuf, SubscribeError> {
+    if std::fs::symlink_metadata(dest).is_err() || same_file(src, dest) {
+        return Ok(dest.to_path_buf());
+    }
+    let stem = dest.file_stem().and_then(|s| s.to_str()).unwrap_or("media");
+    let src_stem = src.file_stem().and_then(|s| s.to_str()).unwrap_or("alt");
+    let ext = dest.extension().and_then(|s| s.to_str()).unwrap_or("bin");
+    for n in 1..=MAX_ALTERNATE_NAMES {
+        let name = if n == 1 {
+            format!("{stem}-{src_stem}.{ext}")
+        } else {
+            format!("{stem}-{src_stem}-{n}.{ext}")
+        };
+        let candidate = dest.with_file_name(name);
+        if std::fs::symlink_metadata(&candidate).is_err() || same_file(src, &candidate) {
+            return Ok(candidate);
+        }
+    }
+    Err(SubscribeError::Library(library::LibraryError::Io(
+        std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            format!("no free alternate name for {}", dest.display()),
+        ),
+    )))
+}
+
 pub(super) fn dest_path(
     root: &Path,
     media: &domain::Media,
@@ -260,9 +376,37 @@ fn same_file(_: &Path, _: &Path) -> bool {
     false
 }
 
-fn emit(bus: Option<&hooks::Bus>, step: Step) -> Result<(), SubscribeError> {
-    if let Some(bus) = bus {
-        bus.emit(&HookEvent { step })?;
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn free_renamed_dest_avoids_dangling_symlink_and_errors_when_exhausted() {
+        let dir = tempfile::tempdir_in("/tmp").unwrap();
+        let src = dir.path().join("source.mkv");
+        fs::write(&src, b"video").unwrap();
+        let dest = dir.path().join("Movie (2026).mkv");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(dir.path().join("missing-target"), &dest).unwrap();
+        #[cfg(not(unix))]
+        fs::write(&dest, b"occupied").unwrap();
+
+        let alt1 = free_renamed_dest(&dest, &src).unwrap();
+        assert_eq!(alt1, dir.path().join("Movie (2026)-source.mkv"));
+
+        fs::write(&alt1, b"taken").unwrap();
+        for n in 2..=MAX_ALTERNATE_NAMES {
+            fs::write(
+                dir.path().join(format!("Movie (2026)-source-{n}.mkv")),
+                b"taken",
+            )
+            .unwrap();
+        }
+        let err = free_renamed_dest(&dest, &src).unwrap_err();
+        assert!(matches!(
+            err,
+            SubscribeError::Library(library::LibraryError::Io(ref io_err))
+                if io_err.kind() == std::io::ErrorKind::AlreadyExists
+        ));
     }
-    Ok(())
 }

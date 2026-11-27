@@ -343,3 +343,210 @@ fn intake_skips_nfo_write_when_media_has_no_tmdb_id() {
         "scrape without tmdb_id must not fabricate an NFO beside transferred file"
     );
 }
+
+#[test]
+fn intake_ignores_renamed_destination_escaping_target_root() {
+    let tmp = tempfile::tempdir().unwrap();
+    let intake = tmp.path().join("intake");
+    let library = tmp.path().join("library");
+    let outside = tmp.path().join("outside");
+    fs::create_dir_all(&intake).unwrap();
+    fs::create_dir_all(&library).unwrap();
+    fs::create_dir_all(&outside).unwrap();
+
+    let src = intake.join("The.Matrix.1999.2160p.BluRay.mkv");
+    fs::write(&src, b"matrix-video").unwrap();
+
+    let escaped = outside.join("The.Matrix.1999.mkv");
+    let mut renamed = std::collections::HashMap::new();
+    renamed.insert(src.clone(), escaped.clone());
+
+    let job = WatchJob {
+        kind: WatchKind::Intake,
+        scrape: false,
+        path: intake,
+        library_root: library.clone(),
+        tv_library_root: None,
+    };
+    let outcome = library::scan_watch_intake_controlled_with_destinations(
+        &job,
+        &movie(),
+        &library::WorkControl::default(),
+        None,
+        &renamed,
+    )
+    .unwrap();
+
+    assert!(
+        !escaped.exists(),
+        "renamed destination outside target_root must never be written"
+    );
+    let fallback_dest = library.join("The.Matrix.1999.2160p.BluRay.mkv");
+    assert!(fallback_dest.is_file());
+    assert_eq!(outcome.transferred.len(), 1);
+    assert_eq!(outcome.transferred[0].path, fallback_dest);
+}
+
+#[test]
+fn intake_ignores_parent_dir_and_root_equal_destinations() {
+    let tmp = tempfile::tempdir().unwrap();
+    let outside = tmp.path().join("outside");
+    fs::create_dir_all(&outside).unwrap();
+
+    let intake_1 = tmp.path().join("intake_1");
+    let lib_1 = tmp.path().join("lib_1");
+    fs::create_dir_all(&intake_1).unwrap();
+    fs::create_dir_all(&lib_1).unwrap();
+    let src_1 = intake_1.join("The.Matrix.1999.2160p.BluRay.mkv");
+    fs::write(&src_1, b"video-1").unwrap();
+    let mut renamed_1 = std::collections::HashMap::new();
+    renamed_1.insert(src_1, lib_1.join("../outside/The.Matrix.1999.mkv"));
+    let out_1 = library::scan_watch_intake_controlled_with_destinations(
+        &WatchJob {
+            kind: WatchKind::Intake,
+            scrape: false,
+            path: intake_1,
+            library_root: lib_1.clone(),
+            tv_library_root: None,
+        },
+        &movie(),
+        &library::WorkControl::default(),
+        None,
+        &renamed_1,
+    )
+    .unwrap();
+    assert!(!outside.join("The.Matrix.1999.mkv").exists());
+    assert_eq!(out_1.errors.len(), 0);
+    assert_eq!(
+        out_1.transferred[0].path,
+        lib_1.join("The.Matrix.1999.2160p.BluRay.mkv")
+    );
+
+    let intake_2 = tmp.path().join("intake_2");
+    let lib_2 = tmp.path().join("lib_2");
+    fs::create_dir_all(&intake_2).unwrap();
+    fs::create_dir_all(&lib_2).unwrap();
+    let src_2 = intake_2.join("The.Matrix.1999.2160p.BluRay.mkv");
+    fs::write(&src_2, b"video-2").unwrap();
+    let mut renamed_2 = std::collections::HashMap::new();
+    renamed_2.insert(src_2, lib_2.clone());
+    let out_2 = library::scan_watch_intake_controlled_with_destinations(
+        &WatchJob {
+            kind: WatchKind::Intake,
+            scrape: false,
+            path: intake_2,
+            library_root: lib_2.clone(),
+            tv_library_root: None,
+        },
+        &movie(),
+        &library::WorkControl::default(),
+        None,
+        &renamed_2,
+    )
+    .unwrap();
+    assert_eq!(out_2.errors.len(), 0);
+    assert_eq!(
+        out_2.transferred[0].path,
+        lib_2.join("The.Matrix.1999.2160p.BluRay.mkv")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn intake_ignores_symlink_escape_destination_under_target_root() {
+    let tmp = tempfile::tempdir().unwrap();
+    let outside = tmp.path().join("outside");
+    let intake = tmp.path().join("intake_3");
+    let lib = tmp.path().join("lib_3");
+    fs::create_dir_all(&outside).unwrap();
+    fs::create_dir_all(&intake).unwrap();
+    fs::create_dir_all(&lib).unwrap();
+    std::os::unix::fs::symlink(&outside, lib.join("sym")).unwrap();
+    let src = intake.join("The.Matrix.1999.2160p.BluRay.mkv");
+    fs::write(&src, b"video-3").unwrap();
+    let mut renamed = std::collections::HashMap::new();
+    renamed.insert(src, lib.join("sym/Sym.Escape.mkv"));
+    let out = library::scan_watch_intake_controlled_with_destinations(
+        &WatchJob {
+            kind: WatchKind::Intake,
+            scrape: false,
+            path: intake,
+            library_root: lib.clone(),
+            tv_library_root: None,
+        },
+        &movie(),
+        &library::WorkControl::default(),
+        None,
+        &renamed,
+    )
+    .unwrap();
+    assert!(!outside.join("Sym.Escape.mkv").exists());
+    assert_eq!(out.errors.len(), 0);
+    assert_eq!(
+        out.transferred[0].path,
+        lib.join("The.Matrix.1999.2160p.BluRay.mkv")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn intake_preserves_valid_rename_when_target_root_not_yet_created_and_blocks_fallback_symlink_escape()
+ {
+    let tmp = tempfile::tempdir().unwrap();
+    let intake_uncreated = tmp.path().join("intake_uncreated");
+    let uncreated_lib = tmp.path().join("nested_not_created_yet/movies");
+    fs::create_dir_all(&intake_uncreated).unwrap();
+    let src_1 = intake_uncreated.join("The.Matrix.1999.2160p.BluRay.mkv");
+    fs::write(&src_1, b"video-uncreated").unwrap();
+    let renamed_dest = uncreated_lib.join("The Matrix (1999)/The Matrix (1999).mkv");
+    let mut renamed = std::collections::HashMap::new();
+    renamed.insert(src_1, renamed_dest.clone());
+
+    let out_1 = library::scan_watch_intake_controlled_with_destinations(
+        &WatchJob {
+            kind: WatchKind::Intake,
+            scrape: false,
+            path: intake_uncreated,
+            library_root: uncreated_lib,
+            tv_library_root: None,
+        },
+        &movie(),
+        &library::WorkControl::default(),
+        None,
+        &renamed,
+    )
+    .unwrap();
+    assert_eq!(out_1.errors.len(), 0);
+    assert_eq!(out_1.transferred.len(), 1);
+    assert_eq!(out_1.transferred[0].path, renamed_dest);
+    assert!(renamed_dest.exists());
+
+    // Fallback rel_path (`sub/The.Matrix...`) must NOT traverse a symlink `lib/sub -> outside`.
+    let outside = tmp.path().join("outside_fallback");
+    let intake_sub = tmp.path().join("intake_sub");
+    let lib_sub = tmp.path().join("lib_sub");
+    fs::create_dir_all(&outside).unwrap();
+    fs::create_dir_all(intake_sub.join("sub")).unwrap();
+    fs::create_dir_all(&lib_sub).unwrap();
+    std::os::unix::fs::symlink(&outside, lib_sub.join("sub")).unwrap();
+    let src_2 = intake_sub.join("sub/The.Matrix.1999.2160p.BluRay.mkv");
+    fs::write(&src_2, b"video-sym-fallback").unwrap();
+
+    let out_2 = library::scan_watch_intake_controlled_with_destinations(
+        &WatchJob {
+            kind: WatchKind::Intake,
+            scrape: false,
+            path: intake_sub,
+            library_root: lib_sub,
+            tv_library_root: None,
+        },
+        &movie(),
+        &library::WorkControl::default(),
+        None,
+        &std::collections::HashMap::new(),
+    )
+    .unwrap();
+    assert!(!outside.join("The.Matrix.1999.2160p.BluRay.mkv").exists());
+    assert!(out_2.transferred.is_empty());
+    assert_eq!(out_2.errors.len(), 1);
+}

@@ -147,18 +147,20 @@ fn tokenize(raw: &str) -> Vec<String> {
                 tokens.push(std::mem::take(&mut cur));
             }
         } else if c == '.' {
-            // 如果是 H.264 这种特定格式，保留点
-            let is_h264 = cur.eq_ignore_ascii_case("H")
+            // 如果是 H.264 这种特定格式，保留点（含紧贴集号如 S01E01H.264）
+            let ends_glued_h = cur.len() >= 2
+                && matches!(cur.as_bytes()[cur.len() - 1], b'H' | b'h')
+                && cur.as_bytes()[cur.len() - 2].is_ascii_digit();
+            let is_h264 = (cur.eq_ignore_ascii_case("H") || ends_glued_h)
                 && i + 3 < len
                 && chars[i + 1] == '2'
                 && chars[i + 2] == '6'
-                && (chars[i + 3] == '4' || chars[i + 3] == '5');
+                && (chars[i + 3] == '4' || chars[i + 3] == '5')
+                && (i + 4 >= len || !chars[i + 4].is_ascii_alphanumeric());
             if is_h264 {
                 cur.push(c);
-            } else {
-                if !cur.is_empty() {
-                    tokens.push(std::mem::take(&mut cur));
-                }
+            } else if !cur.is_empty() {
+                tokens.push(std::mem::take(&mut cur));
             }
         } else {
             cur.push(c);
@@ -171,12 +173,35 @@ fn tokenize(raw: &str) -> Vec<String> {
     tokens
 }
 
+fn strip_ep_token_digits_prefix(upper: &str) -> Option<&str> {
+    let rest = upper
+        .strip_prefix("EP")
+        .or_else(|| upper.strip_prefix('E'))?;
+    let bytes = rest.as_bytes();
+    let mut j = 0;
+    while j < bytes.len() && bytes[j].is_ascii_digit() {
+        j += 1;
+    }
+    if j == 0 || !boundary::is_episode_digit_end(bytes, j) {
+        return None;
+    }
+    Some(upper)
+}
+
 fn is_season_or_episode_token(token: &str) -> bool {
     let upper = token.to_ascii_uppercase();
     if upper.starts_with('S') && upper[1..].chars().all(|c| c.is_ascii_digit()) {
         return true;
     }
-    if upper.starts_with('E') && upper[1..].chars().any(|c| c.is_ascii_digit()) {
+    if upper.starts_with('S')
+        && let Some(e_pos) = upper.find('E')
+        && e_pos > 1
+        && upper[1..e_pos].bytes().all(|b| b.is_ascii_digit())
+        && parse_ep_numbers(&upper[e_pos..]).0.is_some()
+    {
+        return true;
+    }
+    if strip_ep_token_digits_prefix(&upper).is_some() {
         return true;
     }
     if upper == "SEASON" || upper == "EPISODE" {
@@ -192,8 +217,11 @@ fn scan_tokens_for_season_episode(tokens: &[String]) -> (Option<u32>, Option<u32
     let mut episode_to: Option<u32> = None;
     let mut last_was_season_word = false;
     let mut last_was_episode_word = false;
+    let mut just_saw_season = false;
 
     for token in tokens {
+        let prev_was_season = just_saw_season;
+        just_saw_season = false;
         let upper = token.to_ascii_uppercase();
 
         // 1. Season xx
@@ -204,6 +232,7 @@ fn scan_tokens_for_season_episode(tokens: &[String]) -> (Option<u32>, Option<u32
                 && s < 100
             {
                 season = Some(s);
+                just_saw_season = true;
                 continue;
             }
         }
@@ -212,14 +241,15 @@ fn scan_tokens_for_season_episode(tokens: &[String]) -> (Option<u32>, Option<u32
             continue;
         }
 
-        // 2. Episode xx
+        // 2. Episode xx / Episode 01v2 / Episode 01-02
         if last_was_episode_word {
             last_was_episode_word = false;
-            if plausible_episode(token)
-                && let Ok(e) = token.parse::<u32>()
+            let (from, to) = parse_ep_numbers(&upper);
+            if let Some(e) = from
                 && episode.is_none()
             {
                 episode = Some(e);
+                episode_to = to;
                 if season.is_none() {
                     season = Some(1);
                 }
@@ -231,52 +261,24 @@ fn scan_tokens_for_season_episode(tokens: &[String]) -> (Option<u32>, Option<u32
             continue;
         }
 
-        // 3. S01E01 或 S01E01-E04
-        if let Some(after_season) = upper.strip_prefix('S') {
-            if let Some(e_pos) = upper.find('E') {
-                if e_pos > 1 {
-                    let s_str = &upper[1..e_pos];
-                    if let Ok(s) = s_str.parse::<u32>() {
-                        if season.is_none() {
-                            season = Some(s);
-                        }
-                        let ep_part = &upper[e_pos..];
-                        let (from, to) = parse_ep_numbers(ep_part);
-                        if from.is_some() {
-                            episode = from;
-                            episode_to = to;
-                            break;
-                        }
-                    }
-                }
-            } else {
-                // S01 (单季无集)
-                let s_str = after_season;
-                if !s_str.is_empty()
-                    && s_str.chars().all(|c| c.is_ascii_digit())
-                    && let Ok(s) = s_str.parse::<u32>()
-                    && season.is_none()
-                    && s < 100
-                {
-                    season = Some(s);
-                    continue;
-                }
+        // 3. S01E01 或 S01E01-E04 或 S01
+        if let Some(after_season) = upper.strip_prefix('S')
+            && let Some((s, ep, ep_to)) = parse_s_prefixed_token(&upper, after_season)
+        {
+            if season.is_none() {
+                season = Some(s);
             }
+            if ep.is_some() {
+                episode = ep;
+                episode_to = ep_to;
+                break;
+            }
+            just_saw_season = true;
+            continue;
         }
 
         // 4. E01-E04 或 EP01
-        if (upper.starts_with('E')
-            && upper.len() > 1
-            && upper[1..].chars().any(|c| c.is_ascii_digit()))
-            || (upper.starts_with("EP")
-                && upper.len() > 2
-                && upper[2..].chars().any(|c| c.is_ascii_digit()))
-        {
-            let ep_part = if upper.starts_with("EP") {
-                &upper[1..]
-            } else {
-                &upper[..]
-            };
+        if let Some(ep_part) = strip_ep_token_digits_prefix(&upper) {
             let (from, to) = parse_ep_numbers(ep_part);
             if from.is_some() {
                 if episode.is_none() {
@@ -289,32 +291,176 @@ fn scan_tokens_for_season_episode(tokens: &[String]) -> (Option<u32>, Option<u32
                 break;
             }
         }
+
+        // 5. Bare numeric / versioned episode or range right after explicit season (`S01 01v2-02v2`)
+        if prev_was_season
+            && season.is_some()
+            && episode.is_none()
+            && upper.as_bytes().first().is_some_and(u8::is_ascii_digit)
+            && parse_resolution(token).is_none()
+            && parse_year(token).is_none()
+        {
+            let (from, to) = parse_ep_numbers(&upper);
+            if from.is_some() {
+                episode = from;
+                episode_to = to;
+                break;
+            }
+        }
     }
 
     (season, episode, episode_to)
 }
 
+fn parse_s_prefixed_token(
+    upper: &str,
+    after_season: &str,
+) -> Option<(u32, Option<u32>, Option<u32>)> {
+    if let Some(e_pos) = upper.find('E') {
+        if e_pos <= 1 {
+            return None;
+        }
+        let s = upper[1..e_pos].parse::<u32>().ok().filter(|&s| s < 100)?;
+        let ep_part = &upper[e_pos..];
+        let stripped_ep = strip_trailing_glued_codec(ep_part);
+        if s == 0
+            && matches!(
+                strip_ep_version_suffix(stripped_ep),
+                "E0" | "E00" | "EP0" | "EP00"
+            )
+        {
+            return Some((0, Some(0), None));
+        }
+        let (from, to) = parse_ep_numbers(ep_part);
+        return from.map(|ep| (s, Some(ep), to));
+    }
+    if !after_season.is_empty()
+        && after_season.bytes().all(|b| b.is_ascii_digit())
+        && let Ok(s) = after_season.parse::<u32>()
+        && s < 100
+    {
+        return Some((s, None, None));
+    }
+    None
+}
+
+fn strip_ep_version_suffix(seg: &str) -> &str {
+    let trimmed = seg
+        .strip_prefix("EP")
+        .or_else(|| seg.strip_prefix('E'))
+        .unwrap_or(seg);
+    let bytes = trimmed.as_bytes();
+    let mut j = 0;
+    while j < bytes.len() && bytes[j].is_ascii_digit() {
+        j += 1;
+    }
+    if j > 0
+        && j + 1 < bytes.len()
+        && bytes[j] == b'V'
+        && bytes[j + 1..].iter().all(u8::is_ascii_digit)
+    {
+        let prefix_len = seg.len() - trimmed.len();
+        return &seg[..prefix_len + j];
+    }
+    seg
+}
+
+fn skip_leading_v_digits(s: &str) -> &str {
+    let bytes = s.as_bytes();
+    if bytes.first() == Some(&b'V') && bytes.get(1).is_some_and(u8::is_ascii_digit) {
+        let mut k = 1;
+        while k < bytes.len() && bytes[k].is_ascii_digit() {
+            k += 1;
+        }
+        return &s[k..];
+    }
+    s
+}
+
+fn strip_trailing_glued_codec(s: &str) -> &str {
+    for codec in boundary::GLUED_CODECS {
+        if let Some(prefix) = s.strip_suffix(codec)
+            && prefix.as_bytes().last().is_some_and(u8::is_ascii_digit)
+        {
+            return prefix;
+        }
+    }
+    s
+}
+
+fn extract_seg_episodes<'a>(seg: &'a str, out: &mut Vec<&'a str>) {
+    let seg = strip_trailing_glued_codec(seg);
+    let s = strip_ep_version_suffix(seg);
+    if !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()) {
+        out.push(s);
+        return;
+    }
+    let mark = out.len();
+    let mut cur = seg;
+    let mut count = 0usize;
+    loop {
+        if count >= domain::Coverage::MAX_EPISODES as usize {
+            out.truncate(mark);
+            out.push("0");
+            return;
+        }
+        let Some(rest) = cur.strip_prefix("EP").or_else(|| cur.strip_prefix('E')) else {
+            out.truncate(mark);
+            return;
+        };
+        let dlen = rest.bytes().take_while(u8::is_ascii_digit).count();
+        if dlen == 0 {
+            out.truncate(mark);
+            return;
+        }
+        out.push(&rest[..dlen]);
+        count += 1;
+        let tail = skip_leading_v_digits(&rest[dlen..]);
+        if tail.is_empty() {
+            return;
+        }
+        if tail.starts_with('E') {
+            cur = tail;
+        } else {
+            out.truncate(mark);
+            out.push("0");
+            return;
+        }
+    }
+}
+
 fn parse_ep_numbers(ep_part: &str) -> (Option<u32>, Option<u32>) {
-    let digits: Vec<&str> = ep_part
-        .split(|c: char| !c.is_ascii_digit())
-        .filter(|text| plausible_episode(text))
+    let cleaned = strip_trailing_glued_codec(ep_part);
+    let segs: Vec<&str> = cleaned
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|s| !s.is_empty())
         .collect();
-    if digits.is_empty()
-        && let Some(token) = ep_part
-            .split(|c: char| !c.is_ascii_digit())
-            .find(|text| text.len() == 8 && boundary::is_calendar_date_text(text))
+    let mut raw_digits = Vec::new();
+    for seg in &segs {
+        extract_seg_episodes(seg, &mut raw_digits);
+    }
+    if let Some(token) = raw_digits
+        .iter()
+        .copied()
+        .find(|text| text.len() == 8 && boundary::is_calendar_date_text(text))
     {
         boundary::reject_date_token(token);
+        return (None, None);
     }
-    match digits.as_slice() {
-        [from] => (from.parse().ok(), None),
-        [from, to] => {
-            let f = from.parse().ok();
-            let t = to.parse().ok();
-            (
-                f,
-                t.filter(|to_val| f.is_some_and(|f_val| *to_val >= f_val)),
-            )
+    if raw_digits.is_empty() || !raw_digits.iter().all(|text| plausible_episode(text)) {
+        return (None, None);
+    }
+    let mut parsed = Vec::with_capacity(raw_digits.len());
+    for text in raw_digits {
+        let Ok(v) = text.parse::<u32>() else {
+            return (None, None);
+        };
+        parsed.push(v);
+    }
+    match parsed.as_slice() {
+        [from] => (Some(*from), None),
+        [from, rest @ ..] if parsed.windows(2).all(|w| w[1] >= w[0]) => {
+            (Some(*from), rest.last().copied())
         }
         _ => (None, None),
     }

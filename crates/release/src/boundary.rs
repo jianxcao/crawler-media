@@ -87,6 +87,9 @@ pub(super) fn is_calendar_date_text(digits: &str) -> bool {
 }
 
 fn is_calendar_date(digits: &str) -> bool {
+    if digits.len() != 8 || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return false;
+    }
     let year = &digits[..4];
     let month: u32 = digits[4..6].parse().unwrap_or(0);
     let day: u32 = digits[6..8].parse().unwrap_or(0);
@@ -130,9 +133,15 @@ fn try_parse_s_followed(
         }
         // Explicit `S00E00` is a real special coordinate; elsewhere episode 0 stays implausible.
         let special_zero = season == 0 && upper[e_start..m].parse::<u32>().ok() == Some(0);
-        if m > e_start && (plausible_episode(&upper[e_start..m]) || special_zero) {
+        if m > e_start
+            && is_episode_digit_end(bytes, m)
+            && (plausible_episode(&upper[e_start..m]) || special_zero)
+        {
             let ep = upper[e_start..m].parse::<u32>().ok()?;
-            let (ep_to, _) = parse_episode_range(&upper[m..]);
+            let after_ep = skip_ep_version_suffix(bytes, m);
+            let Ok(ep_to) = parse_episode_range(ep, &upper[after_ep..]) else {
+                return None;
+            };
             return Some((i, Some(season), Some(ep), ep_to));
         }
     }
@@ -141,11 +150,15 @@ fn try_parse_s_followed(
         while m < len && bytes[m].is_ascii_digit() {
             m += 1;
         }
-        if plausible_episode(&upper[k..m])
+        if is_episode_digit_end(bytes, m)
+            && plausible_episode(&upper[k..m])
             && let Ok(ep) = upper[k..m].parse::<u32>()
             && !is_likely_resolution(bytes, ep, m)
         {
-            let (ep_to, _) = parse_episode_range(&upper[m..]);
+            let after_ep = skip_ep_version_suffix(bytes, m);
+            let Ok(ep_to) = parse_episode_range(ep, &upper[after_ep..]) else {
+                return None;
+            };
             return Some((i, Some(season), Some(ep), ep_to));
         }
     }
@@ -153,6 +166,92 @@ fn try_parse_s_followed(
         return Some((i, Some(season), None, None));
     }
     None
+}
+
+fn skip_ep_version_suffix_raw(bytes: &[u8], j: usize) -> usize {
+    if bytes.get(j) == Some(&b'V') && bytes.get(j + 1).is_some_and(u8::is_ascii_digit) {
+        let mut k = j + 1;
+        while k < bytes.len() && bytes[k].is_ascii_digit() {
+            k += 1;
+        }
+        return k;
+    }
+    j
+}
+
+pub(super) const GLUED_CODECS: &[&str] = &[
+    "X265", "X264", "H.265", "H.264", "H265", "H264", "HEVC", "AVC", "AV1", "MPEG2", "VC-1", "VC1",
+    "XVID", "DIVX",
+];
+
+fn has_glued_codec_tail(bytes: &[u8], k: usize) -> bool {
+    for pat_str in GLUED_CODECS {
+        let pat = pat_str.as_bytes();
+        if bytes.get(k..k + pat.len()) == Some(pat) {
+            let end = k + pat.len();
+            return end >= bytes.len() || !bytes[end].is_ascii_alphanumeric();
+        }
+    }
+    false
+}
+
+const MAX_CHAINED_EP_SEGMENTS: usize = domain::Coverage::MAX_EPISODES as usize;
+
+fn has_chained_ep_tail(bytes: &[u8], mut k: usize) -> bool {
+    let mut segments = 0usize;
+    loop {
+        if segments >= MAX_CHAINED_EP_SEGMENTS || bytes.get(k) != Some(&b'E') {
+            return false;
+        }
+        segments += 1;
+        k += 1;
+        if bytes.get(k) == Some(&b'P') {
+            k += 1;
+        }
+        let start = k;
+        while k < bytes.len() && bytes[k].is_ascii_digit() {
+            k += 1;
+        }
+        let dlen = k - start;
+        if dlen == 0 || dlen > 4 {
+            return false;
+        }
+        let Ok(digits) = std::str::from_utf8(&bytes[start..k]) else {
+            return false;
+        };
+        if !plausible_episode(digits) {
+            return false;
+        }
+        let next = skip_ep_version_suffix_raw(bytes, k);
+        if next >= bytes.len()
+            || !bytes[next].is_ascii_alphanumeric()
+            || has_glued_codec_tail(bytes, next)
+        {
+            return true;
+        }
+        k = next;
+    }
+}
+
+fn skip_ep_version_suffix(bytes: &[u8], j: usize) -> usize {
+    let k = skip_ep_version_suffix_raw(bytes, j);
+    if k > j
+        && (k == bytes.len()
+            || !bytes[k].is_ascii_alphanumeric()
+            || has_glued_codec_tail(bytes, k)
+            || has_chained_ep_tail(bytes, k))
+    {
+        return k;
+    }
+    j
+}
+
+pub(super) fn is_episode_digit_end(bytes: &[u8], j: usize) -> bool {
+    let k = skip_ep_version_suffix_raw(bytes, j);
+    k >= bytes.len()
+        || !bytes[k].is_ascii_alphanumeric()
+        || has_glued_codec_tail(bytes, k)
+        || has_chained_ep_tail(bytes, k)
 }
 
 /// 查找 SxxExx、Sxx Exx、Sxx、Exx
@@ -172,21 +271,36 @@ pub(super) fn find_s_e_pattern(upper: &str) -> Option<SeasonEpisodeBoundary> {
             return Some(res);
         }
 
-        // 单独以 E01 开头
-        if is_start && bytes[i] == b'E' && i + 1 < len && bytes[i + 1].is_ascii_digit() {
-            let mut j = i + 1;
+        // 单独以 E01 / EP01 开头
+        let standalone_e_start = if is_start && bytes[i] == b'E' {
+            if bytes.get(i + 1) == Some(&b'P') && bytes.get(i + 2).is_some_and(u8::is_ascii_digit) {
+                Some(i + 2)
+            } else if bytes.get(i + 1).is_some_and(u8::is_ascii_digit) {
+                Some(i + 1)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        if let Some(e_start) = standalone_e_start {
+            let mut j = e_start;
             while j < len && bytes[j].is_ascii_digit() {
                 j += 1;
             }
-            let digits = &upper[i + 1..j];
-            if !plausible_episode(digits) {
-                if is_calendar_date(digits) {
-                    reject_date_token(&upper[i..j]);
+            if is_episode_digit_end(bytes, j) {
+                let digits = &upper[e_start..j];
+                if !plausible_episode(digits) {
+                    if is_calendar_date(digits) {
+                        reject_date_token(&upper[i..j]);
+                    }
+                } else if let Ok(ep) = digits.parse::<u32>() {
+                    let after_ep = skip_ep_version_suffix(bytes, j);
+                    if let Ok(ep_to) = parse_episode_range(ep, &upper[after_ep..]) {
+                        let ep_to = ep_to.filter(|to| plausible_episode(&to.to_string()));
+                        return Some((i, Some(1), Some(ep), ep_to));
+                    }
                 }
-            } else if let Ok(ep) = digits.parse::<u32>() {
-                let (ep_to, _) = parse_episode_range(&upper[j..]);
-                let ep_to = ep_to.filter(|to| plausible_episode(&to.to_string()));
-                return Some((i, Some(1), Some(ep), ep_to));
             }
         }
 
@@ -196,9 +310,41 @@ pub(super) fn find_s_e_pattern(upper: &str) -> Option<SeasonEpisodeBoundary> {
     None
 }
 
-/// 解析 E01-E04 或 -04 这种区间
-fn parse_episode_range(after: &str) -> (Option<u32>, usize) {
+/// 解析 E01-E04、-04 或紧邻多集 E01E02E03 这种区间
+fn parse_episode_range(prev_ep: u32, after: &str) -> Result<Option<u32>, ()> {
     let bytes = after.as_bytes();
+    if bytes.first().is_some_and(|b| *b == b'E' || *b == b'e') {
+        let mut cur = 0;
+        let mut cur_min = prev_ep;
+        let mut last_to = None;
+        while cur < bytes.len() && (bytes[cur] == b'E' || bytes[cur] == b'e') {
+            let mut k = cur + 1;
+            if bytes.get(k).is_some_and(|b| *b == b'P' || *b == b'p') {
+                k += 1;
+            }
+            let dstart = k;
+            while k < bytes.len() && bytes[k].is_ascii_digit() {
+                k += 1;
+            }
+            if k == dstart || !is_episode_digit_end(bytes, k) {
+                return Err(());
+            }
+            let digits = &after[dstart..k];
+            if !plausible_episode(digits) {
+                return Err(());
+            }
+            let Ok(ep) = digits.parse::<u32>() else {
+                return Err(());
+            };
+            if ep < cur_min {
+                return Err(());
+            }
+            cur_min = ep;
+            last_to = Some(ep);
+            cur = skip_ep_version_suffix(bytes, k);
+        }
+        return Ok(last_to);
+    }
     let mut i = 0;
     let mut has_sep = false;
     while i < bytes.len() && (bytes[i] == b' ' || bytes[i] == b'-' || bytes[i] == b'~') {
@@ -208,7 +354,7 @@ fn parse_episode_range(after: &str) -> (Option<u32>, usize) {
         i += 1;
     }
     if !has_sep || i >= bytes.len() {
-        return (None, 0);
+        return Ok(None);
     }
     let mut k = i;
     if bytes[k] == b'E' || bytes[k] == b'e' {
@@ -221,18 +367,20 @@ fn parse_episode_range(after: &str) -> (Option<u32>, usize) {
     while k < bytes.len() && bytes[k].is_ascii_digit() {
         k += 1;
     }
-    // Digits running into letters are an attribute, not a range end:
-    // `S01E90 - 2160p`, `E05-720p`, `- 1080i`, `- 4K` (2026-10-29 仙逆 mapped
-    // every file to E90–E2160, capped at 1000 units).
-    if k < bytes.len() && bytes[k].is_ascii_alphabetic() {
-        return (None, 0);
+    // Digits running into non-version letters are an attribute, not a range end:
+    // `S01E90 - 2160p`, `E05-720p`, `- 1080i`, `- 4K`.
+    if !is_episode_digit_end(bytes, k) {
+        return Ok(None);
     }
     if k > digit_start
+        && !is_calendar_date(&after[digit_start..k])
         && let Ok(to) = after[digit_start..k].parse::<u32>()
+        && to > 0
+        && to >= prev_ep
     {
-        return (Some(to), k);
+        return Ok(Some(to));
     }
-    (None, 0)
+    Ok(None)
 }
 
 /// 解析中文季集如 "第 2 季 第 5 集"、"第二季 第01-04集"

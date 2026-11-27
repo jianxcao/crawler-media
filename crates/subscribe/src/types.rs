@@ -1,11 +1,51 @@
+use std::collections::HashMap;
 use std::path::Path;
 
-use domain::{FileCoverage, FileSource, Filter, LibraryId, Media, Subscribe, Torrent};
-use downloader::Downloader;
-use hooks::{Bus, PluginError};
+use domain::{
+    DownloaderId, FileCoverage, FileSource, Filter, LibraryId, Media, MediaId, Subscribe,
+    SubscribeFacts, SubscribeId, Torrent,
+};
+use downloader::{
+    DownloadOpContext, DownloadOutcome, DownloadSubmitError, Downloader, FrozenDownloadPlan,
+};
+use hooks::{Gate, HookPipeline, PluginError, RescoreBudget};
 use library::TransferMode;
+use plugin_api::Candidate;
 
-use domain::SubscribeFacts;
+pub trait SyncDownloadSubmitter: Send + Sync {
+    fn submit_sync(
+        &self,
+        plan: FrozenDownloadPlan,
+        op: DownloadOpContext,
+    ) -> Result<DownloadOutcome, DownloadSubmitError>;
+}
+
+pub trait SubscribePolicyHooks: Send + Sync {
+    fn filter_after(
+        &self,
+        subscribe_id: SubscribeId,
+        candidates: &mut Vec<Candidate>,
+        admitted: &mut Vec<String>,
+        budget: &mut RescoreBudget,
+    );
+
+    fn score(
+        &self,
+        subscribe_id: SubscribeId,
+        media_id: MediaId,
+        candidates: &mut Vec<Candidate>,
+        admitted: &mut Vec<String>,
+        budget: &mut RescoreBudget,
+    );
+
+    fn select(
+        &self,
+        subscribe_id: SubscribeId,
+        media_id: MediaId,
+        candidates: &mut Vec<Candidate>,
+        admitted: &mut Vec<String>,
+    ) -> Gate;
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum SubscribeError {
@@ -42,7 +82,9 @@ pub struct RunInput<'a, D: Downloader + ?Sized> {
     pub config_revision: Option<i64>,
     pub transfer_mode: Option<TransferMode>,
     pub scrape: bool,
-    pub hooks: Option<&'a Bus>,
+    pub hooks: Option<&'a HookPipeline>,
+    pub policy_hooks: Option<&'a dyn SubscribePolicyHooks>,
+    pub submitter: Option<&'a dyn SyncDownloadSubmitter>,
     /// 入库命名模板（该 Media 类型的完整合成模式）；None = 内置默认。
     pub naming: Option<&'a str>,
     /// 洗版替换时保留被替换文件（不删除），交由调用方决定去处（回收站）。
@@ -51,6 +93,8 @@ pub struct RunInput<'a, D: Downloader + ?Sized> {
     pub overlap: crate::choose::OverlapPolicy,
     /// G-H2b: catalog season lengths for mapping absolute episode numbers.
     pub absolute: Option<&'a crate::AbsoluteEpisodes>,
+    /// Pre-computed destination paths from off-lock `transfer.rename` hooks keyed by source path.
+    pub renamed_destinations: std::collections::HashMap<std::path::PathBuf, std::path::PathBuf>,
 }
 
 pub struct RunOutcome {
@@ -77,4 +121,10 @@ pub struct RunOutcome {
     pub submission_errors: Vec<String>,
     /// All torrents added to downloader during this run along with their scores.
     pub torrents_added: Vec<(i32, Torrent)>,
+    /// Enclosures deferred by policy hooks for retry on a future tick.
+    pub deferred_enclosures: Vec<String>,
+    /// Enclosures with Unknown downloader outcome awaiting reconciliation.
+    pub unknown_enclosures: Vec<String>,
+    /// Resolved downloader_id & info_hash keyed by enclosure for submitted/unknown items.
+    pub submitted_meta: HashMap<String, (Option<DownloaderId>, Option<String>)>,
 }

@@ -137,7 +137,7 @@ fn handle_conn(stream: &mut std::net::TcpStream, capture: &Capture) {
         } else if capture.added.load(std::sync::atomic::Ordering::Relaxed) {
             (
                 "200 OK",
-                r#"[{"hash":"0123456789abcdef0123456789abcdef01234567","name":"Movie.2024","state":"uploading","progress":1.0,"save_path":"/downloads","content_path":"/downloads/Movie.2024.mkv","tags":"crawler-media,crawler-media-owned-0011223344556677","category":"crawler-media","total_size":1024,"dlspeed":0,"upspeed":0}]"#
+                r#"[{"hash":"0123456789abcdef0123456789abcdef01234567","name":"Movie.2024","state":"uploading","progress":1.0,"save_path":"/downloads","content_path":"/downloads/Movie.2024.mkv","tags":"crawler-media,crawler-media-owned-0011223344556677,cm-op:qbit-api-key-test","category":"crawler-media","total_size":1024,"dlspeed":0,"upspeed":0}]"#
                     .to_string(),
             )
         } else {
@@ -207,8 +207,19 @@ fn api_key_connects_via_bearer_header_without_login_and_sends_bearer_on_all_call
     })
     .expect("Bearer API key should connect without /auth/login");
 
-    dl.add(&sample_torrent()).unwrap();
-    let _ = dl.completed_files(&sample_torrent()).unwrap();
+    let torrent = sample_torrent();
+    dl.submit_verified(
+        &downloader::SubmitPayload::Magnet {
+            uri: torrent.enclosure.clone(),
+            info_hash: "0123456789abcdef0123456789abcdef01234567".into(),
+        },
+        &downloader::SubmitOptions {
+            ownership_tag: "cm-op:qbit-api-key-test".into(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let _ = dl.completed_files(&torrent).unwrap();
     let _ = dl.get_speed_limits().unwrap();
     dl.delete_task("0123456789abcdef0123456789abcdef01234567", true)
         .unwrap();

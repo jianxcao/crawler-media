@@ -22,39 +22,127 @@ pub enum DownloaderError {
     SourceRejected(String),
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SubmitPayload {
+    TorrentBytes {
+        bytes: Vec<u8>,
+        bytes_digest: String,
+        info_hash: String,
+    },
+    Magnet {
+        uri: String,
+        info_hash: String,
+    },
+}
+
+impl SubmitPayload {
+    pub fn info_hash(&self) -> &str {
+        match self {
+            Self::TorrentBytes { info_hash, .. } | Self::Magnet { info_hash, .. } => info_hash,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SubmitOptions {
+    pub ownership_tag: String,
+    pub save_path: Option<String>,
+    pub category: Option<String>,
+    pub extra_tags: Vec<String>,
+    pub paused: bool,
+    pub upload_limit: Option<u64>,
+    pub download_limit: Option<u64>,
+    pub sequential: bool,
+    pub first_last_piece: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ClientSubmitResult {
+    Added {
+        already_owned: bool,
+        info_hash: String,
+    },
+    ForeignDuplicate {
+        info_hash: String,
+    },
+    ExistingBroken {
+        info_hash: String,
+    },
+    UnknownOutcome {
+        reason: String,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DiskSpaceStatus {
+    Available,
+    Unavailable,
+    Unknown,
+}
+
+impl DiskSpaceStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Available => "available",
+            Self::Unavailable => "unavailable",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DiskSpaceInfo {
+    pub available_bytes: Option<u64>,
+    pub root_path: Option<PathBuf>,
+    pub status: DiskSpaceStatus,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TaskFileSet {
+    pub save_path: String,
+    pub files: Vec<PathBuf>,
+    pub total_bytes: u64,
+    pub claimed_by_app: bool,
+    pub tags: Vec<String>,
+    pub category: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ClientTaskQuery {
+    pub exists: bool,
+    pub info_hash: Option<String>,
+    pub owned_by_tag: bool,
+    pub broken: bool,
+    pub state: Option<String>,
+    pub paused: bool,
+}
+
 pub trait Downloader: Send + Sync {
-    fn add(&self, torrent: &Torrent) -> Result<(), DownloaderError>;
+    fn submit_verified(
+        &self,
+        payload: &SubmitPayload,
+        options: &SubmitOptions,
+    ) -> Result<ClientSubmitResult, DownloaderError>;
+
+    fn query_task_status(
+        &self,
+        info_hash: &str,
+        ownership_tag: &str,
+    ) -> Result<ClientTaskQuery, DownloaderError> {
+        let _ = (info_hash, ownership_tag);
+        Err(DownloaderError::Message(
+            "query_task_status unsupported".into(),
+        ))
+    }
+
+    fn supports_labels(&self) -> bool {
+        true
+    }
+
     /// D-M3: re-teach a client the info hash persisted for `torrent` (e.g.
     /// after a restart). Clients that identify tasks by tags ignore it.
     fn remember_identity(&self, _torrent: &Torrent, _hash: &str) -> Result<(), DownloaderError> {
         Ok(())
-    }
-    /// Add a torrent to an explicit downloader-side directory. Existing
-    /// implementations remain source-compatible; unsupported clients reject
-    /// an explicit directory instead of silently ignoring the user's choice.
-    fn add_with_options(
-        &self,
-        torrent: &Torrent,
-        download_url: &str,
-        save_path: Option<&str>,
-    ) -> Result<(), DownloaderError> {
-        if save_path.is_some() {
-            return Err(DownloaderError::Message(
-                "custom save paths are not supported by this downloader".into(),
-            ));
-        }
-        if download_url == torrent.enclosure {
-            self.add(torrent)
-        } else {
-            self.add_resolved(torrent, download_url)
-        }
-    }
-    /// Submit with a short-lived download URL while retaining the Torrent's
-    /// stable enclosure for matching, tags, and pending identity.
-    fn add_resolved(&self, torrent: &Torrent, download_url: &str) -> Result<(), DownloaderError> {
-        let mut resolved = torrent.clone();
-        resolved.enclosure = download_url.to_string();
-        self.add(&resolved)
     }
     fn completed_files(&self, torrent: &Torrent) -> Result<Vec<PathBuf>, DownloaderError>;
 
@@ -172,5 +260,40 @@ pub trait Downloader: Send + Sync {
         Err(DownloaderError::Message(
             "task snapshots unsupported".into(),
         ))
+    }
+
+    fn task_files_by_hash(&self, _info_hash: &str) -> Result<Option<TaskFileSet>, DownloaderError> {
+        Ok(None)
+    }
+
+    fn set_task_tags(&self, _info_hash: &str, _tags: &[String]) -> Result<(), DownloaderError> {
+        Err(DownloaderError::Message(
+            "set_task_tags not supported".into(),
+        ))
+    }
+
+    fn set_task_category(&self, _info_hash: &str, _category: &str) -> Result<(), DownloaderError> {
+        Err(DownloaderError::Message(
+            "set_task_category not supported".into(),
+        ))
+    }
+
+    fn set_task_limits(
+        &self,
+        _info_hash: &str,
+        _upload_limit: Option<u64>,
+        _download_limit: Option<u64>,
+    ) -> Result<(), DownloaderError> {
+        Err(DownloaderError::Message(
+            "set_task_limits not supported".into(),
+        ))
+    }
+
+    fn disk_free_space(&self) -> Result<DiskSpaceInfo, DownloaderError> {
+        Ok(DiskSpaceInfo {
+            available_bytes: None,
+            root_path: None,
+            status: DiskSpaceStatus::Unknown,
+        })
     }
 }

@@ -19,8 +19,10 @@ pub use choose::{
 };
 pub use collect::{
     TransferRecorder, collect_completed, collect_completed_controlled, collect_completed_recorded,
-    collect_completed_with_destinations,
+    collect_completed_with_destinations, plan_torrent_destinations,
 };
 pub use pending::{facts_with_pending, pending_slots};
 pub use run::{run, run_with_destinations, run_with_destinations_controlled, run_with_probe};
-pub use types::{RunInput, RunOutcome, SubscribeError};
+pub use types::{
+    RunInput, RunOutcome, SubscribeError, SubscribePolicyHooks, SyncDownloadSubmitter,
+};
