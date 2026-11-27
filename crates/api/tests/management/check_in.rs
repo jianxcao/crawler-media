@@ -283,6 +283,8 @@ async fn browser_maintenance_falls_back_to_http_when_browser_fails() {
         downloader_id: None,
         enabled: true,
         maintenance_via: domain::MaintenanceVia::Browser,
+        browser_search: false,
+        timezone: "UTC".into(),
     };
     state.store().insert_site(&site).unwrap();
     state
@@ -305,4 +307,97 @@ async fn browser_maintenance_falls_back_to_http_when_browser_fails() {
     let status = response.status();
     let body = json_body(response).await;
     assert_eq!(status, StatusCode::OK, "response was: {body}");
+}
+
+#[tokio::test]
+async fn site_check_in_returns_deduplicated_already_completed_status() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let stop = Arc::new(AtomicBool::new(false));
+    let hits = Arc::new(AtomicUsize::new(0));
+    let stop_c = stop.clone();
+    let hits_c = hits.clone();
+    std::thread::spawn(move || {
+        listener.set_nonblocking(true).unwrap();
+        while !stop_c.load(Ordering::Relaxed) {
+            if let Ok((mut stream, _)) = listener.accept() {
+                hits_c.fetch_add(1, Ordering::SeqCst);
+                let _ = stream.set_nonblocking(false);
+                let mut buf = [0; 1024];
+                let _ = stream.read(&mut buf);
+                let body =
+                    "<html><body><p>签到成功</p><a href=\"logout.php\">Logout</a></body></html>";
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(resp.as_bytes());
+                let _ = stream.flush();
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    });
+
+    let tmp = tempfile::tempdir().unwrap();
+    let app_state = state(
+        tmp.path(),
+        Arc::new(Fixtures {
+            requests: Mutex::new(Vec::new()),
+            bodies: HashMap::new(),
+        }),
+        Arc::new(MemoryDownloader::new(tmp.path().join("stage"))),
+    );
+    let site = domain::Site {
+        id: domain::SiteId::new(),
+        name: "dedup-site".into(),
+        url: format!("http://127.0.0.1:{port}/"),
+        profile_id: "demo".into(),
+        cookie: Some("uid=1; pass=valid".into()),
+        api_key: None,
+        rss_url: None,
+        proxy: None,
+        rate_limit_per_minute: None,
+        cdp_url: None,
+        downloader_id: None,
+        enabled: true,
+        maintenance_via: domain::MaintenanceVia::Http,
+        browser_search: false,
+        timezone: "UTC".into(),
+    };
+    app_state.store().insert_site(&site).unwrap();
+    let app = router(app_state);
+
+    let r1 = app
+        .clone()
+        .oneshot(request(
+            "POST",
+            &format!("/api/v1/sites/{}/check-in", site.id),
+            Some("management-secret"),
+            Value::Null,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r1.status(), StatusCode::OK);
+    let b1 = json_body(r1).await;
+    assert_eq!(b1["data"]["deduplicated"], false);
+
+    let r2 = app
+        .oneshot(request(
+            "POST",
+            &format!("/api/v1/sites/{}/check-in", site.id),
+            Some("management-secret"),
+            Value::Null,
+        ))
+        .await
+        .unwrap();
+    stop.store(true, Ordering::Relaxed);
+    assert_eq!(r2.status(), StatusCode::OK);
+    let b2 = json_body(r2).await;
+    assert_eq!(b2["data"]["deduplicated"], true);
+    assert_eq!(b2["data"]["status"], "already-completed");
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
 }

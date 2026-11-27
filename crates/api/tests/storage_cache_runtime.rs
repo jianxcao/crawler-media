@@ -82,7 +82,7 @@ fn jobs_db_layout_gate_rejects_missing_tables_with_backup_guidance() {
     let res = api::ApiState::new(
         store::Store::open(&data_dir).unwrap(),
         "secret".into(),
-        indexer::ProfileSet::load(None).unwrap(),
+        indexer::RegistrySnapshot::builtin().unwrap(),
         fetcher,
         downloader,
     );
@@ -155,7 +155,7 @@ fn live_databases_copy_is_accepted_and_stamped_properly() {
     let _state = api::ApiState::new(
         store::Store::open(&data_dir).unwrap(),
         "secret".into(),
-        indexer::ProfileSet::load(None).unwrap(),
+        indexer::RegistrySnapshot::builtin().unwrap(),
         fetcher,
         downloader,
     )
@@ -222,7 +222,7 @@ fn unstamped_jobs_db_is_rejected_without_changing_objects_or_headers() {
     let result = api::ApiState::new(
         store::Store::open(&data_dir).unwrap(),
         "secret".into(),
-        indexer::ProfileSet::load(None).unwrap(),
+        indexer::RegistrySnapshot::builtin().unwrap(),
         fetcher,
         downloader,
     );
@@ -279,7 +279,7 @@ fn stamped_jobs_db_missing_declared_index_is_rejected() {
     let res = api::ApiState::new(
         store::Store::open(&data_dir).unwrap(),
         "secret".into(),
-        indexer::ProfileSet::load(None).unwrap(),
+        indexer::RegistrySnapshot::builtin().unwrap(),
         fetcher,
         downloader,
     );

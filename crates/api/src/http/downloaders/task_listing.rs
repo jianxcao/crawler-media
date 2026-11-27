@@ -32,8 +32,11 @@ fn prune_orphan_pending(
             }
         }
     }
-    let targets: HashSet<Option<DownloaderId>> =
+    let mut targets: HashSet<Option<DownloaderId>> =
         kept.iter().map(|(_, _, item)| item.downloader_id).collect();
+    if let Ok(owned) = store.list_owned_download_tasks() {
+        targets.extend(owned.into_iter().map(|item| Some(item.downloader_id)));
+    }
     (kept, targets, orphans)
 }
 
@@ -224,6 +227,7 @@ fn task_row_json(
     reachable: &HashSet<Option<DownloaderId>>,
     media_info: Option<&(String, String, String)>,
     stored_hash: Option<&str>,
+    is_admin: bool,
 ) -> Value {
     let torrent = &pending.torrent;
     let key = subscribe_id.to_string();
@@ -240,9 +244,14 @@ fn task_row_json(
         None if reachable.contains(&pending.downloader_id) => "missing",
         None => "queued",
     };
+    let row_id = if is_admin {
+        format!("{}:{}", key, torrent.enclosure)
+    } else {
+        format!("{}:{}", key, downloader::ownership_tag(&torrent.enclosure))
+    };
     json!({
-        "id": format!("{}:{}", key, torrent.enclosure),
-        "info_hash": snapshot.map(|s| s.info_hash.clone()),
+        "id": row_id,
+        "info_hash": snapshot.map(|s| s.info_hash.as_str()).filter(|h| !h.is_empty()).or(stored_hash),
         "name": torrent.title,
         "downloader_id": pending.downloader_id.map(|id| id.to_string()),
         "downloader_name": pending.downloader_id.and_then(|id|
@@ -268,38 +277,145 @@ fn task_row_json(
     })
 }
 
+fn owned_task_row_json(
+    store: &store::Store,
+    owned: &store::download_operations::OwnedDownloadTaskSummary,
+    snapshots_by_downloader: &HashMap<Option<DownloaderId>, Vec<downloader::TaskSnapshot>>,
+    reachable: &HashSet<Option<DownloaderId>>,
+) -> Value {
+    let target_dl = Some(owned.downloader_id);
+    let norm_hash = owned
+        .info_hash
+        .as_deref()
+        .map(|h| h.trim().to_ascii_lowercase());
+    let snapshot = snapshots_by_downloader.get(&target_dl).and_then(|list| {
+        norm_hash
+            .as_deref()
+            .and_then(|hash| list.iter().find(|s| s.info_hash.eq_ignore_ascii_case(hash)))
+            .or_else(|| {
+                (!owned.ownership_tag.is_empty()).then(|| {
+                    list.iter()
+                        .find(|s| s.owned_tags.iter().any(|t| t == &owned.ownership_tag))
+                })?
+            })
+    });
+    let state = match snapshot {
+        Some(s) => task_state(&s.state, s.progress),
+        None => match owned.boost_state {
+            Some(
+                s @ (store::download_operations::BoostTaskState::RetainedOnly
+                | store::download_operations::BoostTaskState::CleanupPlanned),
+            ) => s.as_str(),
+            _ if reachable.contains(&target_dl) => "missing",
+            _ => "queued",
+        },
+    };
+    json!({
+        "id": owned.task_id,
+        "task_id": owned.task_id,
+        "info_hash": owned.info_hash.as_deref().filter(|h| !h.is_empty()).or_else(|| snapshot.map(|s| s.info_hash.as_str()).filter(|h| !h.is_empty())),
+        "name": snapshot
+            .map(|s| s.name.clone())
+            .or_else(|| owned.info_hash.clone())
+            .unwrap_or_else(|| {
+                if !owned.ownership_tag.is_empty() {
+                    owned.ownership_tag.clone()
+                } else {
+                    format!("owned-task-{}", owned.task_id)
+                }
+            }),
+        "downloader_id": owned.downloader_id.to_string(),
+        "downloader_name": store.get_downloader(owned.downloader_id).ok().flatten().map(|row| row.name),
+        "progress": snapshot.map(|s| s.progress),
+        "size_bytes": snapshot.map(|s| s.size_bytes).or_else(|| owned.verified_bytes.and_then(|v| u64::try_from(v).ok())),
+        "dlspeed_bytes": snapshot.map(|s| s.download_speed),
+        "upspeed_bytes": snapshot.map(|s| s.upload_speed),
+        "uploaded_bytes": snapshot.map(|s| s.uploaded_bytes),
+        "completed_bytes": snapshot.map(|s| s.downloaded_bytes),
+        "state": state,
+        "site_id": owned.site_id.map(|id| id.to_string()),
+        "plugin_id": owned.plugin_id,
+        "ownership_tag": owned.ownership_tag,
+        "retained_bytes": u64::try_from(owned.retained_bytes).unwrap_or(0),
+        "media_item_id": Value::Null,
+        "media_title": Value::Null,
+        "media_kind": Value::Null,
+        "score": 0,
+        "subscriptions": [],
+    })
+}
+
 fn map_task_rows(
     store: &crate::Store,
     kept: &[(domain::SubscribeId, i32, store::PendingDownload)],
     snapshots_by_downloader: &HashMap<Option<DownloaderId>, Vec<downloader::TaskSnapshot>>,
     reachable: &HashSet<Option<DownloaderId>>,
+    user_id: domain::UserId,
 ) -> Vec<Value> {
-    let subscribe_media = subscribe_media_index(&store, kept);
+    let is_admin = store.user_role(user_id).is_ok_and(|r| r == "admin");
+    let subscribe_media = subscribe_media_index(store, kept);
+    let default_dl_id = store
+        .default_downloader()
+        .ok()
+        .flatten()
+        .map(|r| r.id)
+        .unwrap_or_else(|| DownloaderId::from_uuid(uuid::Uuid::nil()));
     let mut hashes_by_sub: HashMap<domain::SubscribeId, HashMap<String, String>> = HashMap::new();
-    kept.iter()
-        .map(|(subscribe_id, score, pending)| {
-            let key = subscribe_id.to_string();
-            let hashes = hashes_by_sub.entry(*subscribe_id).or_insert_with(|| {
-                store
-                    .load_pending_info_hashes(*subscribe_id)
-                    .unwrap_or_default()
+    let mut rows: Vec<Value> = Vec::with_capacity(kept.len());
+    let mut seen_hashes: HashSet<(DownloaderId, String)> = HashSet::new();
+    for (subscribe_id, score, pending) in kept {
+        let key = subscribe_id.to_string();
+        let hashes = hashes_by_sub.entry(*subscribe_id).or_insert_with(|| {
+            store
+                .load_pending_info_hashes(*subscribe_id)
+                .unwrap_or_default()
+        });
+        let stored_hash = hashes.get(&pending.torrent.enclosure).map(String::as_str);
+        let row = task_row_json(
+            store,
+            *subscribe_id,
+            *score,
+            pending,
+            snapshots_by_downloader,
+            reachable,
+            subscribe_media.get(&key),
+            stored_hash,
+            is_admin,
+        );
+        let effective_dl = pending.downloader_id.unwrap_or(default_dl_id);
+        if let Some(hash) = row
+            .get("info_hash")
+            .and_then(Value::as_str)
+            .filter(|h| !h.is_empty())
+            .or(stored_hash)
+            .filter(|h| !h.is_empty())
+        {
+            seen_hashes.insert((effective_dl, hash.trim().to_ascii_lowercase()));
+        }
+        rows.push(row);
+    }
+    if let Ok(owned) = store.list_owned_download_tasks() {
+        for item in owned {
+            let duplicate = item.info_hash.as_deref().is_some_and(|h| {
+                seen_hashes.contains(&(item.downloader_id, h.trim().to_ascii_lowercase()))
             });
-            let stored_hash = hashes.get(&pending.torrent.enclosure).map(String::as_str);
-            task_row_json(
-                &store,
-                *subscribe_id,
-                *score,
-                pending,
-                snapshots_by_downloader,
-                reachable,
-                subscribe_media.get(&key),
-                stored_hash,
-            )
-        })
-        .collect()
+            if !duplicate {
+                rows.push(owned_task_row_json(
+                    store,
+                    &item,
+                    snapshots_by_downloader,
+                    reachable,
+                ));
+            }
+        }
+    }
+    rows
 }
 
-pub(crate) async fn list_tasks(State(state): State<ApiState>) -> Response {
+pub(crate) async fn list_tasks(
+    State(state): State<ApiState>,
+    axum::Extension(user_id): axum::Extension<domain::UserId>,
+) -> Response {
     let initial_state = state.clone();
     let (pending, targets, orphans) = match state
         .http_work
@@ -350,7 +466,7 @@ pub(crate) async fn list_tasks(State(state): State<ApiState>) -> Response {
     match store_read(
         &state,
         &[store::Db::Library, store::Db::App, store::Db::Subscribe],
-        move |store| map_task_rows(store, &kept, &snapshots, &reachable),
+        move |store| map_task_rows(store, &kept, &snapshots, &reachable, user_id),
     )
     .await
     {

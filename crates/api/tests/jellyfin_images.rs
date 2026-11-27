@@ -6,7 +6,7 @@ use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use domain::{Confidence, Media, MediaId, MediaKind, QualitySource, User, UserId, UserRole};
 use downloader::MemoryDownloader;
-use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
+use indexer::{FetchRequest, Fetcher, IndexerError, RegistrySnapshot};
 use serde_json::Value;
 use store::test_support::{FixtureFile, publish_fixture_file};
 use tower::ServiceExt;
@@ -71,7 +71,7 @@ fn app(root: &Path) -> (axum::Router, String, String) {
         ApiState::new(
             store,
             "admin-token".into(),
-            ProfileSet::load(None).unwrap(),
+            RegistrySnapshot::builtin().unwrap(),
             Arc::new(NoFetch),
             Arc::new(MemoryDownloader::new(root.join("stage"))),
         )
@@ -98,7 +98,7 @@ fn empty_library_app(root: &Path) -> axum::Router {
         ApiState::new(
             store,
             "admin-token".into(),
-            ProfileSet::load(None).unwrap(),
+            RegistrySnapshot::builtin().unwrap(),
             Arc::new(NoFetch),
             Arc::new(MemoryDownloader::new(root.join("stage"))),
         )
@@ -319,7 +319,7 @@ async fn static_artwork_is_public_but_respects_authenticated_library_visibility(
         ApiState::new(
             store,
             "admin-token".into(),
-            ProfileSet::load(None).unwrap(),
+            RegistrySnapshot::builtin().unwrap(),
             Arc::new(NoFetch),
             Arc::new(MemoryDownloader::new(tmp.path().join("stage"))),
         )

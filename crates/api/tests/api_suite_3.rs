@@ -5,6 +5,8 @@
 mod adopted_reads_catalog_independence;
 #[path = "bootstrap_credentials.rs"]
 mod bootstrap_credentials;
+#[path = "builtin_boost.rs"]
+mod builtin_boost;
 #[path = "c2b_race.rs"]
 mod c2b_race;
 #[path = "claim_transfer_source.rs"]
@@ -43,6 +45,32 @@ mod maintenance_write_gate;
 mod media_server_list_off_lock;
 #[path = "playback_file_assets.rs"]
 mod playback_file_assets;
+#[path = "plugin_core_slice_c_r10.rs"]
+mod plugin_core_slice_c_r10;
+#[path = "plugin_core_slice_c_r3.rs"]
+mod plugin_core_slice_c_r3;
+#[path = "plugin_core_slice_c_r7.rs"]
+mod plugin_core_slice_c_r7;
+#[path = "plugin_event_dispatcher.rs"]
+mod plugin_event_dispatcher;
+#[path = "plugin_http_dev_sideload.rs"]
+mod plugin_http_dev_sideload;
+#[path = "plugin_http_trust_install.rs"]
+mod plugin_http_trust_install;
+#[path = "plugin_p1c_operations.rs"]
+mod plugin_p1c_operations;
+#[path = "plugin_review_remediation.rs"]
+mod plugin_review_remediation;
+#[path = "plugin_slice_d_r12.rs"]
+mod plugin_slice_d_r12;
+#[path = "plugin_slice_d_r8.rs"]
+mod plugin_slice_d_r8;
+#[path = "plugin_slice_e_r11.rs"]
+mod plugin_slice_e_r11;
+#[path = "plugin_slice_e_r7.rs"]
+mod plugin_slice_e_r7;
+#[path = "plugin_ui_commands.rs"]
+mod plugin_ui_commands;
 #[path = "polish_logos_douban_and_overview.rs"]
 mod polish_logos_douban_and_overview;
 #[path = "protocol_entity_reads.rs"]
@@ -59,6 +87,8 @@ mod runtime_downloader;
 mod scan_report;
 #[path = "search_library_items.rs"]
 mod search_library_items;
+#[path = "site_checkin_hook.rs"]
+mod site_checkin_hook;
 #[path = "sites_media_runtime.rs"]
 mod sites_media_runtime;
 #[path = "storage_operations_runtime.rs"]

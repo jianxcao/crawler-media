@@ -6,7 +6,7 @@ use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use domain::{Media, MediaId, MediaKind};
 use downloader::MemoryDownloader;
-use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
+use indexer::{FetchRequest, Fetcher, IndexerError, RegistrySnapshot};
 use serde_json::Value;
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -134,7 +134,7 @@ fn fixture() -> Fx {
     let state = ApiState::new(
         store,
         "admin-token".into(),
-        ProfileSet::load(None).unwrap(),
+        RegistrySnapshot::builtin().unwrap(),
         Arc::new(NoFetch),
         Arc::new(MemoryDownloader::new(root.join("stage"))),
     )

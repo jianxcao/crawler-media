@@ -115,7 +115,7 @@ impl Fixture {
         let mut state = crate::ApiState::new_arc(
             store.clone(),
             "removal-secret".into(),
-            indexer::ProfileSet::load(None).unwrap(),
+            indexer::RegistrySnapshot::builtin().unwrap(),
             Arc::new(Offline),
             Arc::new(downloader::MemoryDownloader::new(temp.path().join("stage"))),
         )

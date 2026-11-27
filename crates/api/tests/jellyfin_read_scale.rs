@@ -9,7 +9,7 @@ use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use domain::{Confidence, LedgerId, Media, MediaId, MediaKind, QualitySource};
 use downloader::MemoryDownloader;
-use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
+use indexer::{FetchRequest, Fetcher, IndexerError, RegistrySnapshot};
 use media_server::provider::MediaServerProvider;
 use serde_json::Value;
 use store::test_support::{FixtureFile, publish_fixture_file};
@@ -113,7 +113,7 @@ fn seed(path: &Path, unrelated: usize) -> (ApiState, domain::UserId, String) {
     let state = ApiState::new(
         store,
         "management-secret".into(),
-        ProfileSet::load(None).unwrap(),
+        RegistrySnapshot::builtin().unwrap(),
         Arc::new(NoFetch),
         Arc::new(MemoryDownloader::new(path.join("stage"))),
     )
@@ -284,7 +284,7 @@ fn tv_scale(target: usize, other: usize) -> ScaleTv {
     let state = ApiState::new(
         store,
         "management-secret".into(),
-        ProfileSet::load(None).unwrap(),
+        RegistrySnapshot::builtin().unwrap(),
         Arc::new(NoFetch),
         Arc::new(MemoryDownloader::new(dir.path().join("stage"))),
     )
@@ -442,7 +442,7 @@ fn resume_scale(in_progress: usize, played: usize) -> ScaleResume {
     let state = ApiState::new(
         store,
         "management-secret".into(),
-        ProfileSet::load(None).unwrap(),
+        RegistrySnapshot::builtin().unwrap(),
         Arc::new(NoFetch),
         Arc::new(MemoryDownloader::new(dir.path().join("stage"))),
     )

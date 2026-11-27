@@ -12,7 +12,7 @@ use axum::{
     http::{Request, StatusCode},
 };
 use domain::{Media, MediaKind};
-use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
+use indexer::{FetchRequest, Fetcher, IndexerError, RegistrySnapshot};
 use media::CatalogHit;
 use serde_json::json;
 use tower::ServiceExt;
@@ -79,7 +79,7 @@ async fn move_claim_rejects_a_source_replaced_after_copy_without_deleting_it() {
     let state = ApiState::new(
         store,
         "secret".into(),
-        ProfileSet::load(None).unwrap(),
+        RegistrySnapshot::builtin().unwrap(),
         Arc::new(NoFetch),
         Arc::new(downloader::MemoryDownloader::new(tmp.path().join("stage"))),
     )

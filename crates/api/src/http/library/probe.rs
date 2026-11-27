@@ -229,7 +229,7 @@ mod tests {
         let state = ApiState::new(
             crate::Store::open(dir.path().join("data")).unwrap(),
             "test-token".into(),
-            indexer::ProfileSet::load(None).unwrap(),
+            indexer::RegistrySnapshot::builtin().unwrap(),
             Arc::new(NoFetch),
             Arc::new(downloader::MemoryDownloader::new(dir.path().join("stage"))),
         )

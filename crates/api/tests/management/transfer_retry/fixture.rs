@@ -18,8 +18,15 @@ use super::super::common::{Fixtures, json_data, request, state, subscribe_payloa
 pub(super) struct CompletedFiles(Mutex<HashMap<String, Vec<PathBuf>>>);
 
 impl Downloader for CompletedFiles {
-    fn add(&self, _: &Torrent) -> Result<(), DownloaderError> {
-        Ok(())
+    fn submit_verified(
+        &self,
+        payload: &downloader::SubmitPayload,
+        _options: &downloader::SubmitOptions,
+    ) -> Result<downloader::ClientSubmitResult, DownloaderError> {
+        Ok(downloader::ClientSubmitResult::Added {
+            already_owned: false,
+            info_hash: payload.info_hash().to_string(),
+        })
     }
     fn remove(&self, _: &Torrent, _: bool) -> Result<(), DownloaderError> {
         Ok(())

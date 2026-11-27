@@ -23,7 +23,7 @@ fn app(root: &std::path::Path) -> (axum::Router, ApiState) {
     let state = ApiState::new(
         api::Store::open(root.join("data")).unwrap(),
         "management-secret".into(),
-        indexer::ProfileSet::load(Some(&overlay)).unwrap(),
+        indexer::RegistrySnapshot::load_with_overlay(Some(&overlay)).unwrap(),
         Arc::new(common::Fixtures {
             requests: Mutex::new(Vec::new()),
             bodies: HashMap::new(),

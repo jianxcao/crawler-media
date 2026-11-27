@@ -164,7 +164,8 @@ fn load_want_on(store: &crate::Store) -> (ReconcileWant, crate::obscura_manager:
                 .iter()
                 .filter(|s| {
                     s.enabled
-                        && s.maintenance_via == domain::MaintenanceVia::Browser
+                        && (s.maintenance_via == domain::MaintenanceVia::Browser
+                            || s.browser_search)
                         && s.cdp_url.as_deref().is_none_or(|u| u.trim().is_empty())
                 })
                 .count()
@@ -235,9 +236,21 @@ pub async fn reconcile_off_runtime(state: &ApiState) {
     spawn_reconcile(state);
 }
 
-/// Fire-and-forget reconcile usable from sync code (startup, Site writes).
+/// Fire-and-forget reconcile usable from sync code (Site writes).
 pub fn spawn_reconcile(state: &ApiState) {
     reconcile_worker::schedule(state);
+}
+
+/// Startup reconcile: apply non-daemon states synchronously without reserving
+/// `http_work`, and only spawn background reconcile when Obscura must start.
+pub fn reconcile_startup(state: &ApiState) {
+    let (want, _) = load_want(state);
+    if let Some(reason) = not_started_reason(want) {
+        state.browser.set_managed_endpoint(None);
+        state.obscura.set_not_started_reason(Some(reason));
+    } else {
+        spawn_reconcile(state);
+    }
 }
 
 #[cfg(test)]

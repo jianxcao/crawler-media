@@ -9,7 +9,7 @@ use domain::{
     TypedItemId, UserId,
 };
 use downloader::MemoryDownloader;
-use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
+use indexer::{FetchRequest, Fetcher, IndexerError, RegistrySnapshot};
 use media_server::provider::{EntityKind, MediaServerProvider, QueryError};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -44,7 +44,7 @@ impl Fixture {
         let state = ApiState::new(
             store,
             TOKEN.into(),
-            ProfileSet::load(None).unwrap(),
+            RegistrySnapshot::builtin().unwrap(),
             Arc::new(NoFetch),
             Arc::new(MemoryDownloader::new(tmp.path().join("stage"))),
         )

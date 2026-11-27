@@ -40,9 +40,20 @@ struct TrackingDownloader {
 }
 
 impl Downloader for TrackingDownloader {
-    fn add(&self, torrent: &Torrent) -> Result<(), DownloaderError> {
-        self.added_torrents.lock().push(torrent.clone());
-        self.inner.add(torrent)
+    fn remember_identity(&self, torrent: &Torrent, hash: &str) -> Result<(), DownloaderError> {
+        let mut added = self.added_torrents.lock();
+        if !added.iter().any(|t| t.enclosure == torrent.enclosure) {
+            added.push(torrent.clone());
+        }
+        self.inner.remember_identity(torrent, hash)
+    }
+
+    fn submit_verified(
+        &self,
+        payload: &downloader::SubmitPayload,
+        options: &downloader::SubmitOptions,
+    ) -> Result<downloader::ClientSubmitResult, DownloaderError> {
+        self.inner.submit_verified(payload, options)
     }
 
     fn remove(&self, torrent: &Torrent, delete_files: bool) -> Result<(), DownloaderError> {
@@ -98,7 +109,7 @@ fn build_test_state(
     api::ApiState::new(
         api::Store::open(tmp_path.join("data")).unwrap(),
         "management-secret".into(),
-        indexer::ProfileSet::load(None).unwrap(),
+        indexer::RegistrySnapshot::builtin().unwrap(),
         fetcher,
         downloader,
     )

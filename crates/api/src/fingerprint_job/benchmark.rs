@@ -91,7 +91,7 @@ impl BenchmarkSession {
         let state = crate::ApiState::new_arc(
             store,
             uuid::Uuid::new_v4().to_string(),
-            indexer::ProfileSet::load(None).map_err(|e| e.to_string())?,
+            indexer::RegistrySnapshot::builtin().map_err(|e| e.to_string())?,
             Arc::new(NoNetwork),
             Arc::new(downloader::MemoryDownloader::new(
                 options.data_dir.join("download-stage"),

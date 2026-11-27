@@ -29,7 +29,7 @@ pub(super) fn selected_titles(
         .filter_map(|source| match source {
             Source::Subscribe(id) => subscribed_media.get(id).copied(),
             Source::Media(id) => Some(*id),
-            Source::Global => None,
+            Source::Global | Source::PluginTask(_) | Source::PluginOperation(_) => None,
         })
         .collect::<HashSet<_>>()
         .into_iter()
@@ -41,7 +41,7 @@ pub(super) fn selected_titles(
             let id = match source {
                 Source::Subscribe(id) => subscribed_media.get(id)?,
                 Source::Media(id) => id,
-                Source::Global => return None,
+                Source::Global | Source::PluginTask(_) | Source::PluginOperation(_) => return None,
             };
             media.get(id).map(|row| row.title.clone())
         })

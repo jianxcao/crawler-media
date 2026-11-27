@@ -1,22 +1,30 @@
+mod download_ops;
 mod image_delivery;
 mod startup;
+mod subscribe_reservation;
+pub use startup::ApiStateBootstrapOptions;
+pub use subscribe_reservation::ApiStateError;
+pub(crate) use subscribe_reservation::SubscribeDeletionReservation;
+use subscribe_reservation::{open_jobs, seed_jobs};
 
 use std::collections::{HashMap, HashSet};
+use std::net::SocketAddr;
 use std::num::NonZeroUsize;
+use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use downloader::Downloader;
-use indexer::{Fetcher, Indexer, ProfileSet};
+use indexer::{Fetcher, Indexer, RegistrySnapshot};
 use parking_lot::Mutex;
 
 use super::query_phase::{QueryPhaseSnapshot, QueryPhaseTotals};
 use crate::Store;
 use crate::catalog::Catalog;
-use crate::poster_fetch::{HttpPoster, PosterFetch};
+use crate::poster_fetch::PosterFetch;
 use crate::store::StoreError;
-use crate::system_logs::{DEFAULT_CAPACITY, LogBuffer};
+use crate::system_logs::LogBuffer;
 use domain::{SubscribeId, UserId};
 
 /// Production Library reader capacity.
@@ -104,9 +112,14 @@ pub struct ApiState {
     deleting_subscribes: Arc<Mutex<HashSet<SubscribeId>>>,
     /// In-flight manual admit operations keyed by `(subscribe_id, enclosure)`.
     pub(crate) manual_admit_inflight: Arc<Mutex<HashSet<(SubscribeId, String)>>>,
+    /// Active in-process `DownloadService::submit_sync` operations guarded from
+    /// concurrent `Submitting` crash-recovery ticks.
+    pub(crate) in_flight_download_ops: Arc<Mutex<HashMap<String, usize>>>,
     pub(crate) jellyfin_server_id: Arc<String>,
     pub(crate) indexer: Arc<Indexer>,
     pub(crate) downloader: Arc<dyn Downloader>,
+    pub(crate) torrent_payload_fetcher:
+        Arc<dyn crate::download_service::fetcher::TorrentPayloadFetcher>,
     pub(crate) catalog: Arc<dyn Catalog>,
     /// Parsed country and language tables for this process.
     pub(crate) configuration_memory: Arc<crate::configuration_memory::ConfigurationMemory>,
@@ -128,6 +141,12 @@ pub struct ApiState {
     pub browser: Arc<indexer::Browser>,
     /// 异步媒体探测队列（streamdetails + 声纹指纹后台采集）。
     pub probe: Arc<crate::probe_manager::ProbeManager>,
+    /// 插件命令/任务/效果协调服务。
+    pub(crate) plugins: Arc<crate::plugins::PluginService>,
+    pub(crate) self_listen: Option<SocketAddr>,
+    pub(crate) indexer_overlay_dir: Option<PathBuf>,
+    pub(crate) plugin_http_policy_override: Option<net_guard::TargetPolicy>,
+    pub(crate) admin_trusted_plugins: HashSet<String>,
     /// 持久章节帧义务的有界派发服务（2 进程 / 64 ID 窗口）。
     pub(crate) chapter_frames: Arc<crate::chapter_frame_service::ChapterFrameService>,
     /// Protocol references selected for Jellyfin pages.
@@ -208,7 +227,7 @@ impl ApiState {
     pub fn new<F>(
         store: Store,
         token: String,
-        profiles: ProfileSet,
+        snapshot: Arc<RegistrySnapshot>,
         fetcher: Arc<F>,
         downloader: Arc<dyn Downloader>,
     ) -> Result<Self, ApiStateError>
@@ -216,7 +235,7 @@ impl ApiState {
         F: Fetcher + 'static,
     {
         let store = Arc::new(store);
-        Self::new_arc(store, token, profiles, fetcher, downloader)
+        Self::new_arc(store, token, snapshot, fetcher, downloader)
     }
 
     /// Variant that takes the Store already shared through Arc, so
@@ -224,21 +243,21 @@ impl ApiState {
     pub fn new_arc<F>(
         store: Arc<Store>,
         token: String,
-        profiles: ProfileSet,
+        snapshot: Arc<RegistrySnapshot>,
         fetcher: Arc<F>,
         downloader: Arc<dyn Downloader>,
     ) -> Result<Self, ApiStateError>
     where
         F: Fetcher + 'static,
     {
-        Self::new_arc_with_admin_password(store, token, None, profiles, fetcher, downloader)
+        Self::new_arc_with_admin_password(store, token, None, snapshot, fetcher, downloader)
     }
 
     pub fn new_arc_with_admin_password<F>(
         store: Arc<Store>,
         token: String,
         admin_password: Option<String>,
-        profiles: ProfileSet,
+        snapshot: Arc<RegistrySnapshot>,
         fetcher: Arc<F>,
         downloader: Arc<dyn Downloader>,
     ) -> Result<Self, ApiStateError>
@@ -258,12 +277,12 @@ impl ApiState {
         )
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e.to_string()))?;
 
-        Self::new_arc_with_admin_bootstrap(store, profiles, fetcher, downloader, action)
+        Self::new_arc_with_admin_bootstrap(store, snapshot, fetcher, downloader, action)
     }
 
     pub fn new_arc_with_admin_bootstrap_writable<F>(
         store: Arc<Store>,
-        profiles: ProfileSet,
+        snapshot: Arc<RegistrySnapshot>,
         fetcher: Arc<F>,
         downloader: Arc<dyn Downloader>,
         action: crate::bootstrap_credentials::AdminBootstrapAction,
@@ -272,138 +291,42 @@ impl ApiState {
     where
         F: Fetcher + 'static,
     {
-        Self::new_arc_with_admin_bootstrap_inner(
+        Self::new_arc_with_bootstrap_options(
             store,
-            profiles,
+            snapshot,
             fetcher,
             downloader,
             action,
-            initial_writable,
-            false,
+            ApiStateBootstrapOptions {
+                initial_writable,
+                ..Default::default()
+            },
         )
     }
 
-    pub(super) fn new_arc_with_admin_bootstrap_inner<F>(
+    pub fn new_arc_with_bootstrap_options<F>(
         store: Arc<Store>,
-        profiles: ProfileSet,
+        snapshot: Arc<RegistrySnapshot>,
         fetcher: Arc<F>,
         downloader: Arc<dyn Downloader>,
         action: crate::bootstrap_credentials::AdminBootstrapAction,
-        initial_writable: bool,
-        pause_background_probe: bool,
+        opts: ApiStateBootstrapOptions,
     ) -> Result<Self, ApiStateError>
     where
         F: Fetcher + 'static,
     {
-        let deferred_action = if initial_writable {
-            apply_admin_bootstrap(&store.as_ref(), action)?;
+        let deferred_action = if opts.initial_writable {
+            apply_admin_bootstrap(store.as_ref(), action)?;
             None
         } else {
             Some(action)
         };
-        let jellyfin_server_id = startup::jellyfin_server_id(&store.as_ref(), initial_writable)?;
-        let jobs_path = store.as_ref().data_dir().join("jobs.db");
-        let jobs = open_jobs(&jobs_path, initial_writable)?;
-        let jobs_readers = crate::jobs_readers::open(&jobs_path)?;
-        store.configure_reader_pool_size(
-            store::Db::Library,
-            NonZeroUsize::new(STORE_READERS)
-                .ok_or_else(|| StoreError::Invalid("Library reader capacity is zero".into()))?,
-        )?;
-        let library_reads = store.reader_pool(store::Db::Library);
-        let data_dir = store.data_dir().to_path_buf();
-        let writers = store.writers();
-        // 有 Tokio runtime 时启动异步探测 worker；只读从属实例延迟恢复与后台启动。
-        let (library_work, probe, chapter_frames, catalog, media_posters) =
-            startup::init_probe_and_catalog(&store, initial_writable, pause_background_probe)?;
-        let startup_browser = crate::runtime_browser::startup_browser(store.clone());
-        let state = Self {
-            store: store.clone(),
-            library_reads,
-            writers,
-            password_login: Arc::new(crate::password_login::PasswordLogin::new(
-                Arc::new(crate::password_login::Argon2Engine),
-                2,
-            )),
-            http_work: Arc::new(crate::blocking_budget::BlockingBudget::new(8)),
-            chapter_work: Arc::new(crate::blocking_budget::BlockingBudget::new(2)),
-            discover_work: Arc::new(Default::default()),
-            search_work: Arc::new(crate::blocking_budget::BlockingBudget::new(4)),
-            season_enrichment_work: Arc::new(crate::blocking_budget::BlockingBudget::new(2)),
-            fs_work: Arc::new(crate::blocking_budget::BlockingBudget::new(2)),
-            artwork_reads: Arc::new(crate::blocking_budget::BlockingBudget::new(4)),
-            jobs_read_work: Arc::new(crate::blocking_budget::BlockingBudget::new(4)),
-            browser_reconcile: Default::default(),
-            backdrop_enrichment: Arc::new(crate::backdrop_enrichment::BackdropEnrichment::new(2)),
-            notify_transport: Arc::new(crate::http::notify::notify_transport::HttpNotifyTransport),
-            subtitle_delivery: Arc::new(crate::subtitle_delivery::SubtitleDelivery::new(
-                Arc::new(library::ControlledSubtitleRunner),
-                2,
-            )),
-            file_stats: Arc::new(crate::file_stat_read::LocalFileStatRead),
-            library_files: Arc::new(crate::library_presence::SystemLibraryFileRead),
-            theintrodb_negative: Arc::new(Default::default()),
-            theintrodb_factory: Arc::new(crate::theintrodb_lookup::HttpClientFactory),
-            theintrodb_inflight: Arc::new(Default::default()),
-            chapter_probe: Arc::new(crate::marker_resolver::FfprobeChapters),
-            playback_clock: Arc::new(crate::playback_events::SystemPlaybackClock),
-            job_updates: Arc::new(crate::job_updates::JobUpdates::new()),
-            cover_service: Arc::new(crate::library_cover_service::LibraryCoverService::local()),
-            scan_coordinator: Arc::new(crate::scan_operations::ScanCoordinator::new()),
-            library_work,
-            jobs: Arc::new(crate::JobsWriter::new(jobs)),
-            jobs_readers,
-            job_loop_control: Arc::new(crate::job_loop::JobLoopControl::new()),
-            instance_writable: Arc::new(std::sync::atomic::AtomicBool::new(initial_writable)),
-            writable_startup_done: Arc::new(std::sync::atomic::AtomicBool::new(initial_writable)),
-            runtime_workers_started: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            deferred_bootstrap: Arc::new(Mutex::new(deferred_action)),
-            write_gate: Arc::new(crate::write_gate::WriteGate::new()),
-            maintenance_executor: Arc::new(crate::maintenance::SqliteExecutor),
-            maintenance_lock: Arc::new(Mutex::new(())),
-            media_refs_retry_at: Arc::new(Mutex::new((0, None))),
-            subscribe_cleanup_cursor: Arc::new(Mutex::new(None)),
-            subscribe_jobs_cursor: Arc::new(Mutex::new(None)),
-            active_job_attempts: Arc::new(Mutex::new(HashMap::new())),
-            job_attempt_coordinator: Arc::new(Mutex::new(())),
-            subscribe_guards: Arc::new(Mutex::new(HashMap::new())),
-            active_transfers: Arc::new(Mutex::new(std::collections::HashSet::new())),
-            subscribe_round_finished: Arc::new(tokio::sync::Notify::new()),
-            deleting_subscribes: Arc::new(Mutex::new(HashSet::new())),
-            manual_admit_inflight: Arc::new(Mutex::new(HashSet::new())),
-            jellyfin_server_id: Arc::new(jellyfin_server_id),
-            indexer: Arc::new(Indexer::new(profiles, fetcher)),
-            downloader,
-            catalog: catalog.clone(),
-            configuration_memory: Arc::new(
-                crate::configuration_memory::ConfigurationMemory::default(),
-            ),
-            similar_reads: Arc::default(),
-            scan_catalog: Arc::new(Mutex::new((catalog, media_posters.clone()))),
-            poster_fetch: Arc::new(HttpPoster),
-            fanart_cache: Arc::default(),
-            media_posters,
-            image_delivery: crate::http::image_proxy::new(&data_dir),
-            log_buffer: LogBuffer::new(DEFAULT_CAPACITY),
-            obscura: Arc::new(crate::obscura_manager::ObscuraManager::new(&data_dir)),
-            browser: Arc::new(startup_browser.0),
-            probe,
-            chapter_frames,
-            jellyfin_candidates: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            jellyfin_heavy_items: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            jellyfin_hydrated_rows: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            query_phase_totals: Arc::new(QueryPhaseTotals::default()),
-            protocol_selection_barrier: None,
-            library_header_barrier: None,
-            library_read_stage_barrier: None,
-            statistics_phase_barrier: None,
-        };
-        state.finish_initialization(startup_browser.1)
+        startup::assemble_api_state(store, snapshot, fetcher, downloader, deferred_action, opts)
     }
 
     pub fn new_arc_with_admin_bootstrap<F>(
         store: Arc<Store>,
-        profiles: ProfileSet,
+        snapshot: Arc<RegistrySnapshot>,
         fetcher: Arc<F>,
         downloader: Arc<dyn Downloader>,
         action: crate::bootstrap_credentials::AdminBootstrapAction,
@@ -412,7 +335,7 @@ impl ApiState {
         F: Fetcher + 'static,
     {
         Self::new_arc_with_admin_bootstrap_writable(
-            store, profiles, fetcher, downloader, action, true,
+            store, snapshot, fetcher, downloader, action, true,
         )
     }
 
@@ -520,7 +443,44 @@ impl ApiState {
 
     pub fn with_browser(mut self, browser: Arc<indexer::Browser>) -> Self {
         self.browser = browser;
+        self.sync_plugin_host_deps();
         self
+    }
+
+    pub fn with_self_listen(mut self, addr: SocketAddr) -> Self {
+        self.self_listen = Some(addr);
+        self.sync_plugin_host_deps();
+        self
+    }
+
+    pub fn with_indexer_overlay_dir(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.indexer_overlay_dir = Some(dir.into());
+        if self.instance_writable() {
+            crate::plugins::sync_registry_snapshot_on_startup(&self);
+        }
+        self
+    }
+
+    pub fn with_plugin_http_policy_override(mut self, policy: net_guard::TargetPolicy) -> Self {
+        self.plugin_http_policy_override = Some(policy);
+        self.sync_plugin_host_deps();
+        self
+    }
+
+    pub fn with_admin_trusted_plugins<I, S>(mut self, ids: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.admin_trusted_plugins = ids.into_iter().map(Into::into).collect();
+        self.sync_plugin_host_deps();
+        self
+    }
+
+    pub(crate) fn sync_plugin_host_deps(&self) {
+        self.plugins
+            .ports()
+            .bind_deps(crate::plugins::HostDeps::from_state(self));
     }
 
     /// 替换浏览文件访问 seam（测试注入阻塞实现以证明 NFO/stat 不在 Store 锁内）。
@@ -631,6 +591,10 @@ impl ApiState {
         self.store.clone()
     }
 
+    pub fn indexer(&self) -> &Arc<Indexer> {
+        &self.indexer
+    }
+
     pub fn jobs_readers(&self) -> Arc<store::ReaderPool> {
         self.jobs_readers.clone()
     }
@@ -730,52 +694,65 @@ impl ApiState {
         self.poster_fetch = poster_fetch;
         self
     }
-}
 
-/// Keeps a subscription marked as deleting across async cleanup awaits. Drop
-/// clears the reservation after the caller has either deleted the row or
-/// abandoned cleanup, so a failed/cancelled request does not strand it.
-pub(crate) struct SubscribeDeletionReservation {
-    state: ApiState,
-    id: SubscribeId,
-}
-
-impl SubscribeDeletionReservation {
-    pub(crate) fn new(state: ApiState, id: SubscribeId) -> Self {
-        Self { state, id }
+    pub fn with_torrent_payload_fetcher(
+        mut self,
+        fetcher: Arc<dyn crate::download_service::fetcher::TorrentPayloadFetcher>,
+    ) -> Self {
+        self.torrent_payload_fetcher = fetcher;
+        self
     }
-}
 
-impl Drop for SubscribeDeletionReservation {
-    fn drop(&mut self) {
-        let guard = self.state.subscribe_guard(self.id);
-        let _guard = guard.lock();
-        self.state.clear_subscribe_deleting(self.id);
+    #[doc(hidden)]
+    pub fn library_work_idle_for_test(&self) -> bool {
+        self.library_work.is_idle()
     }
-}
 
-#[derive(Debug, thiserror::Error)]
-pub enum ApiStateError {
-    #[error(transparent)]
-    Io(#[from] std::io::Error),
-    #[error(transparent)]
-    Store(#[from] StoreError),
-}
-
-fn open_jobs(jobs_path: &std::path::Path, seed_defs: bool) -> Result<jobs::Queue, ApiStateError> {
-    let jobs =
-        jobs::Queue::open(jobs_path).map_err(|error| std::io::Error::other(error.to_string()))?;
-    if seed_defs {
-        seed_jobs(&jobs)?;
+    pub fn plugins(&self) -> &Arc<crate::plugins::PluginService> {
+        &self.plugins
     }
-    Ok(jobs)
-}
 
-pub(super) fn seed_jobs(jobs: &jobs::Queue) -> Result<(), ApiStateError> {
-    crate::jobs_api::seed_instance_defs(jobs)
-        .map_err(|err| std::io::Error::other(err.to_string()))?;
-    // 维护任务默认 def：幂等注册，用户改过的开关/频率/payload 原样保留。
-    crate::maintenance::seed_maintenance_defs(jobs)
-        .map_err(|err| std::io::Error::other(err.to_string()))?;
-    Ok(())
+    pub fn with_plugin_effects(
+        mut self,
+        adapter: Arc<dyn crate::plugins::PluginEffectAdapter>,
+    ) -> Self {
+        let mut service = crate::plugins::PluginService::new()
+            .with_effects(adapter)
+            .with_task_runner(self.plugins.task_runner().clone());
+        if let Some(hook) = self.plugins.pre_effect_hook() {
+            service = service.with_pre_effect_hook(hook.clone());
+        }
+        self.plugins = Arc::new(service);
+        self.sync_plugin_host_deps();
+        self
+    }
+
+    pub fn with_plugin_task_runner(
+        mut self,
+        runner: Arc<dyn crate::plugins::PluginTaskRunner>,
+    ) -> Self {
+        let mut service = crate::plugins::PluginService::new()
+            .with_effects(self.plugins.effects().clone())
+            .with_task_runner(runner);
+        if let Some(hook) = self.plugins.pre_effect_hook() {
+            service = service.with_pre_effect_hook(hook.clone());
+        }
+        self.plugins = Arc::new(service);
+        self.sync_plugin_host_deps();
+        self
+    }
+
+    pub fn with_plugin_pre_effect_hook(
+        mut self,
+        hook: Arc<dyn Fn(domain::PluginOperationId) + Send + Sync>,
+    ) -> Self {
+        self.plugins = Arc::new(
+            crate::plugins::PluginService::new()
+                .with_effects(self.plugins.effects().clone())
+                .with_task_runner(self.plugins.task_runner().clone())
+                .with_pre_effect_hook(hook),
+        );
+        self.sync_plugin_host_deps();
+        self
+    }
 }

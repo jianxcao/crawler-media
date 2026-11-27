@@ -327,7 +327,11 @@ async fn admit_without_override_keeps_parsed_release() {
 
 struct FailingAddDownloader;
 impl downloader::Downloader for FailingAddDownloader {
-    fn add(&self, _: &domain::Torrent) -> Result<(), downloader::DownloaderError> {
+    fn submit_verified(
+        &self,
+        _: &downloader::SubmitPayload,
+        _: &downloader::SubmitOptions,
+    ) -> Result<downloader::ClientSubmitResult, downloader::DownloaderError> {
         Err(downloader::DownloaderError::Message(
             "simulated add failure".into(),
         ))
@@ -376,10 +380,25 @@ struct ConfirmThenFailDownloader {
     subscribe_id: domain::SubscribeId,
 }
 impl downloader::Downloader for ConfirmThenFailDownloader {
-    fn add(&self, torrent: &domain::Torrent) -> Result<(), downloader::DownloaderError> {
+    fn submit_verified(
+        &self,
+        payload: &downloader::SubmitPayload,
+        _: &downloader::SubmitOptions,
+    ) -> Result<downloader::ClientSubmitResult, downloader::DownloaderError> {
         let store = self.store.get().unwrap();
+        let enclosure = store.load_pending(self.subscribe_id).unwrap()[0]
+            .1
+            .torrent
+            .enclosure
+            .clone();
         store
-            .confirm_pending_submission(self.subscribe_id, &torrent.enclosure, 12345)
+            .confirm_pending_submission(
+                self.subscribe_id,
+                &enclosure,
+                12345,
+                None,
+                Some(payload.info_hash()),
+            )
             .unwrap();
         Err(downloader::DownloaderError::Message(
             "post-confirm error".into(),

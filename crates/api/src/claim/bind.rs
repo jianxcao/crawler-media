@@ -51,6 +51,7 @@ pub(crate) fn bind_existing(state: &ApiState, id: &str, path: &str) -> Response 
         &facts,
         &source,
         None,
+        None,
     ) {
         Ok(file) => file,
         Err(response) => return response,

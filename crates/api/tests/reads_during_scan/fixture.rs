@@ -5,7 +5,7 @@ use domain::{
     MediaKind, Subscribe, SubscribeId, User, UserId, UserRole,
 };
 use downloader::MemoryDownloader;
-use indexer::ProfileSet;
+use indexer::RegistrySnapshot;
 use std::sync::Arc;
 
 use super::doubles::{ImmediatePassword, OfflineCatalog, OfflineFetcher, PASSWORD};
@@ -54,7 +54,7 @@ impl Fixture {
         let state = ApiState::new(
             store,
             "interactive-admin-fixture-token".into(),
-            ProfileSet::load(None).unwrap(),
+            RegistrySnapshot::builtin().unwrap(),
             Arc::new(OfflineFetcher),
             Arc::new(MemoryDownloader::new(dir.path().join("stage"))),
         )

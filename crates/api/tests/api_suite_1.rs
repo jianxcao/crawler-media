@@ -5,10 +5,14 @@
 mod adaptive_benchmark_report;
 #[path = "artwork_security.rs"]
 mod artwork_security;
+#[path = "boost_cleanup_preview.rs"]
+mod boost_cleanup_preview;
 #[path = "browse_semantic_parity.rs"]
 mod browse_semantic_parity;
 #[path = "config_parsing.rs"]
 mod config_parsing;
+#[path = "download_service.rs"]
+mod download_service;
 #[path = "downloader_remove_cancel.rs"]
 mod downloader_remove_cancel;
 #[path = "favorites_keyset.rs"]
@@ -43,6 +47,34 @@ mod media_artwork_urls;
 mod next_up_resume;
 #[path = "playback_session_migration.rs"]
 mod playback_session_migration;
+#[path = "plugin_commands.rs"]
+mod plugin_commands;
+#[path = "plugin_core_slice_c_r12.rs"]
+mod plugin_core_slice_c_r12;
+#[path = "plugin_core_slice_c_r5.rs"]
+mod plugin_core_slice_c_r5;
+#[path = "plugin_core_slice_c_r9.rs"]
+mod plugin_core_slice_c_r9;
+#[path = "plugin_http_auth_gate.rs"]
+mod plugin_http_auth_gate;
+#[path = "plugin_http_ops_tasks.rs"]
+mod plugin_http_ops_tasks;
+#[path = "plugin_p1c_install_config.rs"]
+mod plugin_p1c_install_config;
+#[path = "plugin_p1c_upgrade_rollback.rs"]
+mod plugin_p1c_upgrade_rollback;
+#[path = "plugin_slice_d_r10.rs"]
+mod plugin_slice_d_r10;
+#[path = "plugin_slice_d_r3.rs"]
+mod plugin_slice_d_r3;
+#[path = "plugin_slice_d_remediation.rs"]
+mod plugin_slice_d_remediation;
+#[path = "plugin_slice_e_r2.rs"]
+mod plugin_slice_e_r2;
+#[path = "plugin_slice_e_remediation.rs"]
+mod plugin_slice_e_remediation;
+#[path = "plugin_wasm_runtime.rs"]
+mod plugin_wasm_runtime;
 #[path = "poster_worker_lifetime.rs"]
 mod poster_worker_lifetime;
 #[path = "protocol_person_images.rs"]
@@ -59,6 +91,8 @@ mod scan_operations;
 mod scan_statistics;
 #[path = "search_snapshot_retention.rs"]
 mod search_snapshot_retention;
+#[path = "site_maintenance_migration.rs"]
+mod site_maintenance_migration;
 #[path = "source_token_rename.rs"]
 mod source_token_rename;
 #[path = "storage_transfer_recovery.rs"]

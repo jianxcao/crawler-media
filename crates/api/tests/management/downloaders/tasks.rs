@@ -342,8 +342,15 @@ async fn list_tasks_prunes_orphan_pending_rows() {
 
 struct UnsupportedSnapshotDownloader;
 impl downloader::Downloader for UnsupportedSnapshotDownloader {
-    fn add(&self, _torrent: &domain::Torrent) -> Result<(), downloader::DownloaderError> {
-        Ok(())
+    fn submit_verified(
+        &self,
+        payload: &downloader::SubmitPayload,
+        _options: &downloader::SubmitOptions,
+    ) -> Result<downloader::ClientSubmitResult, downloader::DownloaderError> {
+        Ok(downloader::ClientSubmitResult::Added {
+            already_owned: false,
+            info_hash: payload.info_hash().to_string(),
+        })
     }
     fn completed_files(
         &self,
@@ -362,7 +369,7 @@ async fn list_tasks_does_not_prune_stale_pending_when_snapshots_unsupported() {
     let state = ApiState::new(
         Store::open(tmp.path().join("data")).unwrap(),
         "management-secret".into(),
-        indexer::ProfileSet::load(None).unwrap(),
+        indexer::RegistrySnapshot::builtin().unwrap(),
         Arc::new(Fixtures {
             requests: Mutex::new(Vec::new()),
             bodies: HashMap::new(),

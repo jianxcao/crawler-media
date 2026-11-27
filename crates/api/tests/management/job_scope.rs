@@ -90,3 +90,93 @@ async fn member_job_reads_only_expose_owned_subscribe_search_jobs() {
         .unwrap();
     assert_eq!(private_job.status(), StatusCode::NOT_FOUND);
 }
+
+#[tokio::test]
+async fn plugin_task_definitions_are_admin_only_in_jobs_api() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dl = Arc::new(MemoryDownloader::new(tmp.path().join("stage")));
+    let fixtures = Arc::new(Fixtures {
+        requests: Mutex::new(Vec::new()),
+        bodies: HashMap::new(),
+    });
+    let state = state(tmp.path(), fixtures, dl);
+    let binding_id = domain::PluginTaskBindingId::new();
+    let def = state
+        .jobs()
+        .acquire()
+        .unwrap()
+        .create_def(jobs::NewDef {
+            kind: jobs::JobKind::PluginTask,
+            scope: jobs::JobScope::PluginTask(binding_id),
+            name: "plugin:org.example:checkin".into(),
+            enabled: true,
+            schedule: Some(jobs::Schedule::Interval { secs: 600 }),
+            payload: serde_json::json!({ "binding_id": binding_id }).to_string(),
+            timeout_secs: Some(60),
+            concurrency_key: None,
+        })
+        .unwrap();
+    let app = router(state);
+    let (_, member_token) = create_member(&app, "plugin-job-member").await;
+
+    let admin_list = json_body(
+        app.clone()
+            .oneshot(request(
+                "GET",
+                "/api/v1/jobs",
+                Some("management-secret"),
+                Value::Null,
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert!(
+        admin_list["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["id"] == def.id.to_string())
+    );
+    let admin_get = app
+        .clone()
+        .oneshot(request(
+            "GET",
+            &format!("/api/v1/jobs/{}", def.id),
+            Some("management-secret"),
+            Value::Null,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(admin_get.status(), StatusCode::OK);
+
+    let member_list = json_body(
+        app.clone()
+            .oneshot(request(
+                "GET",
+                "/api/v1/jobs",
+                Some(&member_token),
+                Value::Null,
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert!(
+        !member_list["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["id"] == def.id.to_string())
+    );
+    let member_get = app
+        .oneshot(request(
+            "GET",
+            &format!("/api/v1/jobs/{}", def.id),
+            Some(&member_token),
+            Value::Null,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(member_get.status(), StatusCode::NOT_FOUND);
+}

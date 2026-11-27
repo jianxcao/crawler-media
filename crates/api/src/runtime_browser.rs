@@ -142,7 +142,8 @@ impl BrowserSettings {
         let mut ignored_site_endpoints = 0;
 
         for s in &sites {
-            let is_browser = s.enabled && s.maintenance_via == domain::MaintenanceVia::Browser;
+            let is_browser = s.enabled
+                && (s.maintenance_via == domain::MaintenanceVia::Browser || s.browser_search);
             if is_browser {
                 browser_sites += 1;
                 if s.cdp_url.as_deref().unwrap_or("").trim().is_empty() {
@@ -154,7 +155,10 @@ impl BrowserSettings {
                 .as_deref()
                 .map(|u| !u.trim().is_empty())
                 .unwrap_or(false);
-            if (!self.cdp_enabled || s.maintenance_via == domain::MaintenanceVia::Http) && has_cdp {
+            if (!self.cdp_enabled
+                || (s.maintenance_via == domain::MaintenanceVia::Http && !s.browser_search))
+                && has_cdp
+            {
                 ignored_site_endpoints += 1;
             }
         }

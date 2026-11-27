@@ -1,7 +1,7 @@
 use api::{ApiState, Store};
 use domain::{User, UserId, UserRole};
 use downloader::MemoryDownloader;
-use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
+use indexer::{FetchRequest, Fetcher, IndexerError, RegistrySnapshot};
 use std::sync::Arc;
 
 struct NoFetch;
@@ -21,7 +21,7 @@ impl Fixture {
         let state = ApiState::new(
             Store::open(tmp.path().join("data")).unwrap(),
             "users-cache-secret".into(),
-            ProfileSet::load(None).unwrap(),
+            RegistrySnapshot::builtin().unwrap(),
             Arc::new(NoFetch),
             Arc::new(MemoryDownloader::new(tmp.path().join("stage"))),
         )

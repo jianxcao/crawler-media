@@ -6,7 +6,7 @@ use axum::http::StatusCode;
 use domain::QualityFact;
 use domain::{AtomRule, Filter, FilterAtom, FilterId, SubscribeId};
 use downloader::MemoryDownloader;
-use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
+use indexer::{FetchRequest, Fetcher, IndexerError, RegistrySnapshot};
 use parking_lot::Mutex;
 use serde_json::{Value, json};
 use tower::ServiceExt;
@@ -23,7 +23,7 @@ async fn legacy_run_uses_shared_keywords_and_wash_cut_ladder() {
         ApiState::new(
             Store::open(tmp.path().join("data")).unwrap(),
             "management-secret".into(),
-            ProfileSet::load(None).unwrap(),
+            RegistrySnapshot::builtin().unwrap(),
             Arc::new(UrlRecorder(urls.clone())),
             downloader.clone(),
         )

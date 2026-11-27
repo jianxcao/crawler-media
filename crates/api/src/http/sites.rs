@@ -1,5 +1,4 @@
-//! Sites: configured PT trackers. Credentials plaintext in SQLite
-//! (ADR-0003). Boost (刷流) config lives in settings KV per site.
+//! Sites: configured PT trackers. Credentials plaintext in SQLite (ADR-0003).
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -56,6 +55,10 @@ pub(crate) struct SiteInput {
     downloader_id: Option<String>,
     #[serde(default)]
     maintenance_via: Option<String>,
+    #[serde(default)]
+    browser_search: Option<bool>,
+    #[serde(default)]
+    timezone: Option<String>,
     #[serde(default = "default_true")]
     enabled: bool,
 }
@@ -87,6 +90,10 @@ pub(crate) struct PatchSiteInput {
     #[serde(default)]
     maintenance_via: Option<String>,
     #[serde(default)]
+    browser_search: Option<bool>,
+    #[serde(default)]
+    timezone: Option<String>,
+    #[serde(default)]
     enabled: Option<bool>,
 }
 
@@ -95,16 +102,6 @@ where
     D: serde::Deserializer<'de>,
 {
     Option::<String>::deserialize(deserializer).map(Some)
-}
-
-#[derive(Deserialize)]
-pub(crate) struct BoostInput {
-    #[serde(default)]
-    enabled: Option<bool>,
-    #[serde(default)]
-    budget_bytes: Option<u64>,
-    #[serde(default)]
-    hold_days: Option<u32>,
 }
 
 /// Cookie/API keys stay masked; URL fields are only exposed to administrators.
@@ -123,6 +120,8 @@ fn site_json(site: &Site) -> Value {
         "downloader_id": site.downloader_id.map(|id| id.to_string()),
         "enabled": site.enabled,
         "maintenance_via": site.maintenance_via.as_str(),
+        "browser_search": site.browser_search,
+        "timezone": site.timezone,
     })
 }
 
@@ -160,33 +159,54 @@ fn auth_type_for(site: &Site, profile: Option<&indexer::Profile>) -> &'static st
     }
 }
 
-mod boost;
 mod maintenance;
+mod plugin_actions;
 mod read;
 mod write;
 
-pub(crate) use boost::*;
 pub(crate) use maintenance::*;
+pub(crate) use plugin_actions::*;
 pub(crate) use read::*;
 pub(crate) use write::*;
 
 pub(crate) async fn site_catalog(State(state): State<ApiState>) -> Response {
-    // Profiles are compile-time + overlay; expose id/name only.
-    // demo 是测试桩，不列进站点配置。
-    let items: Vec<Value> = state
-        .indexer
-        .profile_ids()
-        .into_iter()
-        .filter(|id| id != "demo")
-        .map(|id| {
-            let (auth_types, supports_check_in) = match state.indexer.profile(&id) {
-                Some(profile) => (profile.effective_auth_types(), profile.supports_check_in()),
-                None => (vec!["cookie"], true),
-            };
+    let snapshot = state.indexer.snapshot();
+    let items: Vec<Value> = snapshot
+        .indexer_descriptors()
+        .filter(|desc| !desc.hidden_from_catalog)
+        .map(|desc| {
+            let auth_types: Vec<&'static str> =
+                desc.auth_types.iter().map(|a| a.as_str()).collect();
+            let capabilities: Vec<&'static str> =
+                desc.capabilities.iter().map(|c| c.as_str()).collect();
+            let has_plugin_check_in = desc.source.plugin_id().is_some_and(|pid| {
+                snapshot.maintenance_entries().any(|m| {
+                    m.descriptor().source.plugin_id() == Some(pid)
+                        && m.descriptor().availability.is_enabled()
+                        && m.descriptor()
+                            .actions
+                            .contains(&indexer::MaintenanceAction::CheckIn)
+                })
+            });
+            let supports_check_in = snapshot
+                .profile(&desc.id)
+                .is_some_and(|profile| profile.supports_check_in())
+                || has_plugin_check_in;
             json!({
-                "profile_id": id,
+                "profile_id": desc.id,
+                "name": desc.name,
+                "kind": desc.kind,
                 "auth_types": auth_types,
                 "supports_check_in": supports_check_in,
+                "capabilities": capabilities,
+                "source": desc.source.as_label(),
+                "availability": match &desc.availability {
+                    indexer::ProviderAvailability::Enabled => json!({ "status": "enabled" }),
+                    indexer::ProviderAvailability::Disabled { reason } => json!({
+                        "status": "disabled",
+                        "reason": reason,
+                    }),
+                },
             })
         })
         .collect();

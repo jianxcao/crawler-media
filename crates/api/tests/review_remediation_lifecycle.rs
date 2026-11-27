@@ -20,7 +20,7 @@ fn state(tmp: &tempfile::TempDir) -> ApiState {
     ApiState::new(
         Store::open(tmp.path().join("db")).unwrap(),
         "test-token".into(),
-        indexer::ProfileSet::load(None).unwrap(),
+        indexer::RegistrySnapshot::builtin().unwrap(),
         Arc::new(NoNetwork),
         Arc::new(downloader::MemoryDownloader::new(
             tmp.path().join("staging"),

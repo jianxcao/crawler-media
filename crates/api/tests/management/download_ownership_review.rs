@@ -34,8 +34,15 @@ impl OwnedDownloads {
 }
 
 impl Downloader for OwnedDownloads {
-    fn add(&self, _: &Torrent) -> Result<(), DownloaderError> {
-        Ok(())
+    fn submit_verified(
+        &self,
+        payload: &downloader::SubmitPayload,
+        _options: &downloader::SubmitOptions,
+    ) -> Result<downloader::ClientSubmitResult, DownloaderError> {
+        Ok(downloader::ClientSubmitResult::Added {
+            already_owned: false,
+            info_hash: payload.info_hash().to_string(),
+        })
     }
 
     fn completed_files(&self, torrent: &Torrent) -> Result<Vec<PathBuf>, DownloaderError> {
@@ -100,7 +107,7 @@ fn setup(tmp: &tempfile::TempDir) -> (axum::Router, Store, Arc<OwnedDownloads>) 
     let state = api::ApiState::new(
         Store::open(tmp.path().join("data")).unwrap(),
         "management-secret".into(),
-        indexer::ProfileSet::load(None).unwrap(),
+        indexer::RegistrySnapshot::builtin().unwrap(),
         Arc::new(Fixtures {
             requests: Mutex::new(Vec::new()),
             bodies: HashMap::new(),
@@ -173,7 +180,7 @@ fn duplicate(store: &Store, original: SubscribeId) -> domain::Subscribe {
 async fn imported_pending_cleanup_uses_exact_persisted_downloader_route() {
     let tmp = tempfile::tempdir().unwrap();
     let (app, store, downloads) = setup(&tmp);
-    let (url, calls, _url_server) = fixture::transmission_fixture();
+    let (url, calls, _url_server) = fixture::seeded_transmission_fixture();
     let route = DownloaderId::new();
     store
         .insert_downloader(&api::store::DownloaderRow {
@@ -326,7 +333,7 @@ async fn cleanup_preserves_task_referenced_by_another_imported_subscribe() {
 async fn cleanup_preserves_task_referenced_by_another_subscribe_via_downloader_alias() {
     let tmp = tempfile::tempdir().unwrap();
     let (app, store, _downloads) = setup(&tmp);
-    let (url, calls, _url_server) = fixture::transmission_fixture();
+    let (url, calls, _url_server) = fixture::seeded_transmission_fixture();
     let route_a = DownloaderId::new();
     let route_b = DownloaderId::new();
     for (id, name) in [(route_a, "trans-a"), (route_b, "trans-b")] {
@@ -388,8 +395,15 @@ struct LiveTaskDownloads {
 }
 
 impl Downloader for LiveTaskDownloads {
-    fn add(&self, _: &Torrent) -> Result<(), DownloaderError> {
-        Ok(())
+    fn submit_verified(
+        &self,
+        payload: &downloader::SubmitPayload,
+        _options: &downloader::SubmitOptions,
+    ) -> Result<downloader::ClientSubmitResult, DownloaderError> {
+        Ok(downloader::ClientSubmitResult::Added {
+            already_owned: false,
+            info_hash: payload.info_hash().to_string(),
+        })
     }
 
     fn completed_files(&self, _: &Torrent) -> Result<Vec<PathBuf>, DownloaderError> {
@@ -438,7 +452,7 @@ fn live_task_setup(tmp: &tempfile::TempDir) -> (axum::Router, Store, Arc<LiveTas
     let state = api::ApiState::new(
         Store::open(tmp.path().join("data")).unwrap(),
         "management-secret".into(),
-        indexer::ProfileSet::load(None).unwrap(),
+        indexer::RegistrySnapshot::builtin().unwrap(),
         Arc::new(Fixtures {
             requests: Mutex::new(Vec::new()),
             bodies: HashMap::new(),
@@ -554,7 +568,7 @@ async fn absent_magnet_cleanup_is_a_safe_noop() {
 #[tokio::test]
 async fn production_dynamic_downloader_delegates_owned_removal_to_the_selected_client() {
     let tmp = tempfile::tempdir().unwrap();
-    let (url, calls, _url_server) = fixture::transmission_fixture();
+    let (url, calls, _url_server) = fixture::seeded_transmission_fixture();
     let store = Store::open(tmp.path().join("data")).unwrap();
     store
         .insert_downloader(&api::store::DownloaderRow {

@@ -5,7 +5,7 @@ use axum::{
 };
 use domain::{Confidence, LedgerId, Media, MediaId, MediaKind, QualitySource};
 use downloader::MemoryDownloader;
-use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
+use indexer::{FetchRequest, Fetcher, IndexerError, RegistrySnapshot};
 use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
 use store::test_support::{FixtureFile, publish_fixture_file};
@@ -31,7 +31,7 @@ fn fixture(root: &std::path::Path) -> (ApiState, String, MediaId) {
     let state = ApiState::new(
         Store::open(root.join("data")).unwrap(),
         "secret".into(),
-        ProfileSet::load(None).unwrap(),
+        RegistrySnapshot::builtin().unwrap(),
         Arc::new(NoFetch),
         Arc::new(MemoryDownloader::new(root.join("stage"))),
     )

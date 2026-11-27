@@ -26,7 +26,7 @@ async fn cold_public_media_poster_times_out_without_blocking_the_async_worker() 
     let state = ApiState::new(
         Store::open(tmp.path().join("data")).unwrap(),
         "test-secret".into(),
-        ProfileSet::load(None).unwrap(),
+        RegistrySnapshot::builtin().unwrap(),
         Arc::new(NullFetcher),
         Arc::new(NullDownloader),
     )
@@ -109,7 +109,7 @@ async fn cached_public_media_poster_returns_etag_and_not_modified() {
     let state = ApiState::new(
         Store::open(tmp.path().join("data")).unwrap(),
         "test-secret".into(),
-        ProfileSet::load(None).unwrap(),
+        RegistrySnapshot::builtin().unwrap(),
         Arc::new(NullFetcher),
         Arc::new(NullDownloader),
     )
@@ -168,7 +168,7 @@ async fn cold_media_poster_reads_identity_without_the_writer_lock() {
     let state = ApiState::new(
         Store::open(tmp.path().join("data")).unwrap(),
         "test-secret".into(),
-        ProfileSet::load(None).unwrap(),
+        RegistrySnapshot::builtin().unwrap(),
         Arc::new(NullFetcher),
         Arc::new(NullDownloader),
     )

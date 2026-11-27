@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use api::{library_lifecycle::start_library_removal, management::ApiState};
 use downloader::MemoryDownloader;
-use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
+use indexer::{FetchRequest, Fetcher, IndexerError, RegistrySnapshot};
 
 struct NoFetch;
 
@@ -17,7 +17,7 @@ fn new_state(temp: &tempfile::TempDir, data_dir: &std::path::Path) -> ApiState {
     ApiState::new(
         store::Store::open(data_dir).unwrap(),
         "test-token".into(),
-        ProfileSet::load(None).unwrap(),
+        RegistrySnapshot::builtin().unwrap(),
         Arc::new(NoFetch),
         Arc::new(MemoryDownloader::new(temp.path().join("stage"))),
     )

@@ -207,7 +207,7 @@ fn rich_tv_app(
     let api_state = ApiState::new(
         store,
         "admin-token".into(),
-        ProfileSet::load(None).unwrap(),
+        RegistrySnapshot::builtin().unwrap(),
         Arc::new(NoFetch),
         Arc::new(MemoryDownloader::new(root.join("stage"))),
     )

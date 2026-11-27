@@ -7,7 +7,7 @@ use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use domain::{Confidence, LedgerId, Media, MediaId, MediaKind, QualitySource};
 use downloader::MemoryDownloader;
-use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
+use indexer::{FetchRequest, Fetcher, IndexerError, RegistrySnapshot};
 use serde_json::{Value, json};
 use std::path::Path;
 use std::str::FromStr;
@@ -61,7 +61,7 @@ fn app(root: &Path) -> (axum::Router, MediaId, String) {
         ApiState::new(
             store,
             "admin-token".into(),
-            ProfileSet::load(None).unwrap(),
+            RegistrySnapshot::builtin().unwrap(),
             Arc::new(NoFetch),
             Arc::new(MemoryDownloader::new(root.join("stage"))),
         )

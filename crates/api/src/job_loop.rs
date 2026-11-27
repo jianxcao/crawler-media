@@ -275,6 +275,14 @@ async fn recover_startup_work(state: &ApiState) {
     {
         tracing::error!(%error, "恢复未完成的用户删除操作失败");
     }
+    let plugin_state = state.clone();
+    if let Some(Err(error)) = off_executor("recover_plugin_work", move || {
+        crate::plugins::recover_startup(&plugin_state)
+    })
+    .await
+    {
+        tracing::error!(%error, "恢复未完成的插件任务与命令投影失败");
+    }
 }
 
 /// 持租约期间的轮次：每 `interval` 推进一次后台工作，直到停机或失锁。
@@ -419,6 +427,7 @@ pub(crate) fn run_pending_jobs_with_clock(
         }
     }
     crate::subscribe_job_sync::reconcile_pending(state)?;
+    crate::plugins::reconcile_pending_in_loop(state, now)?;
     let (claimed, skipped_maintenance) = claim_pending_jobs(state, now, source)?;
     let runner = StateRunner {
         state: state.clone(),

@@ -6,7 +6,7 @@ use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use domain::{Confidence, LedgerId, Media, MediaId, MediaKind, QualitySource};
 use downloader::MemoryDownloader;
-use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
+use indexer::{FetchRequest, Fetcher, IndexerError, RegistrySnapshot};
 use serde_json::Value;
 use store::test_support::{FixtureFile, publish_fixture_file};
 use tower::ServiceExt;
@@ -22,7 +22,7 @@ fn make_state(root: &std::path::Path) -> ApiState {
     ApiState::new(
         Store::open(root.join("data")).unwrap(),
         "management-secret".into(),
-        ProfileSet::load(None).unwrap(),
+        RegistrySnapshot::builtin().unwrap(),
         Arc::new(NoFetch),
         Arc::new(MemoryDownloader::new(root.join("stage"))),
     )

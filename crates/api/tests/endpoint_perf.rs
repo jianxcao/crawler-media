@@ -23,7 +23,7 @@ use axum::body::{Body, to_bytes};
 use axum::http::Request;
 use domain::{Confidence, LedgerId, Media, MediaId, MediaKind, QualitySource, UserId};
 use downloader::MemoryDownloader;
-use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
+use indexer::{FetchRequest, Fetcher, IndexerError, RegistrySnapshot};
 use store::SessionRow;
 use tower::ServiceExt;
 
@@ -101,7 +101,7 @@ fn open_state(root: &Path) -> ApiState {
     ApiState::new(
         Store::open(root.join("data")).unwrap(),
         TOKEN.into(),
-        ProfileSet::load(None).unwrap(),
+        RegistrySnapshot::builtin().unwrap(),
         Arc::new(NoFetch),
         Arc::new(MemoryDownloader::new(root.join("stage"))),
     )

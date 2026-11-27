@@ -88,7 +88,7 @@ pub(super) fn locking_preview_state(tmp: &tempfile::TempDir) -> api::ApiState {
     api::ApiState::new_arc(
         store,
         "management-secret".into(),
-        indexer::ProfileSet::load(None).unwrap(),
+        indexer::RegistrySnapshot::builtin().unwrap(),
         Arc::new(Fixtures {
             requests: Mutex::new(Vec::new()),
             bodies: HashMap::new(),

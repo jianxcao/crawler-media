@@ -4,7 +4,7 @@ use api::media_server_provider::ApiServerProvider;
 use api::{ApiState, Store};
 use domain::{Media, MediaId, MediaKind, PhysicalSourceId, UnitKey, UserId};
 use downloader::MemoryDownloader;
-use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
+use indexer::{FetchRequest, Fetcher, IndexerError, RegistrySnapshot};
 use store::test_support::{FixtureFile, publish_fixture_file_units};
 
 struct NoFetch;
@@ -72,7 +72,7 @@ impl Fixture {
         let state = ApiState::new(
             store,
             "coverage-secret".into(),
-            ProfileSet::load(None).unwrap(),
+            RegistrySnapshot::builtin().unwrap(),
             Arc::new(NoFetch),
             Arc::new(MemoryDownloader::new(dir.path().join("stage"))),
         )

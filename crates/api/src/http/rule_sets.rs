@@ -459,7 +459,7 @@ mod tests {
         ApiState::new(
             crate::Store::open(tmp.join("data")).unwrap(),
             "test-token".into(),
-            indexer::ProfileSet::load(None).unwrap(),
+            indexer::RegistrySnapshot::builtin().unwrap(),
             Arc::new(NoopFetcher),
             Arc::new(downloader::MemoryDownloader::new(tmp.join("dl"))),
         )

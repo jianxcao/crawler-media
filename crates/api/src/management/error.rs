@@ -33,6 +33,11 @@ impl ApiError {
     pub(crate) fn missing(code: &'static str, message: String) -> Self {
         Self::with(StatusCode::NOT_FOUND, code, message)
     }
+
+    pub(crate) fn map_message(mut self, f: impl FnOnce(&str) -> String) -> Self {
+        self.message = f(&self.message);
+        self
+    }
 }
 
 impl IntoResponse for ApiError {

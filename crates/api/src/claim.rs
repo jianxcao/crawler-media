@@ -8,9 +8,7 @@ use domain::{Confidence, LibraryFile, Media, MediaId, MediaKind, QualitySource, 
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::directory::transfer_plan;
 use crate::management::{ApiError, ApiState};
-use crate::scrape_store::ScrapeStoreExt;
 
 mod bind;
 mod publication;
@@ -110,6 +108,10 @@ impl ClaimedFacts {
 struct ClaimPlan {
     source: store::UnidentifiedRow,
     source_version: String,
+    library_id: domain::LibraryId,
+    root_id: String,
+    config_revision: i64,
+    root: PathBuf,
     media: Media,
     release: Release,
     dest: PathBuf,
@@ -125,23 +127,17 @@ fn plan_claim(
     src: &Path,
 ) -> Result<ClaimPlan, axum::response::Response> {
     use axum::response::IntoResponse;
-    let (source, root, mode, scrape, mirror_nfo, naming) = admitted_store(state, |store| {
-        let source = store
-            .get_unidentified(&body.path)
-            .map_err(store_response)?
-            .ok_or_else(|| {
-                ApiError::missing("unidentified.missing", "Unidentified not found".into())
-                    .into_response()
-            })?;
-        let (root, mode, scrape) = transfer_plan(store, kind).map_err(store_response)?;
-        let mirror_nfo = scrape
-            && store
-                .get_scrape_config()
-                .map_err(store_response)?
-                .effective
-                .mirror_nfo;
-        let naming = store.naming_pattern(kind).map_err(store_response)?;
-        Ok((source, root, mode, scrape, mirror_nfo, naming))
+    let publication::ClaimPlanInputs {
+        source,
+        library_id,
+        config_revision,
+        root,
+        mode,
+        scrape,
+        mirror_nfo,
+        naming,
+    } = admitted_store(state, |store| {
+        publication::load_claim_plan_inputs(store, &body.path, kind)
     })?;
     let source_version = library::observe_source(src)
         .map_err(|error| {
@@ -172,11 +168,45 @@ fn plan_claim(
         confidence: Confidence::High,
         ..parsed
     };
-    let dest = library::render_path(&root, &naming, &media, &release, src).map_err(|err| {
+    let mut dest = library::render_path(&root, &naming, &media, &release, src).map_err(|err| {
         ApiError::invalid("unidentified.invalid", err.to_string()).into_response()
     })?;
-    // 没进台账不等于可以覆盖：未扫描、识别失败，或上次提交失败留下的视频
-    // 都还在磁盘上。源和目标是同一文件（原地认领）才允许继续。
+    if let Ok(rel) = dest.strip_prefix(&root) {
+        dest = crate::plugins::transfer_rename::run_transfer_rename(
+            state,
+            &crate::plugins::transfer_rename::TransferRenameRequest {
+                workflow_id: format!("claim:{}", media.id),
+                library_id,
+                library_root: root.clone(),
+                media_id: media.id,
+                media_kind: kind,
+                subscribe_id: None,
+                source_path: src.to_path_buf(),
+                proposed_relative_path: rel.to_path_buf(),
+            },
+        );
+    }
+    let resolved_dest = publication::resolve_existing_ancestor_path(&dest);
+    let root_id = admitted_store(state, |store| {
+        let (owner, rid) = store
+            .library_root_owning_key(&resolved_dest, kind)
+            .map_err(store_response)?
+            .ok_or_else(|| {
+                ApiError::invalid(
+                    "unidentified.invalid",
+                    "Claim destination escapes Library roots".into(),
+                )
+                .into_response()
+            })?;
+        if owner != library_id.to_string() {
+            return Err(ApiError::invalid(
+                "unidentified.invalid",
+                "Claim destination belongs to a different Library".into(),
+            )
+            .into_response());
+        }
+        Ok(rid)
+    })?;
     if dest.exists() && dest != src {
         return Err(ApiError::with(
             StatusCode::CONFLICT,
@@ -189,6 +219,10 @@ fn plan_claim(
     Ok(ClaimPlan {
         source,
         source_version,
+        library_id,
+        root_id,
+        config_revision,
+        root,
         media,
         release,
         dest,
@@ -201,6 +235,8 @@ fn plan_claim(
 struct StagedClaim {
     rollback_dest: Option<PathBuf>,
     destination_version: String,
+    rollback_sidecars: Vec<PathBuf>,
+    created_parent: Option<PathBuf>,
 }
 
 fn check_claim_source(plan: &ClaimPlan, src: &Path) -> Result<(), ApiError> {
@@ -215,11 +251,23 @@ fn check_claim_source(plan: &ClaimPlan, src: &Path) -> Result<(), ApiError> {
     Ok(())
 }
 
+fn map_claim_lib_err(error: library::LibraryError) -> ApiError {
+    match error {
+        library::LibraryError::Cancelled => ApiError::with(
+            StatusCode::CONFLICT,
+            "library.unavailable",
+            error.to_string(),
+        ),
+        other => ApiError::invalid("unidentified.invalid", other.to_string()),
+    }
+}
+
 /// Move stages a Copy; the original is removed only after publication and source validation.
 fn stage_claim_file(
     state: &ApiState,
     plan: &ClaimPlan,
     src: &Path,
+    lease: &crate::library_lifecycle::LibraryWorkLease,
 ) -> Result<StagedClaim, ApiError> {
     check_claim_source(plan, src)?;
     let staged = if plan.requested == library::TransferMode::Move {
@@ -227,15 +275,47 @@ fn stage_claim_file(
     } else {
         plan.requested
     };
-    library::transfer_file(src, &plan.dest, staged)
-        .map_err(|error| ApiError::invalid("unidentified.invalid", error.to_string()))?;
-    let receipt = StagedClaim {
+    let parent_dir = plan.dest.parent().filter(|p| *p != plan.root.as_path());
+    let created_parent = parent_dir
+        .filter(|p| !p.exists())
+        .map(std::path::Path::to_path_buf);
+    let nfo_path = plan.dest.with_extension("nfo");
+    let nfo_preexisted = nfo_path.exists();
+    let poster_path = plan.dest.parent().map(|p| p.join("poster.jpg"));
+    let poster_preexisted = poster_path.as_ref().is_some_and(|p| p.exists());
+
+    library::transfer_file_controlled(src, &plan.dest, staged, lease.control())
+        .map_err(map_claim_lib_err)?;
+    let mut receipt = StagedClaim {
         rollback_dest: (plan.dest != src).then(|| plan.dest.clone()),
         destination_version: library::current_source_version(&plan.dest),
+        rollback_sidecars: Vec::new(),
+        created_parent,
     };
+    if let Err(err) = lease.control().check() {
+        discard_rollback(&receipt);
+        return Err(map_claim_lib_err(err));
+    }
     let _ = library::scrape_beside(&plan.dest, &plan.media, plan.mirror_nfo, None);
+    if !nfo_preexisted && nfo_path.exists() {
+        receipt.rollback_sidecars.push(nfo_path);
+    }
     if plan.scrape {
+        if let Err(err) = lease.control().check() {
+            discard_rollback(&receipt);
+            return Err(map_claim_lib_err(err));
+        }
         crate::poster_fetch::attach_poster(state, &plan.media, &plan.dest);
+    }
+    if !poster_preexisted
+        && let Some(p) = poster_path
+        && p.exists()
+    {
+        receipt.rollback_sidecars.push(p);
+    }
+    if let Err(err) = lease.control().check() {
+        discard_rollback(&receipt);
+        return Err(map_claim_lib_err(err));
     }
     if let Err(error) = check_claim_source(plan, src) {
         discard_rollback(&receipt);
@@ -262,16 +342,21 @@ fn commit_claim(
         &facts,
         &plan.source,
         Some(&staged.destination_version),
+        Some(publication::PinnedClaimTarget {
+            library_id: plan.library_id,
+            root_id: &plan.root_id,
+            config_revision: plan.config_revision,
+        }),
     )
 }
 
 fn discard_rollback(staged: &StagedClaim) {
-    if let Some(path) = &staged.rollback_dest
-        && library::current_source_version(path) == staged.destination_version
-        && let Err(error) = std::fs::remove_file(path)
-    {
-        tracing::warn!(path=%path.display(),%error,"Claim staged Copy cleanup failed");
-    }
+    publication::cleanup_staged_files(
+        staged.rollback_dest.as_deref(),
+        &staged.destination_version,
+        &staged.rollback_sidecars,
+        staged.created_parent.as_deref(),
+    );
 }
 
 fn remove_moved_source(state: &ApiState, plan: &ClaimPlan, src: &Path) {
@@ -316,14 +401,28 @@ fn identify_and_transfer(
     }
     admitted_store(&state, |_| Ok(()))?;
     let plan = plan_claim(&state, &body, kind, &src)?;
-    admitted_store(&state, |_| Ok(()))?;
-    let staged = stage_claim_file(&state, &plan, &src).map_err(IntoResponse::into_response)?;
-    let media = match admitted_store(&state, |store| {
+    let lease = state
+        .acquire_library_work(&plan.library_id.to_string())
+        .map_err(|msg| {
+            ApiError::with(StatusCode::CONFLICT, "library.unavailable", msg).into_response()
+        })?;
+    let pin = publication::PinnedClaimTarget {
+        library_id: plan.library_id,
+        root_id: &plan.root_id,
+        config_revision: plan.config_revision,
+    };
+    admitted_store(&state, |store| {
+        publication::verify_leased_target_in_store(store, &lease, pin, &plan.dest, kind)
+    })?;
+    let staged =
+        stage_claim_file(&state, &plan, &src, &lease).map_err(IntoResponse::into_response)?;
+    let (media, previous) = match admitted_store(&state, |store| {
+        publication::verify_leased_target_in_store(store, &lease, pin, &plan.dest, kind)?;
         store
-            .ensure_media(plan.media.clone())
+            .ensure_media_with_previous(plan.media.clone())
             .map_err(store_response)
     }) {
-        Ok(media) => media,
+        Ok(pair) => pair,
         Err(error) => {
             discard_rollback(&staged);
             return Err(error);
@@ -332,6 +431,9 @@ fn identify_and_transfer(
     let file = match commit_claim(&state, &media, &plan, &src, &staged) {
         Ok(file) => file,
         Err(error) => {
+            if let Err(undo_err) = state.store.undo_ensured_media(&media, previous.as_ref()) {
+                tracing::warn!(media_id = %media.id, error = %undo_err, "Claim Media undo failed");
+            }
             discard_rollback(&staged);
             return Err(error);
         }

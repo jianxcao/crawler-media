@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use axum::response::sse::Event;
-use indexer::{SearchOutcome, SiteFailure};
+use indexer::{RegistrySnapshot, SearchOutcome, SiteFailure, SiteFailureKind};
 use media::CatalogHit;
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
@@ -88,9 +88,8 @@ fn site_status_json(
     })
 }
 
-struct SiteSearchResult {
-    site_id: String,
-    site_name: String,
+struct SiteSearchBatch {
+    site: domain::Site,
     outcome: SearchOutcome,
     elapsed_ms: i64,
 }
@@ -100,8 +99,9 @@ struct SiteSearchResult {
 /// 派生前先 `mark_spawned`，任务正常返回前 `mark_reported`；panic/abort 的任务
 /// 不会销账，调用方收尾时按站点失败如实上报，而不是静默丢弃。
 fn spawn_site_search(
-    tasks: &mut tokio::task::JoinSet<SiteSearchResult>,
+    tasks: &mut tokio::task::JoinSet<SiteSearchBatch>,
     state: &Arc<ApiState>,
+    snapshot: &Arc<RegistrySnapshot>,
     site: domain::Site,
     keyword: &str,
     page: u32,
@@ -111,6 +111,7 @@ fn spawn_site_search(
 ) {
     let reservation = state.search_work.try_reserve();
     let indexer = Arc::clone(&state.indexer);
+    let snapshot = Arc::clone(snapshot);
     let keyword = keyword.to_string();
     let categories = categories.to_vec();
     let site_id = site.id.to_string();
@@ -120,12 +121,14 @@ fn spawn_site_search(
     unreported.mark_spawned(&site_id, &site_name);
     tasks.spawn(async move {
         let started = Instant::now();
+        let snapshot_gen = snapshot.generation();
         let outcome = match reservation {
             Err(error) => Err(error),
             Ok(reservation) => {
                 reservation
                     .run(budget, move || {
-                        indexer.search_page_categories(
+                        indexer.search_page_categories_with_snapshot(
+                            &snapshot,
                             std::slice::from_ref(&site_for_search),
                             &keyword,
                             page,
@@ -145,9 +148,13 @@ fn spawn_site_search(
                     "站点搜索未获搜索预算，按单站失败报告"
                 );
                 SearchOutcome {
+                    generation: snapshot_gen,
                     torrents: Vec::new(),
                     failures: vec![SiteFailure {
                         site_id: site.id,
+                        provider_id: Some(site.profile_id.clone()),
+                        generation: snapshot_gen,
+                        kind: SiteFailureKind::Budget,
                         error: budget_failure_message(&error),
                     }],
                 }
@@ -155,9 +162,8 @@ fn spawn_site_search(
         };
         // 正常返回前销账；只有 panic/abort 的任务会留在 unreported 里。
         unreported.mark_reported(&site_id);
-        SiteSearchResult {
-            site_id,
-            site_name,
+        SiteSearchBatch {
+            site,
             outcome,
             elapsed_ms: started.elapsed().as_millis() as i64,
         }
@@ -204,6 +210,146 @@ async fn report_unreported_sites(
 /// - `tx = Some(..)`：SSE 模式，逐站推送事件，客户端断开即停止排新站。
 /// - `tx = None`：JSON 模式，一次性收集；deadline 内没排上的站点如实报告为单站
 ///   失败，绝不静默丢弃（B3 §6「单Site失败独立报告」）。
+fn enqueue_available_sites(
+    state: &Arc<ApiState>,
+    snapshot: &Arc<RegistrySnapshot>,
+    tasks: &mut tokio::task::JoinSet<SiteSearchBatch>,
+    pending: &mut std::vec::IntoIter<domain::Site>,
+    deadline: Instant,
+    keyword: &str,
+    page: u32,
+    categories: &[String],
+    unreported: &Arc<UnreportedSites>,
+    statuses: &mut Vec<Value>,
+) {
+    while tasks.is_empty() || state.search_work.available_permits() > 0 {
+        let Some(site) = pending.next() else { break };
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            statuses.push(site_status_json(
+                &site.id.to_string(),
+                &site.name,
+                0,
+                Some(budget_failure_message(&BlockingError::Timeout)),
+                0,
+            ));
+            continue;
+        }
+        spawn_site_search(
+            tasks, state, snapshot, site, keyword, page, categories, remaining, unreported,
+        );
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn process_site_search_result(
+    state: &Arc<ApiState>,
+    result: SiteSearchBatch,
+    keyword: &str,
+    page: u32,
+    categories: &[String],
+    tx: Option<&mpsc::Sender<Result<Event, Infallible>>>,
+    raw_items: &mut Vec<(domain::Torrent, String)>,
+    all_failures: &mut Vec<SiteFailure>,
+    statuses: &mut Vec<Value>,
+    traces: &mut Vec<hooks::HookTrace>,
+    is_admin: bool,
+) {
+    let SiteSearchBatch {
+        site,
+        outcome,
+        elapsed_ms,
+    } = result;
+    let site_id = site.id.to_string();
+    let site_name = site.name.clone();
+    all_failures.extend(outcome.failures.iter().cloned());
+    let error = outcome.failures.first().map(|f| {
+        if is_admin {
+            hooks::sanitize_reason(&f.error)
+        } else {
+            hooks::redact_urls(&f.error)
+        }
+    });
+    let torrents = {
+        let st = Arc::clone(state);
+        let kw = keyword.to_string();
+        let cats = categories.to_vec();
+        let t_in = outcome.torrents;
+        match tokio::task::spawn_blocking(move || {
+            crate::plugins::hooks_runtime::run_search_site_after(&st, &site, &kw, page, &cats, t_in)
+        })
+        .await
+        {
+            Ok((filtered, opt_trace)) => {
+                if let Some(tr) = opt_trace {
+                    traces.push(tr);
+                }
+                filtered
+            }
+            Err(_) => Vec::new(),
+        }
+    };
+    let count = torrents.len();
+    let items: Vec<Value> = torrents
+        .iter()
+        .map(|t| torrent_json(t, &site_name))
+        .collect();
+    for t in torrents {
+        raw_items.push((t, site_name.clone()));
+    }
+    if let Some(tx) = tx {
+        let event = if error.is_none() {
+            "site_result"
+        } else {
+            "site_error"
+        };
+        send_site_result(
+            tx,
+            event,
+            &site_id,
+            &site_name,
+            count,
+            error.clone(),
+            elapsed_ms,
+            items,
+        )
+        .await;
+    }
+    statuses.push(site_status_json(
+        &site_id, &site_name, count, error, elapsed_ms,
+    ));
+}
+
+async fn finalize_search_hooks(
+    state: &Arc<ApiState>,
+    raw_items: Vec<(domain::Torrent, String)>,
+    all_failures: Vec<SiteFailure>,
+    traces: &mut Vec<hooks::HookTrace>,
+) -> Vec<(domain::Torrent, String)> {
+    let st = Arc::clone(state);
+    tokio::task::spawn_blocking(move || {
+        let (after_items, tr_sa) =
+            crate::plugins::hooks_runtime::run_search_after(&st, raw_items, &all_failures);
+        let mut budget = hooks::RescoreBudget::new(&[]);
+        let (final_items, tr_fa) =
+            crate::plugins::hooks_runtime::run_filter_after(&st, after_items, &mut budget);
+        (final_items, tr_sa, tr_fa)
+    })
+    .await
+    .map_or_else(
+        |_| Vec::new(),
+        |(final_items, tr_sa, tr_fa)| {
+            if let Some(t) = tr_sa {
+                traces.push(t);
+            }
+            if let Some(t) = tr_fa {
+                traces.push(t);
+            }
+            final_items
+        },
+    )
+}
+
 pub(super) async fn collect_site_results(
     state: &Arc<ApiState>,
     sites: Vec<domain::Site>,
@@ -211,102 +357,62 @@ pub(super) async fn collect_site_results(
     page: u32,
     categories: &[String],
     tx: Option<&mpsc::Sender<Result<Event, Infallible>>>,
-) -> (i64, Vec<Value>, Vec<Value>) {
+    mut traces: Vec<hooks::HookTrace>,
+    is_admin: bool,
+) -> (i64, Vec<Value>, Vec<Value>, Vec<hooks::HookTrace>) {
+    let snapshot = state.indexer.snapshot();
     let mut tasks = tokio::task::JoinSet::new();
     let mut pending = sites.into_iter();
     let unreported = Arc::new(UnreportedSites::default());
     let deadline = Instant::now() + SEARCH_DEADLINE;
     let mut statuses = Vec::new();
-    let mut items_all = Vec::new();
-    let mut total = 0i64;
+    let mut raw_items: Vec<(domain::Torrent, String)> = Vec::new();
+    let mut all_failures: Vec<SiteFailure> = Vec::new();
     loop {
         if tx.is_some_and(|tx| tx.is_closed()) {
             break;
         }
-        // 每次补位前重新采样可用 permit（P3-4）：窗口不是请求开始时的一次性快照。
-        // 否则别的请求——或超时后仍持有 permit 的 blocking 闭包——占住槽位时，
-        // 本请求的队尾会被自己记住的旧窗口饿死。
-        // 跨请求语义：permit 是全局共享的，本请求只承诺「用此刻能拿到的额度补位」；
-        // 一个站点若此刻拿不到 permit 仍立即降级为单站失败，不排队等待
-        // （见 tests/request_admission.rs::site_over_capacity_degrades_to_per_site_failure）。
-        // 派生时就预留 permit（见 `spawn_site_search`），所以“还能补几个”就是此刻的
-        // 剩余 permit；窗口空时仍派生一个，让拿不到额度的站点立即降级为单站失败。
-        while tasks.is_empty() || state.search_work.available_permits() > 0 {
-            let Some(site) = pending.next() else { break };
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                // 请求预算已耗尽：剩余站点如实报为单站超时，仍出现在 sites 报告里。
-                statuses.push(site_status_json(
-                    &site.id.to_string(),
-                    &site.name,
-                    0,
-                    Some(budget_failure_message(&BlockingError::Timeout)),
-                    0,
-                ));
-                continue;
-            }
-            spawn_site_search(
-                &mut tasks,
-                state,
-                site,
-                keyword,
-                page,
-                categories,
-                remaining,
-                &unreported,
-            );
-        }
+        enqueue_available_sites(
+            state,
+            &snapshot,
+            &mut tasks,
+            &mut pending,
+            deadline,
+            keyword,
+            page,
+            categories,
+            &unreported,
+            &mut statuses,
+        );
         let Some(result) = tasks.join_next().await else {
             break;
         };
         let Ok(result) = result else { continue };
-        let SiteSearchResult {
-            site_id,
-            site_name,
-            outcome,
-            elapsed_ms,
-        } = result;
-        total += outcome.torrents.len() as i64;
-        let error = outcome
-            .failures
-            .first()
-            .map(|failure| failure.error.clone());
-        let items = outcome
-            .torrents
-            .iter()
-            .map(|t| torrent_json(t, &site_name))
-            .collect::<Vec<_>>();
-        items_all.extend(items.clone());
-        if let Some(tx) = tx {
-            let event = if error.is_none() {
-                "site_result"
-            } else {
-                "site_error"
-            };
-            send_site_result(
-                tx,
-                event,
-                &site_id,
-                &site_name,
-                outcome.torrents.len(),
-                error.clone(),
-                elapsed_ms,
-                items,
-            )
-            .await;
-        }
-        statuses.push(site_status_json(
-            &site_id,
-            &site_name,
-            outcome.torrents.len(),
-            error,
-            elapsed_ms,
-        ));
+        process_site_search_result(
+            state,
+            result,
+            keyword,
+            page,
+            categories,
+            tx,
+            &mut raw_items,
+            &mut all_failures,
+            &mut statuses,
+            &mut traces,
+            is_admin,
+        )
+        .await;
     }
     if tasks.is_empty() {
         report_unreported_sites(&mut statuses, tx, &unreported).await;
     }
-    (total, items_all, statuses)
+    let raw_items = finalize_search_hooks(state, raw_items, all_failures, &mut traces).await;
+    let total = raw_items.len() as i64;
+    let items_all = raw_items
+        .iter()
+        .map(|(t, site_name)| torrent_json(t, site_name))
+        .collect();
+    (total, items_all, statuses, traces)
 }
 
 #[allow(clippy::too_many_arguments)]

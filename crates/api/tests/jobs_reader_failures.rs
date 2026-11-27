@@ -3,7 +3,7 @@ use api::{ApiState, Store, router};
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use downloader::MemoryDownloader;
-use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
+use indexer::{FetchRequest, Fetcher, IndexerError, RegistrySnapshot};
 use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
 use serde_json::Value;
 use std::num::NonZeroUsize;
@@ -31,7 +31,7 @@ impl Fixture {
         let state = ApiState::new(
             Store::open(temp.path().join("data")).unwrap(),
             TOKEN.into(),
-            ProfileSet::load(None).unwrap(),
+            RegistrySnapshot::builtin().unwrap(),
             Arc::new(Offline),
             Arc::new(MemoryDownloader::new(temp.path().join("stage"))),
         )

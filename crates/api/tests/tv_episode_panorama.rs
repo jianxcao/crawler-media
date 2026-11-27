@@ -11,7 +11,7 @@ use domain::{
     MetadataFields, QualityFact, SiteId, Subscribe, SubscribeFacts, SubscribeId, Torrent, User,
     UserId, UserRole,
 };
-use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
+use indexer::{FetchRequest, Fetcher, IndexerError, RegistrySnapshot};
 use serde_json::{Value, json};
 use std::sync::Arc;
 use tower::ServiceExt;
@@ -341,7 +341,7 @@ fn seed_panorama_fixture(access_mode: &str) -> (tempfile::TempDir, ApiState, Lib
     let state = ApiState::new(
         store,
         ADMIN_TOKEN.into(),
-        ProfileSet::load(None).unwrap(),
+        RegistrySnapshot::builtin().unwrap(),
         Arc::new(NoFetch),
         Arc::new(downloader::MemoryDownloader::new(dir.path().join("stage"))),
     )

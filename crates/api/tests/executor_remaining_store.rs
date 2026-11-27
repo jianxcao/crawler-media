@@ -14,7 +14,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use domain::{Media, MediaId, MediaKind, UserRole};
 use downloader::MemoryDownloader;
-use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
+use indexer::{FetchRequest, Fetcher, IndexerError, RegistrySnapshot};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
@@ -53,7 +53,7 @@ impl Fixture {
         let state = ApiState::new(
             Store::open(tmp.path().join("data")).unwrap(),
             "executor-secret".into(),
-            ProfileSet::load(None).unwrap(),
+            RegistrySnapshot::builtin().unwrap(),
             Arc::new(NoFetch),
             Arc::new(MemoryDownloader::new(tmp.path().join("stage"))),
         )

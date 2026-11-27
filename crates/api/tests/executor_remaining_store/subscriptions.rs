@@ -287,8 +287,15 @@ fn subscription_list_detail_create_and_patch_observe_posters_outside_store() {
 
 struct SlowDownloader(std::sync::OnceLock<Arc<Store>>);
 impl downloader::Downloader for SlowDownloader {
-    fn add(&self, _: &domain::Torrent) -> Result<(), downloader::DownloaderError> {
-        Ok(())
+    fn submit_verified(
+        &self,
+        payload: &downloader::SubmitPayload,
+        _options: &downloader::SubmitOptions,
+    ) -> Result<downloader::ClientSubmitResult, downloader::DownloaderError> {
+        Ok(downloader::ClientSubmitResult::Added {
+            already_owned: false,
+            info_hash: payload.info_hash().to_string(),
+        })
     }
     fn completed_files(
         &self,
@@ -319,7 +326,7 @@ fn subscription_removal_preview_downloader_is_off_executor_and_outside_store() {
     f.state = ApiState::new(
         Store::open(f._tmp.path().join("preview-data")).unwrap(),
         f.token.clone(),
-        ProfileSet::load(None).unwrap(),
+        RegistrySnapshot::builtin().unwrap(),
         Arc::new(NoFetch),
         downloader.clone(),
     )

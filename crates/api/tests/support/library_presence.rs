@@ -10,7 +10,7 @@ use axum::http::{Request, StatusCode};
 use domain::{
     Confidence, LedgerId, LibraryFile, Media, MediaId, MediaKind, QualitySource, UserId, UserRole,
 };
-use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
+use indexer::{FetchRequest, Fetcher, IndexerError, RegistrySnapshot};
 use parking_lot::Mutex;
 use serde_json::Value;
 use store::test_support::{FixtureFile, publish_fixture_file};
@@ -25,8 +25,15 @@ impl Fetcher for NoFetch {
 
 struct MemoryDownloader(PathBuf);
 impl downloader::Downloader for MemoryDownloader {
-    fn add(&self, _: &domain::Torrent) -> Result<(), downloader::DownloaderError> {
-        Ok(())
+    fn submit_verified(
+        &self,
+        payload: &downloader::SubmitPayload,
+        _options: &downloader::SubmitOptions,
+    ) -> Result<downloader::ClientSubmitResult, downloader::DownloaderError> {
+        Ok(downloader::ClientSubmitResult::Added {
+            already_owned: false,
+            info_hash: payload.info_hash().to_string(),
+        })
     }
     fn completed_files(
         &self,
@@ -102,7 +109,7 @@ impl PresenceFixture {
         let state = ApiState::new(
             store,
             admin_token.clone(),
-            ProfileSet::load(None).unwrap(),
+            RegistrySnapshot::builtin().unwrap(),
             Arc::new(NoFetch),
             Arc::new(MemoryDownloader(dir.path().join("stage"))),
         )

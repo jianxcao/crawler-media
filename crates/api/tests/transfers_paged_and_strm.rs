@@ -8,7 +8,7 @@ use axum::{
 };
 use domain::{Confidence, LibraryFile, Media, MediaId, MediaKind, QualitySource};
 use downloader::MemoryDownloader;
-use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
+use indexer::{FetchRequest, Fetcher, IndexerError, RegistrySnapshot};
 use serde_json::{Value, json};
 use std::{path::Path, sync::Arc};
 use store::library_write::probe::{Observed, ProbePublication};
@@ -196,7 +196,7 @@ fn build_fixture(dir: &Path) -> (ApiState, MediaId) {
     let state = ApiState::new(
         store,
         "transfers-test".into(),
-        ProfileSet::load(None).unwrap(),
+        RegistrySnapshot::builtin().unwrap(),
         Arc::new(NoFetch),
         Arc::new(MemoryDownloader::new(dir.join("stage"))),
     )
@@ -376,7 +376,7 @@ async fn transfers_unicode_casefold_search_and_removing_library_exclusion() {
     let state = ApiState::new(
         store,
         "transfers-test".into(),
-        ProfileSet::load(None).unwrap(),
+        RegistrySnapshot::builtin().unwrap(),
         Arc::new(NoFetch),
         Arc::new(MemoryDownloader::new(dir.path().join("stage"))),
     )
@@ -439,7 +439,7 @@ async fn transfers_file_row_mode_matches_mode_filter_and_summary_counts() {
     let state = ApiState::new(
         store,
         "transfers-test".into(),
-        ProfileSet::load(None).unwrap(),
+        RegistrySnapshot::builtin().unwrap(),
         Arc::new(NoFetch),
         Arc::new(MemoryDownloader::new(dir.path().join("stage"))),
     )

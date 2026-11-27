@@ -9,7 +9,7 @@ use axum::{
     routing::get,
 };
 use downloader::MemoryDownloader;
-use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
+use indexer::{FetchRequest, Fetcher, IndexerError, RegistrySnapshot};
 use tower::ServiceExt;
 
 use crate::{ApiState, Store};
@@ -59,7 +59,7 @@ fn self_auth_passes_selected_bearer_or_cookie_as_opaque_read_credential() {
     let state = ApiState::new(
         Store::open(dir.path().join("data")).unwrap(),
         "management-secret".into(),
-        ProfileSet::load(None).unwrap(),
+        RegistrySnapshot::builtin().unwrap(),
         Arc::new(NoFetch),
         Arc::new(MemoryDownloader::new(dir.path().join("stage"))),
     )

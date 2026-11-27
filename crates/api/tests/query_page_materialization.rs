@@ -8,7 +8,7 @@ use domain::{
     ProtocolParent, QualitySource, UserId,
 };
 use downloader::MemoryDownloader;
-use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
+use indexer::{FetchRequest, Fetcher, IndexerError, RegistrySnapshot};
 
 struct NoFetch;
 impl Fetcher for NoFetch {
@@ -32,7 +32,7 @@ impl Fixture {
         let state = ApiState::new(
             Store::open(dir.path().join("data")).unwrap(),
             "management-secret".into(),
-            ProfileSet::load(None).unwrap(),
+            RegistrySnapshot::builtin().unwrap(),
             Arc::new(NoFetch),
             Arc::new(MemoryDownloader::new(dir.path().join("stage"))),
         )

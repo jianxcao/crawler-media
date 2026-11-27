@@ -5,7 +5,7 @@ use axum::{
     http::{Request, StatusCode},
 };
 use downloader::MemoryDownloader;
-use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
+use indexer::{FetchRequest, Fetcher, IndexerError, RegistrySnapshot};
 use rusqlite::{Connection, OptionalExtension};
 use serde_json::Value;
 use std::{path::Path, sync::Arc, time::Duration};
@@ -51,7 +51,7 @@ fn fixture(root: &Path) -> (ApiState, String) {
     let state = ApiState::new(
         store,
         "scan-statistics-fixture".into(),
-        ProfileSet::load(None).unwrap(),
+        RegistrySnapshot::builtin().unwrap(),
         Arc::new(Offline),
         Arc::new(MemoryDownloader::new(root.join("stage"))),
     )

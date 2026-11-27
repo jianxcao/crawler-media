@@ -1,2 +1,2 @@
 mod run;
-pub(crate) use run::run_subscribe;
+pub(crate) use run::{ensure_current, run_subscribe};

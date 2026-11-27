@@ -19,7 +19,6 @@ pub(super) fn member_discovery_routes() -> Router<ApiState> {
         // sites（只读；变更在 admin 层）
         .route("/sites", get(sites::list_sites))
         .route("/sites/{id}", get(sites::get_site))
-        .route("/sites/boost-stats", get(sites::boost_stats))
         .route("/sites/catalog", get(sites::site_catalog))
         // search
         .route("/search/torrents", get(search::search_torrents))

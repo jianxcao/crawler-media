@@ -16,8 +16,15 @@ struct FailingDownloader {
 }
 
 impl Downloader for FailingDownloader {
-    fn add(&self, _: &domain::Torrent) -> Result<(), DownloaderError> {
-        Ok(())
+    fn submit_verified(
+        &self,
+        payload: &downloader::SubmitPayload,
+        _options: &downloader::SubmitOptions,
+    ) -> Result<downloader::ClientSubmitResult, DownloaderError> {
+        Ok(downloader::ClientSubmitResult::Added {
+            already_owned: false,
+            info_hash: payload.info_hash().to_string(),
+        })
     }
 
     fn completed_files(&self, torrent: &domain::Torrent) -> Result<Vec<PathBuf>, DownloaderError> {
@@ -140,7 +147,7 @@ fn state_with_downloader(root: &std::path::Path, good_file: PathBuf) -> api::Api
     api::ApiState::new(
         Store::open(root.join("data")).unwrap(),
         "management-secret".into(),
-        indexer::ProfileSet::load(None).unwrap(),
+        indexer::RegistrySnapshot::builtin().unwrap(),
         Arc::new(Fixtures {
             requests: Mutex::new(Vec::new()),
             bodies: HashMap::new(),

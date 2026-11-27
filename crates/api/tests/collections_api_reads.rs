@@ -6,7 +6,7 @@ use axum::{
 };
 use domain::{Media, MediaId, MediaKind, User, UserId, UserRole};
 use downloader::MemoryDownloader;
-use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
+use indexer::{FetchRequest, Fetcher, IndexerError, RegistrySnapshot};
 use media_server::{
     provider::QueryTiming,
     query_metrics::{QueryMetrics, QueryMetricsSnapshot},
@@ -60,7 +60,7 @@ impl Fixture {
         let state = ApiState::new(
             store,
             "collection-admin-fixture".into(),
-            ProfileSet::load(None).unwrap(),
+            RegistrySnapshot::builtin().unwrap(),
             Arc::new(Offline),
             Arc::new(MemoryDownloader::new(dir.path().join("stage"))),
         )

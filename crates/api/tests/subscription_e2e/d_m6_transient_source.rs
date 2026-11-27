@@ -16,6 +16,15 @@ use super::harness::*;
 
 const ALT_TITLE: &str = "The.Matrix.1999.2160p.BluRay.x265-ALT";
 
+fn payload_matches_id1(payload: &downloader::SubmitPayload) -> bool {
+    match payload {
+        downloader::SubmitPayload::TorrentBytes { bytes, .. } => {
+            String::from_utf8_lossy(bytes).contains("id=1")
+        }
+        downloader::SubmitPayload::Magnet { uri, .. } => uri.contains("id=1"),
+    }
+}
+
 struct StubDownloader {
     transient_outage: AtomicBool,
     reject_first: bool,
@@ -33,26 +42,40 @@ impl StubDownloader {
 }
 
 impl downloader::Downloader for StubDownloader {
-    fn add(&self, torrent: &domain::Torrent) -> Result<(), downloader::DownloaderError> {
-        self.add_with_options(torrent, &torrent.enclosure, None)
-    }
-
-    fn add_with_options(
+    fn submit_verified(
         &self,
-        torrent: &domain::Torrent,
-        download_url: &str,
-        save_path: Option<&str>,
-    ) -> Result<(), downloader::DownloaderError> {
+        payload: &downloader::SubmitPayload,
+        options: &downloader::SubmitOptions,
+    ) -> Result<downloader::ClientSubmitResult, downloader::DownloaderError> {
         if self.transient_outage.load(Ordering::SeqCst) {
             return Err(downloader::DownloaderError::Message("tracker 503".into()));
         }
-        if self.reject_first && torrent.enclosure.contains("id=1") {
+        if self.reject_first && payload_matches_id1(payload) {
             return Err(downloader::DownloaderError::SourceRejected(
                 "404 not found".into(),
             ));
         }
-        self.inner
-            .add_with_options(torrent, download_url, save_path)
+        self.inner.submit_verified(payload, options)
+    }
+
+    fn remember_identity(
+        &self,
+        torrent: &domain::Torrent,
+        hash: &str,
+    ) -> Result<(), downloader::DownloaderError> {
+        self.inner.remember_identity(torrent, hash)
+    }
+
+    fn query_task_status(
+        &self,
+        info_hash: &str,
+        ownership_tag: &str,
+    ) -> Result<downloader::ClientTaskQuery, downloader::DownloaderError> {
+        self.inner.query_task_status(info_hash, ownership_tag)
+    }
+
+    fn supports_labels(&self) -> bool {
+        self.inner.supports_labels()
     }
 
     fn completed_files(
@@ -286,11 +309,12 @@ async fn indexer_resolve_fetch_error_retries_while_parse_error_falls_back() {
     let state = api::ApiState::new(
         api::Store::open(tmp.path().join("data")).unwrap(),
         TOKEN.into(),
-        indexer::ProfileSet::load(None).unwrap(),
+        indexer::RegistrySnapshot::builtin().unwrap(),
         fixture.clone(),
         downloader,
     )
-    .unwrap();
+    .unwrap()
+    .with_torrent_payload_fetcher(Arc::new(StubPayloadFetcher));
     let app = api::router(state.clone());
     let id = seed_mteam_subscribe(&app).await;
 
@@ -369,17 +393,12 @@ async fn manual_run_persists_source_rejected_when_fallback_candidate_fails_trans
     }
 
     impl downloader::Downloader for MixedCandidateDownloader {
-        fn add(&self, torrent: &domain::Torrent) -> Result<(), downloader::DownloaderError> {
-            self.add_with_options(torrent, &torrent.enclosure, None)
-        }
-
-        fn add_with_options(
+        fn submit_verified(
             &self,
-            torrent: &domain::Torrent,
-            download_url: &str,
-            save_path: Option<&str>,
-        ) -> Result<(), downloader::DownloaderError> {
-            if torrent.enclosure.contains("id=1") {
+            payload: &downloader::SubmitPayload,
+            options: &downloader::SubmitOptions,
+        ) -> Result<downloader::ClientSubmitResult, downloader::DownloaderError> {
+            if payload_matches_id1(payload) {
                 return Err(downloader::DownloaderError::SourceRejected(
                     "404 torrent deleted".into(),
                 ));
@@ -389,8 +408,27 @@ async fn manual_run_persists_source_rejected_when_fallback_candidate_fails_trans
                     "qBittorrent temporarily unreachable".into(),
                 ));
             }
-            self.inner
-                .add_with_options(torrent, download_url, save_path)
+            self.inner.submit_verified(payload, options)
+        }
+
+        fn remember_identity(
+            &self,
+            torrent: &domain::Torrent,
+            hash: &str,
+        ) -> Result<(), downloader::DownloaderError> {
+            self.inner.remember_identity(torrent, hash)
+        }
+
+        fn query_task_status(
+            &self,
+            info_hash: &str,
+            ownership_tag: &str,
+        ) -> Result<downloader::ClientTaskQuery, downloader::DownloaderError> {
+            self.inner.query_task_status(info_hash, ownership_tag)
+        }
+
+        fn supports_labels(&self) -> bool {
+            self.inner.supports_labels()
         }
 
         fn completed_files(

@@ -5,12 +5,16 @@
 mod adaptive_fingerprint_capture;
 #[path = "blocking_budget.rs"]
 mod blocking_budget;
+#[path = "boost_cleanup_safety.rs"]
+mod boost_cleanup_safety;
 #[path = "browser_runtime.rs"]
 mod browser_runtime;
 #[path = "chapter_frame_capacity.rs"]
 mod chapter_frame_capacity;
 #[path = "design_improvements.rs"]
 mod design_improvements;
+#[path = "download_service_remediation.rs"]
+mod download_service_remediation;
 #[path = "duplicate_deletion_safety.rs"]
 mod duplicate_deletion_safety;
 #[path = "fingerprint_cache.rs"]
@@ -39,10 +43,36 @@ mod maintenance_sqlite;
 mod persistence;
 #[path = "playback_watch_time.rs"]
 mod playback_watch_time;
+#[path = "plugin_core_integration_remediation.rs"]
+mod plugin_core_integration_remediation;
+#[path = "plugin_core_slice_c_r2.rs"]
+mod plugin_core_slice_c_r2;
+#[path = "plugin_core_slice_c_r6.rs"]
+mod plugin_core_slice_c_r6;
+#[path = "plugin_core_slice_c_remediation.rs"]
+mod plugin_core_slice_c_remediation;
+#[path = "plugin_http_config_perms.rs"]
+mod plugin_http_config_perms;
+#[path = "plugin_http_site_ports.rs"]
+mod plugin_http_site_ports;
+#[path = "plugin_p1c_lifecycle.rs"]
+mod plugin_p1c_lifecycle;
+#[path = "plugin_registry_lifecycle.rs"]
+mod plugin_registry_lifecycle;
+#[path = "plugin_slice_d_r11.rs"]
+mod plugin_slice_d_r11;
+#[path = "plugin_slice_d_r7.rs"]
+mod plugin_slice_d_r7;
+#[path = "plugin_slice_e_r10.rs"]
+mod plugin_slice_e_r10;
+#[path = "plugin_ui_assets.rs"]
+mod plugin_ui_assets;
 #[path = "probe_whole_unit_guard.rs"]
 mod probe_whole_unit_guard;
 #[path = "query_http_perf.rs"]
 mod query_http_perf;
+#[path = "registry_snapshot_api.rs"]
+mod registry_snapshot_api;
 #[path = "reidentify_preview.rs"]
 mod reidentify_preview;
 #[path = "request_admission.rs"]
@@ -61,6 +91,8 @@ mod storage_api_contract;
 mod storage_transfer_scope;
 #[path = "subscribe_fact_io_isolation.rs"]
 mod subscribe_fact_io_isolation;
+#[path = "subscribe_hooks_and_admit.rs"]
+mod subscribe_hooks_and_admit;
 #[path = "subscription_latency.rs"]
 mod subscription_latency;
 #[path = "transfers_paged_and_strm.rs"]

@@ -68,7 +68,9 @@ fn def_media_title(def: &jobs::JobDef, store: &crate::Store) -> Option<String> {
             .and_then(|subscribe| store.get_media(subscribe.media_id).ok().flatten())
             .map(|media| media.title),
         jobs::JobScope::Media(id) => store.get_media(id).ok().flatten().map(|media| media.title),
-        jobs::JobScope::Global => None,
+        jobs::JobScope::Global
+        | jobs::JobScope::PluginTask(_)
+        | jobs::JobScope::PluginOperation(_) => None,
     }
 }
 
@@ -138,9 +140,20 @@ fn def_json(
     live: Option<&jobs::Job>,
     last: Option<&jobs::Job>,
     media_title: Option<&str>,
+    admin: bool,
 ) -> Value {
     let payload_val: Value = serde_json::from_str(&def.payload).unwrap_or_else(|_| json!({}));
     let friendly_name = job_friendly_name(&def.name, media_title);
+    let last_error = last
+        .and_then(|job| job.error.as_deref())
+        .or_else(|| live.and_then(|job| job.error.as_deref()))
+        .map(|e| {
+            if admin {
+                hooks::sanitize_reason(e)
+            } else {
+                hooks::redact_urls(e)
+            }
+        });
 
     let mut rendered = json!({
         "id": def.id.to_string(),
@@ -157,7 +170,7 @@ fn def_json(
         "concurrency_key": def.concurrency_key,
         "last_status": job_last_status(live, last),
         "last_finished_at": last.and_then(|job| job.finished_at).or_else(|| live.and_then(|job| job.finished_at)),
-        "last_error": last.and_then(|job| job.error.as_deref()).or_else(|| live.and_then(|job| job.error.as_deref())),
+        "last_error": last_error,
         "next_run_after": if !def.enabled {
             Value::Null
         } else {
@@ -188,8 +201,15 @@ fn def_json_with_store(
     live: Option<&jobs::Job>,
     last: Option<&jobs::Job>,
     store: &crate::Store,
+    admin: bool,
 ) -> Value {
-    def_json(def, live, last, def_media_title(def, store).as_deref())
+    def_json(
+        def,
+        live,
+        last,
+        def_media_title(def, store).as_deref(),
+        admin,
+    )
 }
 
 #[derive(Deserialize)]
@@ -205,6 +225,9 @@ fn def_visible_to_user(
     user_id: UserId,
     admin: bool,
 ) -> bool {
+    if !admin && def.kind.is_plugin() {
+        return false;
+    }
     if admin || def.kind != JobKind::SubscribeSearch {
         return true;
     }
@@ -261,11 +284,16 @@ fn list_jobs_blocking(state: &ApiState, user_id: UserId, query: &ListJobsQuery) 
         Err(error) => return jobs_read_error(error),
     };
     // 2) Store 快照：可见性与 scope 过滤（都在 limit 之前）。
-    let visible_defs =
-        match with_bounded_store(state, |store| visible_defs(store, defs, user_id, query)) {
-            Ok(visible_defs) => visible_defs,
-            Err(error) => return jobs_budget_response(error),
-        };
+    let (visible_defs, is_admin) = match with_bounded_store(state, |store| {
+        let admin = store
+            .user_role(user_id)
+            .map(|role| role == "admin")
+            .unwrap_or(false);
+        (visible_defs(store, defs, user_id, query), admin)
+    }) {
+        Ok(pair) => pair,
+        Err(error) => return jobs_budget_response(error),
+    };
     // 3) Jobs 只读快照：一次批量取所有 live/last child。
     let children = {
         let ids: Vec<JobDefId> = visible_defs.iter().map(|def| def.id).collect();
@@ -292,7 +320,13 @@ fn list_jobs_blocking(state: &ApiState, user_id: UserId, query: &ListJobsQuery) 
         .into_iter()
         .zip(titles)
         .map(|((def, live, last), title)| {
-            def_json(&def, live.as_ref(), last.as_ref(), title.as_deref())
+            def_json(
+                &def,
+                live.as_ref(),
+                last.as_ref(),
+                title.as_deref(),
+                is_admin,
+            )
         })
         .collect();
     ok_list(listed).into_response()
@@ -316,9 +350,13 @@ fn visible_defs(
     };
     defs.into_iter()
         .filter(|def| {
-            let visible = admin
-                || def.kind != JobKind::SubscribeSearch
-                || matches!(def.scope,jobs::JobScope::Subscribe(id) if owned.contains(&id));
+            let visible = if !admin && def.kind.is_plugin() {
+                false
+            } else {
+                admin
+                    || def.kind != JobKind::SubscribeSearch
+                    || matches!(def.scope,jobs::JobScope::Subscribe(id) if owned.contains(&id))
+            };
             if !visible {
                 return false;
             }
@@ -407,6 +445,7 @@ fn get_job_blocking(state: &ApiState, user_id: UserId, id: JobDefId) -> Response
             live.as_ref(),
             last.as_ref(),
             store,
+            admin,
         ))
     });
     match rendered {

@@ -2,6 +2,7 @@
 
 mod instances;
 mod submission;
+mod submission_idempotency;
 mod task_listing;
 mod tasks;
 

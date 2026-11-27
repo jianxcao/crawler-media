@@ -5,6 +5,8 @@
 mod arrivals_runtime;
 #[path = "bounded_work_acceptance.rs"]
 mod bounded_work_acceptance;
+#[path = "builtin_boost_cycle.rs"]
+mod builtin_boost_cycle;
 #[path = "collections_api_reads.rs"]
 mod collections_api_reads;
 #[path = "facets_budget.rs"]
@@ -39,6 +41,34 @@ mod maintenance_writer_isolation;
 mod metadata_language_operation;
 #[path = "playback_history_page.rs"]
 mod playback_history_page;
+#[path = "plugin_browser_adapter.rs"]
+mod plugin_browser_adapter;
+#[path = "plugin_core_slice_c_r11.rs"]
+mod plugin_core_slice_c_r11;
+#[path = "plugin_core_slice_c_r4.rs"]
+mod plugin_core_slice_c_r4;
+#[path = "plugin_core_slice_c_r8.rs"]
+mod plugin_core_slice_c_r8;
+#[path = "plugin_hook_catalog.rs"]
+mod plugin_hook_catalog;
+#[path = "plugin_http_lifecycle_upgrade.rs"]
+mod plugin_http_lifecycle_upgrade;
+#[path = "plugin_lifecycle_races.rs"]
+mod plugin_lifecycle_races;
+#[path = "plugin_p1c_recovery.rs"]
+mod plugin_p1c_recovery;
+#[path = "plugin_security_remediation.rs"]
+mod plugin_security_remediation;
+#[path = "plugin_slice_d_r2.rs"]
+mod plugin_slice_d_r2;
+#[path = "plugin_slice_d_r9.rs"]
+mod plugin_slice_d_r9;
+#[path = "plugin_slice_e_r12.rs"]
+mod plugin_slice_e_r12;
+#[path = "plugin_slice_e_r9.rs"]
+mod plugin_slice_e_r9;
+#[path = "plugin_ui_review_remediation.rs"]
+mod plugin_ui_review_remediation;
 #[path = "poster_cache_capacity.rs"]
 mod poster_cache_capacity;
 #[path = "protocol_paging_totals.rs"]
@@ -55,6 +85,8 @@ mod scan_budget_recovery;
 mod scan_scope;
 #[path = "search_presets_and_categories.rs"]
 mod search_presets_and_categories;
+#[path = "site_maintenance_eof_challenge.rs"]
+mod site_maintenance_eof_challenge;
 #[path = "source_observation_liveness.rs"]
 mod source_observation_liveness;
 #[path = "storage_subscription_runtime.rs"]

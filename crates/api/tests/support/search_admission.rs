@@ -13,7 +13,7 @@ use axum::body::Body;
 use axum::http::Request;
 use axum::response::Response;
 use domain::{Site, SiteId};
-use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
+use indexer::{FetchRequest, Fetcher, IndexerError, RegistrySnapshot};
 use tower::ServiceExt;
 
 /// 阻塞式搜索后端：记录已开始/已完成的站点抓取，直到 `release` 才返回。
@@ -112,7 +112,7 @@ impl SearchAdmissionFixture {
         let state = ApiState::new(
             store,
             admin_token.clone(),
-            ProfileSet::load(None).unwrap(),
+            RegistrySnapshot::builtin().unwrap(),
             fetcher.clone(),
             Arc::new(downloader::MemoryDownloader::new(dir.path().join("stage"))),
         )
@@ -136,6 +136,8 @@ impl SearchAdmissionFixture {
                     downloader_id: None,
                     enabled: true,
                     maintenance_via: domain::MaintenanceVia::Http,
+                    browser_search: false,
+                    timezone: "UTC".into(),
                 };
                 site_ids.push(site.id.to_string());
                 guard.insert_site(&site).unwrap();

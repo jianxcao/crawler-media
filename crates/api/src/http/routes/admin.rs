@@ -33,7 +33,8 @@ pub(super) fn admin_core_routes() -> Router<ApiState> {
         .route("/sites/{id}/verify", post(sites::verify_site))
         .route("/sites/{id}/login", post(sites::site_login))
         .route("/sites/{id}/check-in", post(sites::site_check_in))
-        .route("/sites/{id}/boost", patch(sites::patch_boost))
+        .route("/sites/{id}/plugin-status", get(sites::plugin_status))
+        .route("/sites/{id}/plugin-actions", post(sites::plugin_actions))
         // rule-sets (Filter groups)
         .route("/rule-sets", post(rule_sets::create_rule_set))
         .route(
@@ -344,8 +345,10 @@ pub(super) fn admin_ops_routes() -> Router<ApiState> {
 /// Explicit computations that do not persist business changes. Keep these apart
 /// from mutation routes so a new endpoint cannot bypass admission by its name.
 pub(super) fn admin_readonly_post_routes() -> Router<ApiState> {
-    Router::new().route(
-        "/jobs/{id}/maintenance-preview",
-        post(job_maintenance::preview_maintenance),
-    )
+    Router::new()
+        .route(
+            "/jobs/{id}/maintenance-preview",
+            post(job_maintenance::preview_maintenance),
+        )
+        .merge(crate::http::plugins::admin_plugin_readonly_post_routes())
 }

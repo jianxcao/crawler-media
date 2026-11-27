@@ -95,8 +95,24 @@ pub(super) fn admin_routes(state: &ApiState) -> Router<ApiState> {
         .merge(write_gated(state, admin_metadata_routes()))
         .merge(admin_readonly_post_routes())
         .merge(write_gated(state, admin_ops_routes()))
+        .merge(write_gated(
+            state,
+            crate::http::plugins::admin_plugin_routes(),
+        ))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             auth::require_admin,
+        ))
+}
+
+pub(super) fn plugin_asset_routes(state: &ApiState) -> Router<ApiState> {
+    crate::http::plugins::admin_plugin_asset_routes()
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            auth::require_admin,
+        ))
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            auth::require_cookie_auth,
         ))
 }

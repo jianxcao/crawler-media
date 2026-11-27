@@ -5,7 +5,7 @@ use axum::{
     http::{Request, StatusCode},
 };
 use domain::{EntityScope, FieldValue, LibraryFile, Media, MediaId, MediaKind, MetadataFields};
-use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
+use indexer::{FetchRequest, Fetcher, IndexerError, RegistrySnapshot};
 use serde_json::Value;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -172,7 +172,7 @@ pub fn catalog_app(catalog: Arc<dyn Catalog>) -> (tempfile::TempDir, Router) {
     let state = ApiState::new(
         Store::open(dir.path().join("data")).unwrap(),
         TOKEN.into(),
-        ProfileSet::load(None).unwrap(),
+        RegistrySnapshot::builtin().unwrap(),
         Arc::new(NoFetch),
         Arc::new(downloader::MemoryDownloader::new(dir.path().join("stage"))),
     )
@@ -261,7 +261,7 @@ impl Fixture {
         let state = ApiState::new(
             store,
             TOKEN.into(),
-            ProfileSet::load(None).unwrap(),
+            RegistrySnapshot::builtin().unwrap(),
             Arc::new(NoFetch),
             Arc::new(downloader::MemoryDownloader::new(dir.path().join("stage"))),
         )

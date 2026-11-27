@@ -732,7 +732,7 @@ mod tests {
         let state = ApiState::new_arc(
             store.clone(),
             "management-secret".into(),
-            indexer::ProfileSet::load(None).unwrap(),
+            indexer::RegistrySnapshot::builtin().unwrap(),
             Arc::new(NoFetch),
             Arc::new(downloader::MemoryDownloader::new(tmp.path().join("stage"))),
         )

@@ -40,7 +40,7 @@ impl Fixture {
         let state = ApiState::new(
             store,
             "test-token".into(),
-            indexer::ProfileSet::load(None).unwrap(),
+            indexer::RegistrySnapshot::builtin().unwrap(),
             Arc::new(NoFetch),
             Arc::new(downloader::MemoryDownloader::new(dir.path().join("stage"))),
         )

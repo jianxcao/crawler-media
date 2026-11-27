@@ -469,7 +469,7 @@ fn build_probe_state(
         api::ApiState::new(
             Store::open(&data_dir).unwrap(),
             "test-secret".into(),
-            indexer::ProfileSet::load(None).unwrap(),
+            indexer::RegistrySnapshot::builtin().unwrap(),
             Arc::new(NoopFetcher),
             Arc::new(downloader::MemoryDownloader::new(stage_dir)),
         )

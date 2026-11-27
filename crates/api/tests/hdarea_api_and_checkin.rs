@@ -10,17 +10,18 @@ use std::time::Duration;
 use api::{ApiState, HttpFetcher, router};
 use axum::http::StatusCode;
 use downloader::MemoryDownloader;
-use indexer::ProfileSet;
+use indexer::RegistrySnapshot;
 use parking_lot::Mutex;
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
 fn build_app(root: &std::path::Path) -> (axum::Router, ApiState) {
-    let state = ApiState::new(
-        api::Store::open(root.join("data")).unwrap(),
+    let store = Arc::new(api::Store::open(root.join("data")).unwrap());
+    let state = ApiState::new_arc(
+        store.clone(),
         "management-secret".into(),
-        ProfileSet::load(None).unwrap(),
-        Arc::new(HttpFetcher),
+        RegistrySnapshot::builtin().unwrap(),
+        Arc::new(HttpFetcher::with_store(store)),
         Arc::new(MemoryDownloader::new(root.join("stage"))),
     )
     .unwrap();

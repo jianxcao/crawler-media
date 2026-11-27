@@ -10,7 +10,7 @@ use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use downloader::MemoryDownloader;
 use image::{ImageFormat, Rgba, RgbaImage};
-use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
+use indexer::{FetchRequest, Fetcher, IndexerError, RegistrySnapshot};
 use media::{CatalogGet, Douban, Tmdb, TmdbError};
 use serde_json::{Value, json};
 use tower::ServiceExt;
@@ -30,7 +30,7 @@ fn base_state(root: &Path) -> ApiState {
     ApiState::new(
         store,
         TOKEN.into(),
-        ProfileSet::load(None).unwrap(),
+        RegistrySnapshot::builtin().unwrap(),
         Arc::new(OfflineFetcher),
         Arc::new(MemoryDownloader::new(root.join("stage"))),
     )

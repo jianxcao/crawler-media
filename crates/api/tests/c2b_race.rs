@@ -7,7 +7,7 @@ use api::{ApiState, Store, router};
 use axum::body::{Body, to_bytes};
 use axum::http::Request;
 use downloader::MemoryDownloader;
-use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
+use indexer::{FetchRequest, Fetcher, IndexerError, RegistrySnapshot};
 use serde_json::{Value, json};
 use store::test_support::{FixtureFile, publish_fixture_file};
 use tower::ServiceExt;
@@ -92,7 +92,7 @@ async fn late_auto_generate_must_not_overwrite_manual_cover() {
     let state = ApiState::new(
         Store::open(tmp.path().join("data")).unwrap(),
         "management-secret".into(),
-        ProfileSet::load(None).unwrap(),
+        RegistrySnapshot::builtin().unwrap(),
         Arc::new(NoFetch),
         Arc::new(MemoryDownloader::new(tmp.path().join("stage"))),
     )

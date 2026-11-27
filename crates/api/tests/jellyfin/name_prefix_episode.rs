@@ -214,7 +214,7 @@ async fn name_prefix_keeps_selection_and_hydrated_name_in_same_snapshot() {
     let state = ApiState::new(
         store,
         "admin-token".into(),
-        ProfileSet::load(None).unwrap(),
+        RegistrySnapshot::builtin().unwrap(),
         Arc::new(NoFetch),
         Arc::new(MemoryDownloader::new(tmp.path().join("stage"))),
     )

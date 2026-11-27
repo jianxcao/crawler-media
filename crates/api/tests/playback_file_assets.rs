@@ -165,7 +165,7 @@ fn seed_two_version_movie() -> SeededAssets {
     let state = api::ApiState::new(
         Store::open(&data).unwrap(),
         "admin-secret".into(),
-        indexer::ProfileSet::load(None).unwrap(),
+        indexer::RegistrySnapshot::builtin().unwrap(),
         Arc::new(NoopFetcher),
         Arc::new(downloader::MemoryDownloader::new(tmp.path().join("stage"))),
     )

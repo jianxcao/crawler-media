@@ -8,7 +8,7 @@ use api::{ApiState, Store, router};
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use downloader::MemoryDownloader;
-use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
+use indexer::{FetchRequest, Fetcher, IndexerError, RegistrySnapshot};
 use media_server::provider::QueryTiming;
 use tower::ServiceExt;
 
@@ -40,7 +40,7 @@ fn revoked_original_token_cannot_publish_completed_facet_read() {
     let state = ApiState::new(
         store,
         "management-secret".into(),
-        ProfileSet::load(None).unwrap(),
+        RegistrySnapshot::builtin().unwrap(),
         Arc::new(NoFetch),
         Arc::new(MemoryDownloader::new(dir.path().join("stage"))),
     )
@@ -100,7 +100,7 @@ fn role_flip_status(flips: usize) -> (StatusCode, usize) {
     let observed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let count = observed.clone();
     let state = ApiState::new(
-        store, "management-secret".into(), ProfileSet::load(None).unwrap(),
+        store, "management-secret".into(), RegistrySnapshot::builtin().unwrap(),
         Arc::new(NoFetch),
         Arc::new(MemoryDownloader::new(dir.path().join("stage"))),
     ).unwrap().with_library_read_progress_observer(Arc::new(move || {
@@ -163,7 +163,7 @@ fn early_library_headers_reject_role_change_after_cover_observation() {
     let state = ApiState::new(
         store,
         "management-secret".into(),
-        ProfileSet::load(None).unwrap(),
+        RegistrySnapshot::builtin().unwrap(),
         Arc::new(NoFetch),
         Arc::new(MemoryDownloader::new(dir.path().join("stage"))),
     )
@@ -211,7 +211,7 @@ fn retry_uses_remaining_deadline_and_timed_out_lease_recovers() {
     let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let observed = attempts.clone();
     let state = ApiState::new(
-        store, "management-secret".into(), ProfileSet::load(None).unwrap(),
+        store, "management-secret".into(), RegistrySnapshot::builtin().unwrap(),
         Arc::new(NoFetch),
         Arc::new(MemoryDownloader::new(dir.path().join("stage"))),
     ).unwrap()
@@ -275,7 +275,7 @@ fn broken_library_query_returns_500_not_empty_success() {
     let state = ApiState::new(
         store,
         "management-secret".into(),
-        ProfileSet::load(None).unwrap(),
+        RegistrySnapshot::builtin().unwrap(),
         Arc::new(NoFetch),
         Arc::new(MemoryDownloader::new(dir.path().join("stage"))),
     )
@@ -316,7 +316,7 @@ fn early_library_headers_reject_acl_change_after_cover_observation() {
     let state = ApiState::new(
         store,
         "management-secret".into(),
-        ProfileSet::load(None).unwrap(),
+        RegistrySnapshot::builtin().unwrap(),
         Arc::new(NoFetch),
         Arc::new(MemoryDownloader::new(dir.path().join("stage"))),
     )
@@ -364,7 +364,7 @@ fn protocol_role_flip_status(flips: usize) -> (StatusCode, usize) {
     let count = observed.clone();
     let state = ApiState::new(
         Store::open(dir.path().join("data")).unwrap(),
-        "management-secret".into(), ProfileSet::load(None).unwrap(),
+        "management-secret".into(), RegistrySnapshot::builtin().unwrap(),
         Arc::new(NoFetch),
         Arc::new(MemoryDownloader::new(dir.path().join("stage"))),
     ).unwrap().with_library_read_progress_observer(Arc::new(move || {

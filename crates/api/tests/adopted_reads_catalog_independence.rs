@@ -4,7 +4,7 @@ use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use domain::{Media, MediaId, MediaKind};
 use downloader::MemoryDownloader;
-use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
+use indexer::{FetchRequest, Fetcher, IndexerError, RegistrySnapshot};
 use media::CatalogHit;
 use serde_json::Value;
 use std::sync::{Arc, Condvar, Mutex};
@@ -193,7 +193,7 @@ fn fixture_with_metadata(owned: bool, work_metadata: bool) -> Fixture {
     let state = ApiState::new(
         store,
         TOKEN.into(),
-        ProfileSet::load(None).unwrap(),
+        RegistrySnapshot::builtin().unwrap(),
         Arc::new(NoFetch),
         Arc::new(MemoryDownloader::new(dir.path().join("stage"))),
     )

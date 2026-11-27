@@ -11,7 +11,7 @@ fn open(dir: &std::path::Path) -> ApiState {
     ApiState::new(
         api::Store::open(dir.join("data")).unwrap(),
         TOKEN.into(),
-        indexer::ProfileSet::load(None).unwrap(),
+        indexer::RegistrySnapshot::builtin().unwrap(),
         Arc::new(super::harness::SearchFixture::empty()),
         Arc::new(downloader::MemoryDownloader::new(dir.join("stage"))),
     )

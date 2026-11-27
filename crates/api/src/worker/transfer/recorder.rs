@@ -93,6 +93,22 @@ impl PublicationRecorder<'_> {
         // retained by the recorder that actually published this reservation.
         let source = library::observe_source(&candidate.file.path)
             .map_err(|error| fail(error.to_string()))?;
+        let rel_path = crate::plugins::events::compute_relative_path(
+            self.state.store.as_ref(),
+            candidate.file.library_id,
+            &candidate.file.path,
+        );
+        let now_ms = crate::job_loop::unix_now().saturating_mul(1_000);
+        let outbox = crate::plugins::events::build_transfer_completed_event(
+            candidate.file.media_id,
+            candidate.file.library_id,
+            Some(self.subscribe.id),
+            rel_path,
+            1,
+            source.size_bytes.unwrap_or(0),
+            format!("transfer:subscribe:{}", self.subscribe.id),
+            now_ms,
+        );
         {
             let guard = self.state.subscribe_guard(self.subscribe.id);
             let _guard = guard.lock();
@@ -109,16 +125,20 @@ impl PublicationRecorder<'_> {
                     library_id: candidate.file.library_id,
                     config_revision,
                 };
-                db.finish_transfer(
+                db.finish_transfer_with_outbox(
                     &scope,
                     candidate,
                     &candidate.file.version,
-                    crate::job_loop::unix_now() * 1000,
+                    now_ms,
+                    outbox.as_ref(),
                 )
                 .map_err(|error| error.to_string())
             })
             .map_err(fail)
         }?;
+        if outbox.is_some() {
+            crate::plugins::events::wake(self.state);
+        }
         if let Some(plan) = plan {
             plan.published_removals.lock().insert(
                 candidate.file.path.clone(),

@@ -35,14 +35,19 @@ fn parse_downloader_id(
 }
 
 async fn create_site_inner(State(state): State<ApiState>, Json(body): Json<SiteInput>) -> Response {
-    let Some(profile) = state.indexer.profile(&body.profile_id) else {
+    let snapshot = state.indexer.snapshot();
+    let Some(entry) = snapshot.indexer(&body.profile_id) else {
         return err(
             StatusCode::BAD_REQUEST,
             "site.unknown_profile",
             &format!("未知的站点模板 {}", body.profile_id),
         );
     };
-    let url = match resolve_site_url(&body.url, Some(profile)) {
+    if let indexer::ProviderAvailability::Disabled { reason } = &entry.descriptor().availability {
+        return err(StatusCode::BAD_REQUEST, "site.provider_disabled", reason);
+    }
+    let profile = entry.profile().map(std::ops::Deref::deref);
+    let url = match resolve_site_url(&body.url, profile) {
         Ok(url) => url,
         Err((status, code, msg)) => return err(status, code, msg),
     };
@@ -50,7 +55,7 @@ async fn create_site_inner(State(state): State<ApiState>, Json(body): Json<SiteI
         Ok(id) => id,
         Err((status, code, msg)) => return err(status, code, msg),
     };
-    let (allow_api_key, allow_cookie) = profile_auth_support(Some(profile));
+    let (allow_api_key, allow_cookie) = profile_auth_support(profile);
     let maintenance_via = match body.maintenance_via.as_deref() {
         Some(s) => match s.parse::<domain::MaintenanceVia>() {
             Ok(v) => v,
@@ -64,14 +69,27 @@ async fn create_site_inner(State(state): State<ApiState>, Json(body): Json<SiteI
         },
         None => domain::MaintenanceVia::Http,
     };
+    let browser_search = body.browser_search.unwrap_or(false);
     let proxy = body.proxy.and_then(normalize_optional);
-    if maintenance_via == domain::MaintenanceVia::Browser && proxy.is_some() {
+    if (maintenance_via == domain::MaintenanceVia::Browser || browser_search) && proxy.is_some() {
         return err(
             StatusCode::BAD_REQUEST,
             "site.browser_proxy_unsupported",
-            "浏览器维护方式不支持配置代理",
+            "浏览器维护或搜索方式不支持配置代理",
         );
     }
+    let timezone = match crate::maintenance_window::validate_timezone(
+        body.timezone.as_deref().unwrap_or("UTC"),
+    ) {
+        Ok(tz) => tz,
+        Err(_) => {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "site.invalid_timezone",
+                "无效的站点时区",
+            );
+        }
+    };
     let cdp_url = body.cdp_url.and_then(normalize_optional);
     if let Some(ref endpoint) = cdp_url
         && let Err(e) = indexer::BrowserConfig::validate_endpoint(endpoint)
@@ -104,8 +122,10 @@ async fn create_site_inner(State(state): State<ApiState>, Json(body): Json<SiteI
         downloader_id,
         enabled: body.enabled,
         maintenance_via,
+        browser_search,
+        timezone,
     };
-    let auth = auth_type_for(&site, Some(profile));
+    let auth = auth_type_for(&site, profile);
     crate::http::store_wait::store_write(&state, move |store| {
         if let Err(error) = store.insert_site(&site) {
             return err(
@@ -126,14 +146,19 @@ async fn put_site_inner(
     Path(id): Path<String>,
     Json(body): Json<SiteInput>,
 ) -> Response {
-    let Some(profile) = state.indexer.profile(&body.profile_id) else {
+    let snapshot = state.indexer.snapshot();
+    let Some(entry) = snapshot.indexer(&body.profile_id) else {
         return err(
             StatusCode::BAD_REQUEST,
             "site.invalid",
             &format!("未知站点配置: {}", body.profile_id),
         );
     };
-    let resolved_url = match resolve_site_url(&body.url, Some(profile)) {
+    if let indexer::ProviderAvailability::Disabled { reason } = &entry.descriptor().availability {
+        return err(StatusCode::BAD_REQUEST, "site.provider_disabled", reason);
+    }
+    let profile = entry.profile().map(std::ops::Deref::deref);
+    let resolved_url = match resolve_site_url(&body.url, profile) {
         Ok(url) => url,
         Err((status, code, msg)) => return err(status, code, msg),
     };
@@ -145,16 +170,18 @@ async fn put_site_inner(
         Ok(id) => id,
         Err((status, code, msg)) => return err(status, code, msg),
     };
-    let auth_support = profile_auth_support(Some(profile));
+    let auth_support = profile_auth_support(profile);
     let indexer = state.indexer.clone();
     crate::http::store_wait::store_write(&state, move |store| {
-        let expected = match store.get_site(site_id) {
-            Ok(Some(site)) => site,
+        let expected = match store.observe_site(site_id) {
+            Ok(Some(obs)) => obs,
             Ok(None) => return err(StatusCode::NOT_FOUND, "site.missing", "站点不存在"),
             Err(error) => return site_store_error(&error),
         };
+        let explicit_cred_input =
+            body.cookie.is_some() || body.api_key.is_some() || body.rss_url.is_some();
         let site = match replacement_site(
-            expected.clone(),
+            expected.site().clone(),
             body,
             resolved_url,
             downloader_id,
@@ -163,8 +190,17 @@ async fn put_site_inner(
             Ok(site) => site,
             Err((status, code, msg)) => return err(status, code, msg),
         };
-        let auth = auth_type_for(&site, indexer.profile(&site.profile_id));
-        match store.save_site_if_current(&site, &expected) {
+        let intent = if explicit_cred_input
+            || site.cookie != expected.site().cookie
+            || site.api_key != expected.site().api_key
+            || site.rss_url != expected.site().rss_url
+        {
+            store::ManualCredentialWrite::Replace
+        } else {
+            store::ManualCredentialWrite::Unchanged
+        };
+        let auth = auth_type_for(&site, indexer.profile(&site.profile_id).as_deref());
+        match store.save_manual_site_if_current(&site, &expected, intent) {
             Ok(true) => ok(site_public(&site, auth, true)).into_response(),
             Ok(false) => site_changed(),
             Err(error) => site_store_error(&error),
@@ -195,16 +231,29 @@ fn replacement_site(
         },
         None => current.maintenance_via,
     };
+    let browser_search = body.browser_search.unwrap_or(current.browser_search);
     let proxy = replacement_credential(body.proxy, current.proxy);
-    if maintenance_via == domain::MaintenanceVia::Browser
+    if (maintenance_via == domain::MaintenanceVia::Browser || browser_search)
         && proxy.as_deref().is_some_and(|p| !p.trim().is_empty())
     {
         return Err((
             StatusCode::BAD_REQUEST,
             "site.browser_proxy_unsupported",
-            "浏览器维护方式不支持配置代理",
+            "浏览器维护或搜索方式不支持配置代理",
         ));
     }
+    let timezone = match crate::maintenance_window::validate_timezone(
+        body.timezone.as_deref().unwrap_or(&current.timezone),
+    ) {
+        Ok(tz) => tz,
+        Err(_) => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "site.invalid_timezone",
+                "无效的站点时区",
+            ));
+        }
+    };
     let cdp_url = replacement_credential(body.cdp_url, current.cdp_url);
     if let Some(ref endpoint) = cdp_url
         && indexer::BrowserConfig::validate_endpoint(endpoint).is_err()
@@ -244,6 +293,8 @@ fn replacement_site(
         downloader_id,
         enabled: body.enabled,
         maintenance_via,
+        browser_search,
+        timezone,
     })
 }
 
@@ -254,7 +305,10 @@ fn replacement_credential(input: Option<String>, current: Option<String>) -> Opt
     }
 }
 
-fn site_store_error(error: &impl std::fmt::Display) -> Response {
+fn site_store_error(error: &store::StoreError) -> Response {
+    if matches!(error, store::StoreError::CredentialConflict(_)) {
+        return site_changed();
+    }
     tracing::error!(%error, "Site storage operation failed");
     err(
         StatusCode::INTERNAL_SERVER_ERROR,
@@ -271,6 +325,85 @@ fn site_changed() -> Response {
     )
 }
 
+fn apply_site_patch(
+    site: &mut Site,
+    body: PatchSiteInput,
+    profile: Option<&indexer::Profile>,
+) -> Result<(), (StatusCode, &'static str, &'static str)> {
+    if let Some(name) = body.name.filter(|n| !n.trim().is_empty()) {
+        site.name = name;
+    }
+    let (allow_api_key, allow_cookie) = profile_auth_support(profile);
+    if let Some(raw_url) = body.url {
+        site.url = resolve_site_url(&raw_url, profile)?;
+    }
+    if let Some(cookie) = body.cookie {
+        site.cookie = allow_cookie.then(|| normalize_optional(cookie)).flatten();
+    }
+    if let Some(api_key) = body.api_key {
+        site.api_key = allow_api_key.then(|| normalize_optional(api_key)).flatten();
+    }
+    if let Some(rss_url) = body.rss_url {
+        site.rss_url = normalize_optional(rss_url);
+    }
+    if let Some(proxy) = body.proxy {
+        site.proxy = normalize_optional(proxy);
+    }
+    if let Some(rate) = body.rate_limit_per_minute {
+        site.rate_limit_per_minute = (rate > 0).then_some(rate);
+    }
+    if let Some(cdp_url) = body.cdp_url {
+        let normalized = normalize_optional(cdp_url);
+        if let Some(ref endpoint) = normalized
+            && indexer::BrowserConfig::validate_endpoint(endpoint).is_err()
+        {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "site.invalid_endpoint",
+                "无效的 CDP discovery 端点",
+            ));
+        }
+        site.cdp_url = normalized;
+    }
+    if let Some(downloader_id) = body.downloader_id {
+        site.downloader_id = parse_downloader_id(downloader_id.as_deref())?;
+    }
+    if let Some(mv_str) = body.maintenance_via {
+        site.maintenance_via = mv_str.parse::<domain::MaintenanceVia>().map_err(|_| {
+            (
+                StatusCode::BAD_REQUEST,
+                "site.invalid_maintenance_via",
+                "无效的 maintenance_via",
+            )
+        })?;
+    }
+    if let Some(enabled) = body.enabled {
+        site.enabled = enabled;
+    }
+    if let Some(browser_search) = body.browser_search {
+        site.browser_search = browser_search;
+    }
+    if let Some(raw_tz) = body.timezone.as_deref() {
+        site.timezone = crate::maintenance_window::validate_timezone(raw_tz).map_err(|_| {
+            (
+                StatusCode::BAD_REQUEST,
+                "site.invalid_timezone",
+                "无效的站点时区",
+            )
+        })?;
+    }
+    if (site.maintenance_via == domain::MaintenanceVia::Browser || site.browser_search)
+        && site.proxy.as_deref().is_some_and(|p| !p.trim().is_empty())
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "site.browser_proxy_unsupported",
+            "浏览器维护或搜索方式不支持配置代理",
+        ));
+    }
+    Ok(())
+}
+
 async fn patch_site_inner(
     State(state): State<ApiState>,
     Path(id): Path<String>,
@@ -282,91 +415,24 @@ async fn patch_site_inner(
     };
     let indexer = state.indexer.clone();
     crate::http::store_wait::store_write(&state, move |store| {
-        let expected = match store.get_site(id) {
-            Ok(Some(site)) => site,
+        let intent = if body.cookie.is_some() || body.api_key.is_some() || body.rss_url.is_some() {
+            store::ManualCredentialWrite::Replace
+        } else {
+            store::ManualCredentialWrite::Unchanged
+        };
+        let expected = match store.observe_site(id) {
+            Ok(Some(obs)) => obs,
             Ok(None) => return err(StatusCode::NOT_FOUND, "site.missing", "站点不存在"),
             Err(error) => return site_store_error(&error),
         };
-        let mut site = expected.clone();
-        if let Some(name) = body.name.filter(|n| !n.trim().is_empty()) {
-            site.name = name;
-        }
-        let profile = indexer.profile(&site.profile_id);
-        let (allow_api_key, allow_cookie) = profile_auth_support(profile);
-        if let Some(raw_url) = body.url {
-            match resolve_site_url(&raw_url, profile) {
-                Ok(url) => site.url = url,
-                Err((status, code, msg)) => return err(status, code, msg),
-            }
-        }
-        if let Some(cookie) = body.cookie {
-            site.cookie = if allow_cookie {
-                normalize_optional(cookie)
-            } else {
-                None
-            };
-        }
-        if let Some(api_key) = body.api_key {
-            site.api_key = if allow_api_key {
-                normalize_optional(api_key)
-            } else {
-                None
-            };
-        }
-        if let Some(rss_url) = body.rss_url {
-            site.rss_url = normalize_optional(rss_url);
-        }
-        if let Some(proxy) = body.proxy {
-            site.proxy = normalize_optional(proxy);
-        }
-        if let Some(rate) = body.rate_limit_per_minute {
-            site.rate_limit_per_minute = (rate > 0).then_some(rate);
-        }
-        if let Some(cdp_url) = body.cdp_url {
-            let normalized = normalize_optional(cdp_url);
-            if let Some(ref endpoint) = normalized
-                && indexer::BrowserConfig::validate_endpoint(endpoint).is_err()
-            {
-                return err(
-                    StatusCode::BAD_REQUEST,
-                    "site.invalid_endpoint",
-                    "无效的 CDP discovery 端点",
-                );
-            }
-            site.cdp_url = normalized;
-        }
-        if let Some(downloader_id) = body.downloader_id {
-            match parse_downloader_id(downloader_id.as_deref()) {
-                Ok(parsed) => site.downloader_id = parsed,
-                Err((status, code, msg)) => return err(status, code, msg),
-            }
-        }
-        if let Some(mv_str) = body.maintenance_via {
-            match mv_str.parse::<domain::MaintenanceVia>() {
-                Ok(v) => site.maintenance_via = v,
-                Err(_) => {
-                    return err(
-                        StatusCode::BAD_REQUEST,
-                        "site.invalid_maintenance_via",
-                        "无效的 maintenance_via",
-                    );
-                }
-            }
-        }
-        if let Some(enabled) = body.enabled {
-            site.enabled = enabled;
-        }
-        if site.maintenance_via == domain::MaintenanceVia::Browser
-            && site.proxy.as_deref().is_some_and(|p| !p.trim().is_empty())
-        {
-            return err(
-                StatusCode::BAD_REQUEST,
-                "site.browser_proxy_unsupported",
-                "浏览器维护方式不支持配置代理",
-            );
+        let mut site = expected.site().clone();
+        let profile_arc = indexer.profile(&site.profile_id);
+        let profile = profile_arc.as_deref();
+        if let Err((status, code, msg)) = apply_site_patch(&mut site, body, profile) {
+            return err(status, code, msg);
         }
         let auth = auth_type_for(&site, profile);
-        match store.save_site_if_current(&site, &expected) {
+        match store.save_manual_site_if_current(&site, &expected, intent) {
             Ok(true) => ok(site_public(&site, auth, true)).into_response(),
             Ok(false) => site_changed(),
             Err(error) => site_store_error(&error),

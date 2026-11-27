@@ -49,7 +49,7 @@ fn router_for(store: Store, dir: &Path) -> axum::Router {
         ApiState::new(
             store,
             "admin-token".into(),
-            ProfileSet::load(None).unwrap(),
+            RegistrySnapshot::builtin().unwrap(),
             Arc::new(NoFetch),
             Arc::new(MemoryDownloader::new(dir.join("stage"))),
         )

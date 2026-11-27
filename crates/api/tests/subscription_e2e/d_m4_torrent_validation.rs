@@ -36,6 +36,7 @@ async fn html_login_page_is_not_uploaded_as_torrent() {
         0,
         "HTML response must be rejected before forwarding to qBittorrent"
     );
+    assert_eq!(h.pending_state(id, "rejected"), 1);
     assert_eq!(temp_torrents(), 0, "no cm-torrent-* temp files left");
 }
 

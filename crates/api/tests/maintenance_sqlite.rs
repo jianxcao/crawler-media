@@ -54,8 +54,11 @@ fn seed_large_db(path: &Path) {
     .unwrap();
 }
 
+static STATE_THREAD_BARRIER: std::sync::RwLock<()> = std::sync::RwLock::new(());
+
 #[test]
 fn optimize_keeps_business_data_and_default_never_vacuums() {
+    let _shared = STATE_THREAD_BARRIER.read().unwrap();
     let (_tmp, state) = temp_state(Arc::new(SqliteExecutor));
     state
         .store()
@@ -112,6 +115,7 @@ fn optimize_keeps_business_data_and_default_never_vacuums() {
 
 #[test]
 fn vacuum_runs_only_when_enabled_and_cooldown_allows() {
+    let _shared = STATE_THREAD_BARRIER.read().unwrap();
     let executor = Arc::new(ConfiguredSqliteExecutor::with_limits(tiny_limits(
         Duration::from_secs(30),
     )));
@@ -261,6 +265,7 @@ fn insufficient_disk_headroom_skips_vacuum() {
 /// 拷贝阶段不检查 interrupt 标志，若上限到期落在那里就无法停止（见报告"偏离"）。
 #[test]
 fn interrupted_vacuum_fails_bounded_and_leaves_no_watchdog_thread() {
+    let _exclusive = STATE_THREAD_BARRIER.write().unwrap();
     let tmp = tempfile::tempdir().unwrap();
     let data = tmp.path().join("data");
     std::fs::create_dir_all(&data).unwrap();

@@ -6,7 +6,7 @@ use axum::http::{Request, StatusCode};
 use domain::{Site, SiteId};
 use downloader::MemoryDownloader;
 use indexer::{
-    Browser, BrowserConfig, FetchRequest, Fetcher, IndexerError, PageSession, ProfileSet,
+    Browser, BrowserConfig, FetchRequest, Fetcher, IndexerError, PageSession, RegistrySnapshot,
 };
 use parking_lot::Mutex;
 use serde_json::{Value, json};
@@ -36,7 +36,7 @@ fn state(root: &std::path::Path) -> ApiState {
     ApiState::new(
         Store::open(root.join("data")).unwrap(),
         "browser-secret".into(),
-        ProfileSet::load(None).unwrap(),
+        RegistrySnapshot::builtin().unwrap(),
         Arc::new(NoHttp),
         Arc::new(MemoryDownloader::new(root.join("dl"))),
     )
@@ -81,7 +81,7 @@ fn routed_app(root: &std::path::Path, store: Arc<Store>) -> (axum::Router, Endpo
     let state = ApiState::new_arc(
         store,
         "browser-secret".into(),
-        ProfileSet::load(Some(&overlay)).unwrap(),
+        RegistrySnapshot::load_with_overlay(Some(&overlay)).unwrap(),
         Arc::new(NoHttp),
         Arc::new(MemoryDownloader::new(root.join("dl"))),
     )
@@ -105,6 +105,8 @@ fn site(store: &Store, cdp_url: Option<&str>) -> Site {
         downloader_id: None,
         enabled: true,
         maintenance_via: domain::MaintenanceVia::Http,
+        browser_search: false,
+        timezone: "UTC".into(),
     };
     store.insert_site(&site).unwrap();
     site

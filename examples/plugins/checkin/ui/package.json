@@ -1,0 +1,14 @@
+{
+  "name": "@crawler-media/builtin-checkin-ui",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@crawler-media/plugin-ui-sdk": "file:../../../../sdk/plugin-ui",
+    "@crawler-media/plugin-ui-kit": "file:../../../../sdk/plugin-ui-kit"
+  },
+  "peerDependencies": {
+    "react": "19.3.0",
+    "react-dom": "19.3.0"
+  }
+}

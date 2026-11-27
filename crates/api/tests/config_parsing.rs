@@ -219,6 +219,8 @@ fn new_site_defaults_to_http_maintenance() {
         downloader_id: None,
         enabled: true,
         maintenance_via: domain::MaintenanceVia::Http,
+        browser_search: false,
+        timezone: "UTC".into(),
     };
     store.insert_site(&site).unwrap();
     let loaded = store.get_site(site.id).unwrap().unwrap();

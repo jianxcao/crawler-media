@@ -20,7 +20,7 @@ fn tick_does_not_abort_active_subscribe_creation() {
     let state = crate::ApiState::new(
         crate::Store::open(temp.path().join("data")).unwrap(),
         "test".into(),
-        indexer::ProfileSet::load(None).unwrap(),
+        indexer::RegistrySnapshot::builtin().unwrap(),
         Arc::new(Offline),
         Arc::new(downloader::MemoryDownloader::new(temp.path().join("stage"))),
     )
@@ -116,7 +116,7 @@ fn tick_skips_active_candidate_and_recovers_other_candidates() {
     let state = crate::ApiState::new(
         crate::Store::open(temp.path().join("data")).unwrap(),
         "test".into(),
-        indexer::ProfileSet::load(None).unwrap(),
+        indexer::RegistrySnapshot::builtin().unwrap(),
         Arc::new(Offline),
         Arc::new(downloader::MemoryDownloader::new(temp.path().join("stage"))),
     )

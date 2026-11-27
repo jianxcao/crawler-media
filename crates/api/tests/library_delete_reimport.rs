@@ -7,7 +7,7 @@ use axum::{
     http::{Request, StatusCode},
 };
 use domain::{Confidence, LedgerId, LibraryFile, Media, MediaId, MediaKind, QualitySource, UserId};
-use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
+use indexer::{FetchRequest, Fetcher, IndexerError, RegistrySnapshot};
 use parking_lot::Mutex;
 use serde_json::{Value, json};
 use std::{
@@ -145,7 +145,7 @@ impl Fixture {
         let state = ApiState::new(
             store::Store::open(temp.path().join("data")).unwrap(),
             "secret".into(),
-            ProfileSet::load(None).unwrap(),
+            RegistrySnapshot::builtin().unwrap(),
             Arc::new(NoFetch),
             Arc::new(downloader::MemoryDownloader::new(temp.path().join("stage"))),
         )

@@ -7,7 +7,7 @@ use api::{ApiState, Store, router};
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use downloader::MemoryDownloader;
-use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
+use indexer::{FetchRequest, Fetcher, IndexerError, RegistrySnapshot};
 use media_server::provider::QueryTiming;
 use tower::ServiceExt;
 
@@ -41,7 +41,7 @@ fn paused_protocol_cold_stage_does_not_hold_writer_store_mutex() {
     let state = ApiState::new(
         Store::open(dir.path().join("data")).unwrap(),
         "management-secret".into(),
-        ProfileSet::load(None).unwrap(),
+        RegistrySnapshot::builtin().unwrap(),
         Arc::new(NoFetch),
         Arc::new(MemoryDownloader::new(dir.path().join("stage"))),
     )
@@ -114,7 +114,7 @@ fn item_index_revalidates_revoked_credentials_and_library_access() {
         let state = ApiState::new(
             store,
             "management-secret".into(),
-            ProfileSet::load(None).unwrap(),
+            RegistrySnapshot::builtin().unwrap(),
             Arc::new(NoFetch),
             Arc::new(MemoryDownloader::new(dir.path().join("stage"))),
         )
@@ -172,7 +172,7 @@ fn slow_library_reader_does_not_hold_writer_store_mutex(endpoint: &str) {
     let state = ApiState::new(
         store,
         "management-secret".into(),
-        ProfileSet::load(None).unwrap(),
+        RegistrySnapshot::builtin().unwrap(),
         Arc::new(NoFetch),
         Arc::new(MemoryDownloader::new(dir.path().join("stage"))),
     )
@@ -245,7 +245,7 @@ fn dropping_api_state_preserves_a_shared_store_for_reads_and_new_state() {
         ApiState::new_arc(
             store.clone(),
             "management-secret".into(),
-            ProfileSet::load(None).unwrap(),
+            RegistrySnapshot::builtin().unwrap(),
             Arc::new(NoFetch),
             Arc::new(MemoryDownloader::new(dir.path().join("stage"))),
         )
@@ -285,7 +285,7 @@ fn pool_closes_on_shutdown_and_releases_after_final_owner() {
     let state = ApiState::new(
         Store::open(dir.path().join("data")).unwrap(),
         "management-secret".into(),
-        ProfileSet::load(None).unwrap(),
+        RegistrySnapshot::builtin().unwrap(),
         Arc::new(NoFetch),
         Arc::new(MemoryDownloader::new(dir.path().join("stage"))),
     )
@@ -319,7 +319,7 @@ fn one_reader_fixture(
     let state = ApiState::new(
         store,
         "management-secret".into(),
-        ProfileSet::load(None).unwrap(),
+        RegistrySnapshot::builtin().unwrap(),
         Arc::new(NoFetch),
         Arc::new(MemoryDownloader::new(dir.join("stage"))),
     )
@@ -447,7 +447,7 @@ fn paused_stage_expires_at_deadline(target: &'static str) {
     let state = ApiState::new(
         store,
         "management-secret".into(),
-        ProfileSet::load(None).unwrap(),
+        RegistrySnapshot::builtin().unwrap(),
         Arc::new(NoFetch),
         Arc::new(MemoryDownloader::new(dir.path().join("stage"))),
     )
@@ -536,7 +536,7 @@ fn read_only_instance_serves_leased_reads_and_rejects_explicit_write() {
     let state = ApiState::new(
         store,
         "management-secret".into(),
-        ProfileSet::load(None).unwrap(),
+        RegistrySnapshot::builtin().unwrap(),
         Arc::new(NoFetch),
         Arc::new(MemoryDownloader::new(dir.path().join("stage"))),
     )
@@ -590,7 +590,7 @@ fn dropped_caller_retains_worker_permit_and_lease_until_exit() {
     let state = ApiState::new(
         store,
         "management-secret".into(),
-        ProfileSet::load(None).unwrap(),
+        RegistrySnapshot::builtin().unwrap(),
         Arc::new(NoFetch),
         Arc::new(MemoryDownloader::new(dir.path().join("stage"))),
     )
@@ -714,7 +714,7 @@ fn selected_page_cold_stage_timeout_never_publishes_stale_success() {
     let state = ApiState::new(
         store,
         "management-secret".into(),
-        ProfileSet::load(None).unwrap(),
+        RegistrySnapshot::builtin().unwrap(),
         Arc::new(NoFetch),
         Arc::new(MemoryDownloader::new(dir.path().join("stage"))),
     )
@@ -755,7 +755,7 @@ fn shutdown_during_protocol_cold_stage_cannot_publish_page() {
     let state = ApiState::new(
         Store::open(dir.path().join("data")).unwrap(),
         "management-secret".into(),
-        ProfileSet::load(None).unwrap(),
+        RegistrySnapshot::builtin().unwrap(),
         Arc::new(NoFetch),
         Arc::new(MemoryDownloader::new(dir.path().join("stage"))),
     )

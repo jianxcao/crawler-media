@@ -26,7 +26,7 @@ fn fixture() -> (tempfile::TempDir, ApiState, Media, Subscribe) {
     let state = ApiState::new(
         crate::Store::open(tmp.path().join("data")).unwrap(),
         "test-token".into(),
-        indexer::ProfileSet::load(None).unwrap(),
+        indexer::RegistrySnapshot::builtin().unwrap(),
         Arc::new(EmptyFetcher),
         Arc::new(downloader::MemoryDownloader::new(tmp.path().join("stage"))),
     )
@@ -295,7 +295,7 @@ fn restarted_pending_reservation_reuses_file_identity_and_version() {
     let state = ApiState::new(
         crate::Store::open(tmp.path().join("data")).unwrap(),
         "test-token".into(),
-        indexer::ProfileSet::load(None).unwrap(),
+        indexer::RegistrySnapshot::builtin().unwrap(),
         Arc::new(EmptyFetcher),
         Arc::new(downloader::MemoryDownloader::new(tmp.path().join("stage"))),
     )
@@ -397,6 +397,9 @@ fn outcome_of(coverage: domain::FileCoverage, source: &std::path::Path) -> subsc
         collection_errors: Vec::new(),
         submission_errors: Vec::new(),
         torrents_added: Vec::new(),
+        deferred_enclosures: Vec::new(),
+        unknown_enclosures: Vec::new(),
+        submitted_meta: Default::default(),
     }
 }
 

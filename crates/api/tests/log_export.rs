@@ -13,7 +13,7 @@ use api::{ApiState, Store};
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode, header};
 use downloader::MemoryDownloader;
-use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
+use indexer::{FetchRequest, Fetcher, IndexerError, RegistrySnapshot};
 use tokio_stream::StreamExt;
 use tower::ServiceExt;
 
@@ -37,7 +37,7 @@ impl Fixture {
         let state = ApiState::new(
             store,
             TOKEN.into(),
-            ProfileSet::load(None).unwrap(),
+            RegistrySnapshot::builtin().unwrap(),
             Arc::new(NoFetch),
             Arc::new(MemoryDownloader::new(dir.path().join("stage"))),
         )

@@ -250,6 +250,7 @@ fn remove_one_task(
                     pending = task.targets.len(),
                     "已从下载器移除证实归属的任务"
                 );
+                mark_deleted_task_ownership(state, first, task.identity.as_deref());
                 for target in &task.targets {
                     if persist_removed_pending(state, target.subscribe_id, &target.torrent, errors)
                     {
@@ -287,6 +288,180 @@ fn delete_planned_task(
     match task.identity.as_deref() {
         Some(hash) => task.client.delete_task(hash, true),
         None => task.client.remove_owned(&first.torrent, true),
+    }
+}
+
+pub(crate) fn finalize_deleted_task_by_hash(
+    store: &crate::Store,
+    dl_id: domain::DownloaderId,
+    hash: &str,
+    now_utc: i64,
+) -> Result<(), String> {
+    let Some(norm_hash) = Some(hash.trim().to_ascii_lowercase()).filter(|h| !h.is_empty()) else {
+        return Ok(());
+    };
+    let rows = store
+        .find_download_ownership_by_hash(dl_id, &norm_hash)
+        .map_err(|error| error.to_string())?;
+    for own in rows {
+        if own.ownership_state == store::DownloadOwnershipState::Owned {
+            store
+                .record_download_ownership(&store::RecordDownloadOwnershipInput {
+                    downloader_id: dl_id,
+                    ownership_tag: own.ownership_tag,
+                    info_hash: own.info_hash.or_else(|| Some(norm_hash.clone())),
+                    operation_id: own.operation_id,
+                    subscribe_id: own.subscribe_id,
+                    plugin_id: own.plugin_id,
+                    subject: own.subject,
+                    site_id: own.site_id,
+                    enclosure: own.enclosure,
+                    ownership_state: store::DownloadOwnershipState::Deleted,
+                    provenance_kind: own.provenance_kind,
+                    verified_bytes: own.verified_bytes,
+                    bytes_digest: own.bytes_digest,
+                    now_utc,
+                })
+                .map_err(|error| error.to_string())?;
+        }
+    }
+    tombstone_piggybacked_submitted_ops(store, dl_id, &norm_hash, now_utc)?;
+    clean_boost_task_facts_for_hash(store, dl_id, &norm_hash, now_utc)
+}
+
+fn tombstone_piggybacked_submitted_ops(
+    store: &crate::Store,
+    dl_id: domain::DownloaderId,
+    norm_hash: &str,
+    now_utc: i64,
+) -> Result<(), String> {
+    let filter = store::DownloadOperationFilter {
+        downloader_id: Some(dl_id),
+        state: Some(store::DownloadOperationState::Submitted),
+        ..Default::default()
+    };
+    let mut matching_ops = Vec::new();
+    let mut after: Option<String> = None;
+    loop {
+        let page = store
+            .list_download_operations(&filter, after.as_deref(), Some(100))
+            .map_err(|error| error.to_string())?;
+        let next = page.next_cursor.clone();
+        for op in page.items {
+            if op
+                .info_hash
+                .as_deref()
+                .is_some_and(|ih| ih.trim().eq_ignore_ascii_case(norm_hash))
+                && matches!(
+                    store.get_download_ownership(dl_id, &op.ownership_tag),
+                    Ok(None)
+                )
+            {
+                matching_ops.push(op);
+            }
+        }
+        if next.is_none() || next == after {
+            break;
+        }
+        after = next;
+    }
+    for op in matching_ops {
+        store
+            .record_download_ownership(&store::RecordDownloadOwnershipInput {
+                downloader_id: dl_id,
+                ownership_tag: op.ownership_tag,
+                info_hash: Some(norm_hash.to_string()),
+                operation_id: op.operation_id,
+                subscribe_id: op.subscribe_id,
+                plugin_id: op.plugin_id,
+                subject: op.subject,
+                site_id: op.site_id,
+                enclosure: op.enclosure,
+                ownership_state: store::DownloadOwnershipState::Deleted,
+                provenance_kind: store::DownloadProvenanceKind::ExistingOwned,
+                verified_bytes: op.verified_bytes,
+                bytes_digest: op.bytes_digest,
+                now_utc,
+            })
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+fn clean_boost_task_facts_for_hash(
+    store: &crate::Store,
+    dl_id: domain::DownloaderId,
+    norm_hash: &str,
+    now_utc: i64,
+) -> Result<(), String> {
+    let active = store
+        .list_active_boost_task_facts()
+        .map_err(|error| error.to_string())?;
+    for tf in active {
+        if tf.downloader_id == dl_id
+            && tf.info_hash.trim().eq_ignore_ascii_case(norm_hash)
+            && tf.state != store::BoostTaskState::Cleaned
+        {
+            match store.upsert_boost_task_fact(&store::UpsertBoostTaskFactInput {
+                task_fact_id: tf.task_fact_id,
+                plugin_id: tf.plugin_id,
+                quota_key: tf.quota_key,
+                downloader_id: tf.downloader_id,
+                ownership_tag: tf.ownership_tag,
+                info_hash: tf.info_hash,
+                site_id: tf.site_id,
+                state: store::BoostTaskState::Cleaned,
+                occupied_bytes: 0,
+                retained_bytes: 0,
+                hr_active: tf.hr_active,
+                hr_until: tf.hr_until,
+                hold_until: tf.hold_until,
+                free_until: tf.free_until,
+                protection_state: tf.protection_state,
+                protection_reason: tf.protection_reason,
+                observed_at: now_utc,
+                expected_revision: Some(tf.revision),
+                now_utc,
+            }) {
+                Ok(_)
+                | Err(store::StoreError::Plugin(
+                    store::plugins::PluginError::Conflict | store::plugins::PluginError::NotFound,
+                )) => {}
+                Err(error) => return Err(error.to_string()),
+            }
+        }
+    }
+    Ok(())
+}
+
+fn mark_deleted_task_ownership(
+    state: &ApiState,
+    first: &deletion::TorrentRemovalTarget,
+    hash: Option<&str>,
+) {
+    let Some(hash) = hash.map(str::trim).filter(|h| !h.is_empty()) else {
+        return;
+    };
+    let dl_id = first
+        .downloader_id
+        .or_else(|| {
+            state
+                .store
+                .default_downloader()
+                .ok()
+                .flatten()
+                .map(|row| row.id)
+        })
+        .or_else(|| {
+            crate::delivery::target_id_from_store(&state.store, None, &first.torrent)
+                .ok()
+                .flatten()
+        })
+        .unwrap_or_else(|| domain::DownloaderId::from_uuid(uuid::Uuid::nil()));
+    if let Err(error) =
+        finalize_deleted_task_by_hash(&state.store, dl_id, hash, crate::job_loop::unix_now())
+    {
+        tracing::warn!(%error, downloader_id = %dl_id, info_hash = %hash, "标记下载任务归属为已删除失败");
     }
 }
 

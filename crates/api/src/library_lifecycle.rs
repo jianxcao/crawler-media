@@ -50,6 +50,7 @@ pub fn start_library_removal(
         .library_work
         .freeze(&state.store, library_id)
         .map_err(|e| e.to_string())?;
+    state.plugins.in_flight().cancel_library(library_id);
     launch_library_removal(state, operation, handle)
 }
 
@@ -58,6 +59,10 @@ pub(crate) fn launch_library_removal(
     mut operation: store::LibraryRemoval,
     handle: tokio::runtime::Handle,
 ) -> Result<store::LibraryRemoval, String> {
+    state
+        .plugins
+        .in_flight()
+        .cancel_library(&operation.library_id);
     let mut response = operation.clone();
     if operation.state == "succeeded" {
         let store = state.store.clone();
@@ -176,6 +181,10 @@ pub fn resume_library_removals(state: &ApiState) -> Result<(), String> {
     };
     for operation in operations {
         state.library_work.cancel(&operation.library_id);
+        state
+            .plugins
+            .in_flight()
+            .cancel_library(&operation.library_id);
         if operation.state == "failed" {
             tracing::warn!(operation_id = %operation.operation_id, library_id = %operation.library_id,
                 "Library 删除此前已失败，启动时自动重试");
@@ -278,6 +287,17 @@ pub(crate) enum BoundedLeaseError {
 }
 
 impl LibraryWorkRegistry {
+    pub(crate) fn is_idle(&self) -> bool {
+        self.entries.lock().values().all(|e| e.controls.is_empty())
+    }
+
+    pub(crate) fn is_cancelled(&self, library_id: &str) -> bool {
+        self.entries
+            .lock()
+            .get(library_id)
+            .is_some_and(|e| e.cancelled || e.blocked_by.is_some())
+    }
+
     pub fn acquire(
         self: &Arc<Self>,
         store: &store::Store,

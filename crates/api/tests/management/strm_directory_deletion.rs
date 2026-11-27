@@ -28,7 +28,7 @@ async fn test_directory_deletion_removes_nested_strm_and_cleans_up_media() {
     let state = api::management::ApiState::new(
         store,
         "test-token".into(),
-        indexer::ProfileSet::load(None).unwrap(),
+        indexer::RegistrySnapshot::builtin().unwrap(),
         Arc::new(EmptyFetcher),
         Arc::new(downloader::MemoryDownloader::new(temp.path().join("stage"))),
     )
@@ -183,7 +183,7 @@ async fn finder_and_recycle_metadata_events_are_ignored_before_handling() {
     let state = api::management::ApiState::new(
         store,
         "test-token".into(),
-        indexer::ProfileSet::load(None).unwrap(),
+        indexer::RegistrySnapshot::builtin().unwrap(),
         Arc::new(EmptyFetcher),
         Arc::new(downloader::MemoryDownloader::new(temp.path().join("stage"))),
     )
@@ -253,7 +253,7 @@ async fn hidden_finder_metadata_does_not_reprobe_existing_episodes() {
     let state = api::management::ApiState::new(
         store,
         "test-token".into(),
-        indexer::ProfileSet::load(None).unwrap(),
+        indexer::RegistrySnapshot::builtin().unwrap(),
         Arc::new(EmptyFetcher),
         Arc::new(downloader::MemoryDownloader::new(temp.path().join("stage"))),
     )
@@ -325,7 +325,7 @@ async fn deleting_one_episode_keeps_sibling_ledger_rows() {
     let state = api::management::ApiState::new(
         store,
         "test-token".into(),
-        indexer::ProfileSet::load(None).unwrap(),
+        indexer::RegistrySnapshot::builtin().unwrap(),
         Arc::new(EmptyFetcher),
         Arc::new(downloader::MemoryDownloader::new(temp.path().join("stage"))),
     )
@@ -573,7 +573,7 @@ fn episode_fixture() -> EpisodeFixture {
     let state = api::management::ApiState::new(
         store,
         "test-token".into(),
-        indexer::ProfileSet::load(None).unwrap(),
+        indexer::RegistrySnapshot::builtin().unwrap(),
         Arc::new(EmptyFetcher),
         Arc::new(downloader::MemoryDownloader::new(temp.path().join("stage"))),
     )
@@ -738,7 +738,7 @@ async fn deleting_the_show_directory_removes_every_episode_ledger_row() {
     let state = api::management::ApiState::new(
         store,
         "test-token".into(),
-        indexer::ProfileSet::load(None).unwrap(),
+        indexer::RegistrySnapshot::builtin().unwrap(),
         Arc::new(EmptyFetcher),
         Arc::new(downloader::MemoryDownloader::new(temp.path().join("stage"))),
     )

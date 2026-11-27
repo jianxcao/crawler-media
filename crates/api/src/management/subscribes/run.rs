@@ -1,5 +1,7 @@
 mod admission;
 
+pub(crate) use admission::ensure_current;
+
 use std::str::FromStr;
 
 use axum::Json;
@@ -46,7 +48,19 @@ pub(crate) async fn run_subscribe(
         .http_work
         .run_to_completion(move || {
             let id = parse_subscribe_id(&id)?;
-            run_subscribe_inner(&state_for_work, id, user_id)
+            let is_admin = state_for_work
+                .store
+                .user_role(user_id)
+                .is_ok_and(|role| role == "admin");
+            run_subscribe_inner(&state_for_work, id, user_id).map_err(|err| {
+                err.map_message(|msg| {
+                    if is_admin {
+                        hooks::sanitize_reason(msg)
+                    } else {
+                        hooks::redact_urls(msg)
+                    }
+                })
+            })
         })
         .await;
     match work {
@@ -289,28 +303,144 @@ fn execute(
     ApiError,
 > {
     exclude_pending(state, id, &mut torrents)?;
+    crate::worker::finish_search::filter_active_defers(state, id, &mut torrents);
     let facts = load_run_facts(state, id, context)?;
     let plan =
         crate::worker::transfer::resolve_transfer_plan(state, &context.media, &context.subscribe)
             .map_err(ApiError::internal)?;
-    let library_lease = state
-        .acquire_library_work(&plan.library_id)
-        .map_err(ApiError::internal)?;
     let destinations = routed
         .imported_destinations()
         .map_err(|error| ApiError::internal(error.to_string()))?;
+    let policy_binding = {
+        let guard = state.subscribe_guard(id);
+        let _guard = guard.lock();
+        admission::ensure_current(state, &context.subscribe)?;
+        let store = state.store.as_ref();
+        if !store
+            .library_accepts_work(&plan.library_id)
+            .map_err(|e| ApiError::internal(e.to_string()))?
+        {
+            return Err(lifecycle_conflict(
+                "library.unavailable",
+                "目标媒体库不可写入",
+            ));
+        }
+        validate_facts_observation(&store, context, &facts)?;
+        store
+            .subscribe_policy_binding(id)
+            .map_err(|e| ApiError::internal(e.to_string()))?
+    };
+    let overlap = crate::worker::finish_search::overlap_policy(state);
+    let absolute = crate::season_check::absolute_map(
+        state,
+        &context.media,
+        torrents.iter().map(|t| t.title.as_str()),
+    );
+    let chooser = crate::pack_fallback::effective(state, &context.subscribe);
+    let submitter = crate::download_service::LibraryCancelSubmitter::new(
+        state.clone(),
+        plan.library_id.clone(),
+        id,
+        None,
+    )
+    .with_expected_subscribe(Some(context.subscribe.clone()));
+    let policy_hooks = crate::plugins::hooks_runtime::ApiSubscribeHooks::new(state.clone());
+    let added = subscribe::admit_and_add(RunInput {
+        subscribe: &chooser,
+        media: &context.media,
+        filter: &context.filter,
+        wash_filter: context.wash_filter.as_ref(),
+        torrents,
+        search_keywords,
+        facts: facts.facts.clone(),
+        downloader: routed,
+        library_root: &plan.root,
+        library_id: plan.library_id.parse().ok(),
+        root_id: Some(plan.root_id.clone()),
+        config_revision: Some(plan.config_revision),
+        transfer_mode: plan.mode,
+        scrape: plan.nfo,
+        hooks: None,
+        policy_hooks: Some(&policy_hooks),
+        submitter: Some(&submitter),
+        naming: Some(&plan.naming),
+        preserve_removed: true,
+        overlap,
+        absolute: absolute.as_ref(),
+        renamed_destinations: Default::default(),
+    })?;
+    for (enc, (dl_id, hash)) in &added.submitted_meta {
+        routed.record_submitted_meta(enc, *dl_id, hash.clone());
+    }
+    admission::record_accepted(
+        state,
+        (&context.subscribe, &plan.library_id, &policy_binding),
+        &added.outcome,
+        &added.broken,
+        &added.unknown,
+        added.select_deferred(),
+        routed,
+    )?;
+    let (outcome, library_lease) = collect_and_finalize_accepted(
+        state,
+        id,
+        context,
+        added,
+        &destinations,
+        absolute.as_ref(),
+        &facts,
+        &plan,
+    )?;
+    Ok((outcome, facts.facts, plan.scrape, library_lease, plan))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn collect_and_finalize_accepted<'a>(
+    state: &ApiState,
+    id: SubscribeId,
+    context: &RunContext,
+    mut added: subscribe::Added<'a, RoutedDownloader<'a>>,
+    destinations: &[subscribe::collection_destinations::DestinationMapping],
+    absolute: Option<&subscribe::AbsoluteEpisodes>,
+    facts: &RunFactsObservation,
+    plan: &crate::worker::transfer::TransferPlan,
+) -> Result<
+    (
+        subscribe::RunOutcome,
+        crate::library_lifecycle::LibraryWorkLease,
+    ),
+    ApiError,
+> {
+    if let Ok(destination_library) = plan.library_id.parse::<domain::LibraryId>() {
+        added.input.renamed_destinations =
+            crate::plugins::transfer_rename::plan_subscribe_renamed_destinations(
+                state,
+                &context.subscribe,
+                &context.media,
+                destination_library,
+                &plan.root,
+                Some(&plan.naming),
+                plan.mode,
+                absolute,
+                added.input.downloader,
+                &added.chosen,
+                destinations,
+            );
+    }
+    let library_lease = state
+        .acquire_library_work(&plan.library_id)
+        .map_err(ApiError::internal)?;
     {
         let guard = state.subscribe_guard(id);
         let _guard = guard.lock();
         admission::ensure_current(state, &context.subscribe)?;
         let store = state.store.as_ref();
-        validate_facts_observation(&store, context, &facts)?;
         crate::worker::transfer::validate_transfer_plan(
             &store,
             &context.subscribe,
             &library_lease,
             &plan.fingerprint,
-            &plan,
+            plan,
         )
         .map_err(ApiError::internal)?;
     }
@@ -322,57 +452,17 @@ fn execute(
             fingerprint: plan.fingerprint.clone(),
             snapshot: facts.snapshot.clone(),
         },
-        &plan,
+        plan,
     );
-    let overlap = crate::worker::finish_search::overlap_policy(state);
-    let absolute = crate::season_check::absolute_map(
-        state,
-        &context.media,
-        torrents.iter().map(|t| t.title.as_str()),
-    );
-    let chooser = crate::pack_fallback::effective(state, &context.subscribe);
-    let downloader = admission::AdmittedDownloader {
-        state,
-        expected: &context.subscribe,
-        routed,
-        control: library_lease.control(),
-    };
-    let added = subscribe::admit_and_add(RunInput {
-        subscribe: &chooser,
-        media: &context.media,
-        filter: &context.filter,
-        wash_filter: context.wash_filter.as_ref(),
-        torrents,
-        search_keywords,
-        facts: facts.facts.clone(),
-        downloader: &downloader,
-        library_root: &plan.root,
-        library_id: plan.library_id.parse().ok(),
-        root_id: Some(plan.root_id.clone()),
-        config_revision: Some(plan.config_revision),
-        transfer_mode: plan.mode,
-        scrape: plan.nfo,
-        hooks: None,
-        naming: Some(&plan.naming),
-        preserve_removed: true,
-        overlap,
-        absolute: absolute.as_ref(),
-    })?;
-    admission::record_accepted(state, id, &added.outcome, &added.broken, routed)?;
-    {
-        let guard = state.subscribe_guard(id);
-        let _guard = guard.lock();
-        admission::ensure_current(state, &context.subscribe)?;
-    }
     let outcome = subscribe::collect_completed_recorded(
         added,
         &library::Ffprobe::default(),
-        &destinations,
+        destinations,
         library_lease.control(),
         Some(&recorder),
     )?;
-    finish_collection(state, context, outcome, &library_lease, &plan)
-        .map(|outcome| (outcome, facts.facts, plan.scrape, library_lease, plan))
+    let outcome = finish_collection(state, context, outcome, &library_lease, plan)?;
+    Ok((outcome, library_lease))
 }
 
 fn finish_collection(
@@ -456,12 +546,14 @@ fn fetch_torrents(
     id: SubscribeId,
     context: &RunContext,
 ) -> Result<(Vec<domain::Torrent>, Vec<String>), ApiError> {
+    let snapshot = state.indexer.snapshot();
     let mut failures = Vec::new();
     let (torrents, keywords, succeeded) = match context.subscribe.fetch_mode {
         FetchMode::Search => {
             let (torrents, keywords, succeeded, search_failures) =
-                crate::worker::search_torrents_for_subscribe(
+                crate::worker::search_torrents_for_subscribe_with_snapshot(
                     state,
+                    &snapshot,
                     &context.sites,
                     &context.media,
                     &context.subscribe.coverage,
@@ -470,20 +562,21 @@ fn fetch_torrents(
             (torrents, keywords, succeeded)
         }
         FetchMode::Rss => {
-            let outcome = state.indexer.rss(&context.sites);
+            let outcome = state.indexer.rss_with_snapshot(&snapshot, &context.sites);
             let succeeded =
                 crate::worker::report_site_failures(&outcome, &context.sites, "rss", &mut failures);
             (outcome.torrents, Vec::new(), succeeded)
         }
         FetchMode::Both => {
             let (mut merged, keywords, search_succeeded, mut search_failures) =
-                crate::worker::search_torrents_for_subscribe(
+                crate::worker::search_torrents_for_subscribe_with_snapshot(
                     state,
+                    &snapshot,
                     &context.sites,
                     &context.media,
                     &context.subscribe.coverage,
                 );
-            let rss = state.indexer.rss(&context.sites);
+            let rss = state.indexer.rss_with_snapshot(&snapshot, &context.sites);
             let rss_succeeded = crate::worker::report_site_failures(
                 &rss,
                 &context.sites,
@@ -506,12 +599,14 @@ fn fetch_torrents(
     if succeeded {
         return Ok((torrents, keywords));
     }
-    let message = format!("所有索引站点均搜索失败: {}", failures.join("; "));
-    tracing::error!(subscribe_id = %id, error = %message, "订阅搜索失败");
+    let clean_failures: Vec<String> = failures.iter().map(|f| hooks::sanitize_reason(f)).collect();
+    let raw_message = format!("所有索引站点均搜索失败: {}", failures.join("; "));
+    let log_message = format!("所有索引站点均搜索失败: {}", clean_failures.join("; "));
+    tracing::error!(subscribe_id = %id, error = %log_message, "订阅搜索失败");
     Err(ApiError::with(
         StatusCode::INTERNAL_SERVER_ERROR,
         "subscribe.run_failed",
-        message,
+        raw_message,
     ))
 }
 

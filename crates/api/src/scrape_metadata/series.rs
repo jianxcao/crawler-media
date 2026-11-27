@@ -612,7 +612,7 @@ mod still_fallback_tests {
         let state = crate::management::ApiState::new(
             crate::Store::open(tmp.path().join("data")).unwrap(),
             "test-token".into(),
-            indexer::ProfileSet::load(None).unwrap(),
+            indexer::RegistrySnapshot::builtin().unwrap(),
             Arc::new(EmptyFetcher),
             Arc::new(downloader::MemoryDownloader::new(tmp.path().join("stage"))),
         )

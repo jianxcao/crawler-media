@@ -18,7 +18,7 @@ use api::subtitle_delivery::{SubtitleDelivery, SubtitleRequest, SubtitleServiceE
 use api::{ApiState, Store};
 use domain::{LedgerId, MediaKind};
 use downloader::MemoryDownloader;
-use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
+use indexer::{FetchRequest, Fetcher, IndexerError, RegistrySnapshot};
 use library::{LibraryError, SubtitleRunner, SubtitleTrack, Tracks, WorkControl};
 
 const INDEX: u32 = 2;
@@ -153,7 +153,7 @@ fn make_state(
     let state = ApiState::new(
         Store::open(root.join("data")).unwrap(),
         "management-secret".into(),
-        ProfileSet::load(None).unwrap(),
+        RegistrySnapshot::builtin().unwrap(),
         Arc::new(NoFetch),
         Arc::new(MemoryDownloader::new(root.join("stage"))),
     )

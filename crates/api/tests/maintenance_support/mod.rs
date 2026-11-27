@@ -13,7 +13,7 @@ use api::maintenance::{
 };
 use api::{ApiState, Store};
 use downloader::MemoryDownloader;
-use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
+use indexer::{FetchRequest, Fetcher, IndexerError, RegistrySnapshot};
 use jobs::{Job, JobKind};
 use parking_lot::Mutex;
 use serde_json::Value;
@@ -38,7 +38,7 @@ pub fn build_state(root: &Path, store: Store, executor: Arc<dyn DatabaseExecutor
     let state = ApiState::new(
         store,
         TOKEN.into(),
-        ProfileSet::load(None).unwrap(),
+        RegistrySnapshot::builtin().unwrap(),
         Arc::new(NoFetch),
         Arc::new(MemoryDownloader::new(root.join("stage"))),
     )

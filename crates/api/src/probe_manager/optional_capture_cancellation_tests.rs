@@ -113,7 +113,7 @@ fn optional_capture_state(
     let mut state = crate::ApiState::new_arc(
         harness.store.clone(),
         "management-secret".into(),
-        indexer::ProfileSet::load(None).unwrap(),
+        indexer::RegistrySnapshot::builtin().unwrap(),
         Arc::new(OfflineOptionalFetcher),
         Arc::new(downloader::MemoryDownloader::new(
             harness._tmp.path().join("stage"),

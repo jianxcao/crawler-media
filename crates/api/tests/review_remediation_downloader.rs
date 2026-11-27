@@ -44,8 +44,15 @@ fn assert_submission_rejected(kind: Option<&str>, enabled: bool) {
             .unwrap();
     }
     let downloader = DynamicDownloader::new(Arc::new(store), DownloaderEnv::default(), tmp.path());
+    let _ = torrent();
+    let payload = downloader::SubmitPayload::Magnet {
+        uri: "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567".into(),
+        info_hash: "0123456789abcdef0123456789abcdef01234567".into(),
+    };
     assert!(
-        downloader.add(&torrent()).is_err(),
+        downloader
+            .submit_verified(&payload, &downloader::SubmitOptions::default())
+            .is_err(),
         "production cannot accept a fake in-memory submission"
     );
 }

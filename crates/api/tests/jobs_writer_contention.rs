@@ -190,7 +190,7 @@ fn failed_jobs_sql_and_failed_subscribe_compensation_recover_from_durable_dirty_
     let reopened = api::ApiState::new(
         api::Store::open(fixture.temp.path().join("data")).unwrap(),
         TOKEN.into(),
-        indexer::ProfileSet::load(None).unwrap(),
+        indexer::RegistrySnapshot::builtin().unwrap(),
         std::sync::Arc::new(Offline),
         std::sync::Arc::new(downloader::MemoryDownloader::new(
             fixture.temp.path().join("stage"),
@@ -339,7 +339,7 @@ fn committed_sync_receipt_preserves_later_manual_job_edit_after_ack_failure_and_
     let reopened = api::ApiState::new(
         api::Store::open(fixture.temp.path().join("data")).unwrap(),
         TOKEN.into(),
-        indexer::ProfileSet::load(None).unwrap(),
+        indexer::RegistrySnapshot::builtin().unwrap(),
         std::sync::Arc::new(Offline),
         std::sync::Arc::new(downloader::MemoryDownloader::new(
             fixture.temp.path().join("stage"),
@@ -696,7 +696,7 @@ fn deletion_jobs_busy_reports_external_cleanup_and_recovers_disabled_definition(
     let reopened = api::ApiState::new(
         api::Store::open(fixture.temp.path().join("data")).unwrap(),
         TOKEN.into(),
-        indexer::ProfileSet::load(None).unwrap(),
+        indexer::RegistrySnapshot::builtin().unwrap(),
         std::sync::Arc::new(Offline),
         downloader,
     )

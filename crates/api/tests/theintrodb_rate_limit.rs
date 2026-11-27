@@ -454,7 +454,7 @@ async fn cached_chapters_get_returns_without_blocking_on_library_writer_lock() {
     f.state = api::ApiState::new(
         state_store,
         "management-secret".into(),
-        indexer::ProfileSet::load(None).unwrap(),
+        indexer::RegistrySnapshot::builtin().unwrap(),
         Arc::new(common::Fixtures {
             requests: Mutex::new(Vec::new()),
             bodies: HashMap::new(),

@@ -174,7 +174,7 @@ where
     F: FnOnce(&dyn downloader::Downloader) -> Result<T, downloader::DownloaderError>
         + Send
         + 'static,
-    G: FnOnce() -> Result<(), String> + Send + 'static,
+    G: FnOnce(&T) -> Result<(), String> + Send + 'static,
 {
     let state_for_work = state.clone();
     let job = move || -> Result<T, DownloaderWorkError> {
@@ -186,7 +186,7 @@ where
             .map_err(DownloaderWorkError::Admission)?;
         let value = work(client.as_ref())
             .map_err(|error| DownloaderWorkError::Operation(error.to_string()))?;
-        finalize().map_err(DownloaderWorkError::Finalize)?;
+        finalize(&value).map_err(DownloaderWorkError::Finalize)?;
         Ok(value)
     };
     match state.http_work.run_to_completion(job).await {
@@ -195,6 +195,70 @@ where
         Err(BlockingError::Timeout) => Err(DownloaderWorkError::Timeout),
         Err(other) => Err(DownloaderWorkError::Worker(other.to_string())),
     }
+}
+
+fn mark_ownership_record_deleted(
+    store: &crate::Store,
+    dl_id: domain::DownloaderId,
+    own: store::DownloadOwnershipRecord,
+    fallback_hash: Option<&str>,
+    now_utc: i64,
+) -> Result<(), String> {
+    store
+        .record_download_ownership(&store::RecordDownloadOwnershipInput {
+            downloader_id: dl_id,
+            ownership_tag: own.ownership_tag,
+            info_hash: own.info_hash.or_else(|| fallback_hash.map(str::to_string)),
+            operation_id: own.operation_id,
+            subscribe_id: own.subscribe_id,
+            plugin_id: own.plugin_id,
+            subject: own.subject,
+            site_id: own.site_id,
+            enclosure: own.enclosure,
+            ownership_state: store::DownloadOwnershipState::Deleted,
+            provenance_kind: own.provenance_kind,
+            verified_bytes: own.verified_bytes,
+            bytes_digest: own.bytes_digest,
+            now_utc,
+        })
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+fn mark_owned_subscribe_enclosure_deleted(
+    store: &crate::Store,
+    dl_id: domain::DownloaderId,
+    subscribe_id: domain::SubscribeId,
+    enclosure: &str,
+    now_utc: i64,
+) -> Result<(), String> {
+    let mut matching = Vec::new();
+    let mut after: Option<String> = None;
+    loop {
+        let page = store
+            .list_download_ownership(
+                None,
+                Some(dl_id),
+                Some(store::DownloadOwnershipState::Owned),
+                after.as_deref(),
+                Some(100),
+            )
+            .map_err(|error| error.to_string())?;
+        let next = page.next_cursor.clone();
+        for own in page.items {
+            if own.subscribe_id == Some(subscribe_id) && own.enclosure == enclosure {
+                matching.push(own);
+            }
+        }
+        if next.is_none() || next == after {
+            break;
+        }
+        after = next;
+    }
+    for own in matching {
+        mark_ownership_record_deleted(store, dl_id, own, None, now_utc)?;
+    }
+    Ok(())
 }
 
 /// 只解析 query 里的 downloader_id（纯字符串处理，不触碰 Store/网络）。
@@ -240,9 +304,38 @@ pub(crate) async fn delete_task(
         Ok(id) => id,
         Err(response) => return response,
     };
-    match run_downloader_action(&state, downloader_id, move |client| {
-        client.delete_task(&hash, delete_files)
-    })
+    let hash_for_finalize = hash.clone();
+    let state_for_finalize = state.clone();
+    match run_downloader_action_then(
+        &state,
+        downloader_id,
+        move |client| client.delete_task(&hash, delete_files),
+        move |()| {
+            crate::http::store_wait::with_foreground_store(&state_for_finalize, |store| {
+                state_for_finalize
+                    .require_writable()
+                    .and_then(|_| state_for_finalize.require_write_admitted())
+                    .map_err(|response| {
+                        format!(
+                            "task delete finalization admission changed: {}",
+                            response.status()
+                        )
+                    })?;
+                let dl_id = downloader_id
+                    .or_else(|| store.default_downloader().ok().flatten().map(|r| r.id))
+                    .unwrap_or_else(|| domain::DownloaderId::from_uuid(uuid::Uuid::nil()));
+                crate::http::subscriptions::finalize_deleted_task_by_hash(
+                    store,
+                    dl_id,
+                    &hash_for_finalize,
+                    crate::job_loop::unix_now(),
+                )
+            })
+            .map_err(|response| {
+                format!("task delete finalization rejected ({})", response.status())
+            })?
+        },
+    )
     .await
     {
         Ok(()) => ok(json!({"ok": true})).into_response(),
@@ -358,16 +451,26 @@ pub(crate) async fn remove_task(
             Err(error) => return error.response(),
         };
     let delete_files = body.delete_files;
+    let pending_dl_id = pending.downloader_id;
     let torrent_for_remove = pending.torrent.clone();
+    let torrent_for_finalize = pending.torrent.clone();
     let enclosure = pending.torrent.enclosure.clone();
     let state_for_finalize = state.clone();
     // RPC 与本地 pending finalization 同属一个 owned 作业：请求 future 被 drop
     // 时 blocking 闭包仍会跑完 remove_owned 并删除这条 pending（身份=subscribe+enclosure）。
     match run_downloader_action_then(
         &state,
-        pending.downloader_id,
-        move |client| client.remove_owned(&torrent_for_remove, delete_files),
-        move || {
+        pending_dl_id,
+        move |client| {
+            let identity = client
+                .owned_identity(&torrent_for_remove)
+                .ok()
+                .flatten()
+                .or_else(|| downloader::magnet_info_hash(&torrent_for_remove.enclosure));
+            client.remove_owned(&torrent_for_remove, delete_files)?;
+            Ok(identity)
+        },
+        move |identity| {
             crate::http::store_wait::with_foreground_store(&state_for_finalize, |store| {
                 state_for_finalize
                     .require_writable()
@@ -378,6 +481,44 @@ pub(crate) async fn remove_task(
                             response.status()
                         )
                     })?;
+                let sub_row = store.get_subscribe(subscribe_id).ok().flatten();
+                let dl_id = pending_dl_id
+                    .or_else(|| store.default_downloader().ok().flatten().map(|r| r.id))
+                    .or_else(|| {
+                        crate::delivery::target_id_from_store(
+                            store,
+                            sub_row.as_ref(),
+                            &torrent_for_finalize,
+                        )
+                        .ok()
+                        .flatten()
+                    })
+                    .unwrap_or_else(|| domain::DownloaderId::from_uuid(uuid::Uuid::nil()));
+                let now_utc = crate::job_loop::unix_now();
+                let effective_hash = identity
+                    .as_deref()
+                    .filter(|h| !h.starts_with("memory:"))
+                    .map(str::to_string)
+                    .or_else(|| {
+                        store
+                            .load_pending_info_hashes(subscribe_id)
+                            .ok()?
+                            .into_iter()
+                            .find(|(enc, _)| enc == &enclosure)
+                            .map(|(_, h)| h)
+                    });
+                if let Some(hash) = effective_hash.as_deref() {
+                    crate::http::subscriptions::finalize_deleted_task_by_hash(
+                        store, dl_id, hash, now_utc,
+                    )?;
+                }
+                mark_owned_subscribe_enclosure_deleted(
+                    store,
+                    dl_id,
+                    subscribe_id,
+                    &enclosure,
+                    now_utc,
+                )?;
                 store
                     .delete_pending(subscribe_id, &enclosure)
                     .map_err(|error| error.to_string())
@@ -387,7 +528,7 @@ pub(crate) async fn remove_task(
     )
     .await
     {
-        Ok(()) => {}
+        Ok(_) => {}
         Err(DownloaderWorkError::Resolve(message)) => {
             // 保留既有 remove_task 的解析失败状态码（500，而非 routed 路径的 502）。
             return err(

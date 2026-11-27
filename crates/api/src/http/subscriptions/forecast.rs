@@ -71,19 +71,16 @@ pub(crate) async fn release_forecast(
     .unwrap_or_else(|error| error.response())
 }
 
-/// RFC3339 / "YYYY-MM-DD" / 站内时间戳 → unix 秒（尽力解析，失败 None）。
+/// RFC3339 / RFC2822 / "YYYY-MM-DD[ HH:MM[:SS]]" / 站内秒或毫秒时间戳 → unix 秒。
 pub(crate) fn parse_upload_time(raw: &str) -> Option<i64> {
     let raw = raw.trim();
-    // RFC3339: 2026-09-20T12:00:00Z / +08:00
-    if let Some((date, _time)) = raw.split_once('T')
-        && let Some(unix) = parse_date(date)
-    {
-        return Some(unix);
+    if let Some(ms) = hooks::parse_candidate_published_at_ms(raw) {
+        return i64::try_from(ms / 1_000).ok();
     }
     if raw.len() == 10 && raw.as_bytes()[4] == b'-' && raw.as_bytes()[7] == b'-' {
         return parse_date(raw);
     }
-    raw.parse::<i64>().ok()
+    None
 }
 
 fn parse_date(date: &str) -> Option<i64> {

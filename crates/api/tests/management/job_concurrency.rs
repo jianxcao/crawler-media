@@ -6,7 +6,7 @@ use std::{path::Path, sync::atomic::AtomicUsize};
 use api::{ApiState, Store, router, spawn_job_loop_with};
 use axum::http::StatusCode;
 use downloader::MemoryDownloader;
-use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
+use indexer::{FetchRequest, Fetcher, IndexerError, RegistrySnapshot};
 use serde_json::Value;
 use tower::ServiceExt;
 
@@ -47,7 +47,7 @@ async fn jobs_endpoint_stays_responsive_while_a_job_is_running() {
     let state = ApiState::new(
         Store::open(tmp.path().join("data")).unwrap(),
         "management-secret".into(),
-        ProfileSet::load(None).unwrap(),
+        RegistrySnapshot::builtin().unwrap(),
         fetcher,
         Arc::new(MemoryDownloader::new(tmp.path().join("stage"))),
     )
@@ -119,7 +119,7 @@ async fn retry_fixture(root: &Path) -> RetryFixture {
     let state = ApiState::new(
         Store::open(root.join("data")).unwrap(),
         "management-secret".into(),
-        ProfileSet::load(None).unwrap(),
+        RegistrySnapshot::builtin().unwrap(),
         fetcher,
         Arc::new(MemoryDownloader::new(root.join("stage"))),
     )

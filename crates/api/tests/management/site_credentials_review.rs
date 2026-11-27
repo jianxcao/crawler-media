@@ -196,6 +196,27 @@ async fn absent_and_null_credentials_preserve_originals_on_put_and_patch() {
 }
 
 #[tokio::test]
+async fn explicit_credential_replacement_rotates_epoch_but_null_keeps_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let app = app(&tmp);
+    let id = create(&app).await;
+    let uri = format!("/api/v1/sites/{id}");
+    let store = api::Store::open(tmp.path().join("data")).unwrap();
+    let site_id = id.parse().unwrap();
+    for method in ["PUT", "PATCH"] {
+        let before = store.observe_site(site_id).unwrap().unwrap();
+        let mut body = json!({"name": "edited", "url": payload()["url"], "profile_id": "demo", "cookie": null});
+        call(&app, method, &uri, "management-secret", body.clone()).await;
+        let unchanged = store.observe_site(site_id).unwrap().unwrap();
+        assert_eq!(before.credential_epoch(), unchanged.credential_epoch());
+        body["cookie"] = json!("cookie-secret");
+        call(&app, method, &uri, "management-secret", body).await;
+        let replaced = store.observe_site(site_id).unwrap().unwrap();
+        assert_ne!(unchanged.credential_epoch(), replaced.credential_epoch());
+    }
+}
+
+#[tokio::test]
 async fn explicit_url_replacements_and_empty_credential_clears_are_persisted() {
     let tmp = tempfile::tempdir().unwrap();
     let app = app(&tmp);

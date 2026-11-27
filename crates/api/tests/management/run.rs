@@ -6,7 +6,7 @@ use api::{ApiState, Store, router};
 use axum::http::StatusCode;
 use domain::Torrent;
 use downloader::MemoryDownloader;
-use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
+use indexer::{FetchRequest, Fetcher, IndexerError, RegistrySnapshot};
 use parking_lot::Mutex;
 use serde_json::Value;
 use tower::ServiceExt;
@@ -233,11 +233,12 @@ async fn legacy_run_keeps_results_when_one_site_fails() {
     let state = ApiState::new(
         Store::open(tmp.path().join("data")).unwrap(),
         "management-secret".into(),
-        ProfileSet::load(None).unwrap(),
+        RegistrySnapshot::builtin().unwrap(),
         fetcher.clone(),
         downloader.clone(),
     )
-    .unwrap();
+    .unwrap()
+    .with_torrent_payload_fetcher(Arc::new(StubPayloadFetcher));
     let app = router(state);
     create_site(&app).await;
     let mut failing_site = site_payload();
@@ -300,11 +301,12 @@ async fn pending_torrent_occupies_slot_and_prevents_duplicate_download_in_next_r
         ApiState::new(
             Store::open(tmp.path().join("data")).unwrap(),
             "management-secret".into(),
-            ProfileSet::load(None).unwrap(),
+            RegistrySnapshot::builtin().unwrap(),
             Arc::new(MultiRoundFetcher(round_fetcher)),
             downloader.clone(),
         )
-        .unwrap(),
+        .unwrap()
+        .with_torrent_payload_fetcher(Arc::new(StubPayloadFetcher)),
     );
     create_site(&app).await;
     let subscribe = create_subscribe(&app, "search").await;

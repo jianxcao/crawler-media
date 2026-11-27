@@ -88,21 +88,24 @@ impl Downloader for DynamicDownloader {
         delegate!(self, select_files(torrent, keep))
     }
 
-    fn add(&self, torrent: &Torrent) -> Result<(), DownloaderError> {
-        delegate!(self, add(torrent))
-    }
-
-    fn add_with_options(
+    fn submit_verified(
         &self,
-        torrent: &Torrent,
-        download_url: &str,
-        save_path: Option<&str>,
-    ) -> Result<(), DownloaderError> {
-        delegate!(self, add_with_options(torrent, download_url, save_path))
+        payload: &downloader::SubmitPayload,
+        options: &downloader::SubmitOptions,
+    ) -> Result<downloader::ClientSubmitResult, DownloaderError> {
+        delegate!(self, submit_verified(payload, options))
     }
 
-    fn add_resolved(&self, torrent: &Torrent, download_url: &str) -> Result<(), DownloaderError> {
-        delegate!(self, add_resolved(torrent, download_url))
+    fn query_task_status(
+        &self,
+        info_hash: &str,
+        ownership_tag: &str,
+    ) -> Result<downloader::ClientTaskQuery, DownloaderError> {
+        delegate!(self, query_task_status(info_hash, ownership_tag))
+    }
+
+    fn supports_labels(&self) -> bool {
+        self.client().is_ok_and(|c| c.supports_labels())
     }
 
     fn completed_files(
@@ -182,41 +185,61 @@ impl Downloader for DynamicDownloader {
     fn task_snapshots(&self) -> Result<Vec<downloader::TaskSnapshot>, DownloaderError> {
         delegate!(self, task_snapshots())
     }
+
+    fn task_files_by_hash(
+        &self,
+        info_hash: &str,
+    ) -> Result<Option<downloader::TaskFileSet>, DownloaderError> {
+        delegate!(self, task_files_by_hash(info_hash))
+    }
+
+    fn set_task_tags(&self, info_hash: &str, tags: &[String]) -> Result<(), DownloaderError> {
+        delegate!(self, set_task_tags(info_hash, tags))
+    }
+
+    fn set_task_category(&self, info_hash: &str, category: &str) -> Result<(), DownloaderError> {
+        delegate!(self, set_task_category(info_hash, category))
+    }
+
+    fn set_task_limits(
+        &self,
+        info_hash: &str,
+        upload_limit: Option<u64>,
+        download_limit: Option<u64>,
+    ) -> Result<(), DownloaderError> {
+        delegate!(
+            self,
+            set_task_limits(info_hash, upload_limit, download_limit)
+        )
+    }
+
+    fn disk_free_space(&self) -> Result<downloader::DiskSpaceInfo, DownloaderError> {
+        delegate!(self, disk_free_space())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use domain::{SiteId, Torrent};
 
     #[test]
-    fn dynamic_downloader_delegates_add_with_options_with_save_path() {
+    fn dynamic_downloader_rejects_submit_without_configured_downloader() {
         let tmp = tempfile::tempdir().unwrap();
         let store = Arc::new(Store::open(tmp.path().join("data")).unwrap());
         let dynamic = DynamicDownloader::new(store, DownloaderEnv::default(), tmp.path());
 
-        let t = Torrent {
-            site_id: SiteId::new(),
-            title: "Test".into(),
-            enclosure: "magnet:?xt=urn:btih:test".into(),
-            size_bytes: Some(100),
-            seeders: Some(1),
-            free: true,
-            hr: None,
-            imdb_id: None,
-            id: None,
-            leechers: None,
-            snatched: None,
-            upload_time: None,
-            detail_url: None,
-            category: None,
-            poster_url: None,
+        let payload = downloader::SubmitPayload::Magnet {
+            uri: "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567".into(),
+            info_hash: "0123456789abcdef0123456789abcdef01234567".into(),
+        };
+        let opts = downloader::SubmitOptions {
+            ownership_tag: "cm-op:test".into(),
+            save_path: Some("/custom/path".into()),
+            ..Default::default()
         };
 
         assert!(
-            dynamic
-                .add_with_options(&t, &t.enclosure, Some("/custom/path"))
-                .is_err(),
+            dynamic.submit_verified(&payload, &opts).is_err(),
             "未配置生产 Downloader 时不得写入内存暂存"
         );
         assert!(dynamic.memory.destinations().is_empty());

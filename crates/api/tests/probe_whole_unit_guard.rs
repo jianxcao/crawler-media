@@ -9,7 +9,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use domain::{Media, MediaId, MediaKind};
 use downloader::MemoryDownloader;
-use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
+use indexer::{FetchRequest, Fetcher, IndexerError, RegistrySnapshot};
 use marker::{
     CaptureFailure, CaptureRequest, CapturedFingerprint, FingerprintCaptureEngine,
     FingerprintEngine, WorkControl,
@@ -139,7 +139,7 @@ fn setup_whole_unit_tv(dir: &std::path::Path) -> (ApiState, domain::FileCoverage
             ApiState::new(
                 store,
                 "secret".into(),
-                ProfileSet::load(None).unwrap(),
+                RegistrySnapshot::builtin().unwrap(),
                 Arc::new(EmptyFetcher),
                 Arc::new(MemoryDownloader::new(stage_dir)),
             )

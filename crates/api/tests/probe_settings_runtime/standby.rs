@@ -7,7 +7,7 @@ async fn promoted_standby_uses_recent_remote_pause() {
     let primary = state(root.path());
     let standby = api::ApiState::new_arc_with_admin_bootstrap_writable(
         primary.store(),
-        indexer::ProfileSet::load(None).unwrap(),
+        indexer::RegistrySnapshot::builtin().unwrap(),
         Arc::new(common::Fixtures {
             requests: Mutex::new(Vec::new()),
             bodies: HashMap::new(),

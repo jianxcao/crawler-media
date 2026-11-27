@@ -705,10 +705,12 @@ async fn apikey_only_site_strips_explicit_cookie_while_preserving_omitted_put_co
     assert_eq!(store.get_site(id).unwrap().unwrap().cookie, None);
 
     let seed_cookie = || {
-        let cur = store.get_site(id).unwrap().unwrap();
-        let mut next = cur.clone();
-        next.cookie = Some("legacy-cookie".into());
-        assert!(store.save_site_if_current(&next, &cur).unwrap());
+        let obs = store.observe_site(id).unwrap().unwrap();
+        assert!(
+            store
+                .save_site_if_current(&obs, Some("legacy-cookie"))
+                .unwrap()
+        );
     };
     seed_cookie();
 
@@ -760,7 +762,7 @@ async fn list_and_get_sites_resolve_auth_type_against_overlay_profiles() {
         api::ApiState::new(
             Store::open(tmp.path().join("data")).unwrap(),
             "management-secret".into(),
-            indexer::ProfileSet::load(Some(&overlay_dir)).unwrap(),
+            indexer::RegistrySnapshot::load_with_overlay(Some(&overlay_dir)).unwrap(),
             Arc::new(Fixtures {
                 requests: Mutex::new(Vec::new()),
                 bodies: HashMap::new(),
@@ -776,11 +778,10 @@ async fn list_and_get_sites_resolve_auth_type_against_overlay_profiles() {
     .await;
     let id = SiteId::from_str(created["id"].as_str().unwrap()).unwrap();
     let store = Store::open(tmp.path().join("data")).unwrap();
-    let cur = store.get_site(id).unwrap().unwrap();
-    assert_eq!(cur.cookie, None);
-    let mut stale = cur.clone();
-    stale.cookie = Some("stale-cookie".into());
-    assert!(store.save_site_if_current(&stale, &cur).unwrap());
+    assert_eq!(store.get_site(id).unwrap().unwrap().cookie, None);
+    let obs = store.observe_site(id).unwrap().unwrap();
+    let saved = store.save_site_if_current(&obs, Some("stale-cookie"));
+    assert!(saved.unwrap());
 
     for uri in [format!("/api/v1/sites/{id}"), "/api/v1/sites".into()] {
         let data = json_data(

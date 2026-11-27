@@ -91,6 +91,33 @@ fn scoped_sites(store: &crate::Store, requested: &[String]) -> Vec<domain::Site>
         .collect()
 }
 
+fn scrub_search_reason(raw: &str, is_admin: bool) -> String {
+    if is_admin {
+        hooks::sanitize_reason(raw)
+    } else {
+        hooks::redact_urls(raw)
+    }
+}
+
+fn scrub_search_traces(traces: Vec<hooks::HookTrace>, is_admin: bool) -> Vec<hooks::HookTrace> {
+    traces
+        .into_iter()
+        .map(|mut tr| {
+            tr.reason = tr
+                .reason
+                .as_deref()
+                .map(|r| scrub_search_reason(r, is_admin));
+            for step in &mut tr.steps {
+                step.reason = step
+                    .reason
+                    .as_deref()
+                    .map(|r| scrub_search_reason(r, is_admin));
+            }
+            tr
+        })
+        .collect()
+}
+
 pub(crate) async fn search_torrents(
     State(state): State<ApiState>,
     axum::Extension(user_id): axum::Extension<domain::UserId>,
@@ -107,12 +134,15 @@ pub(crate) async fn search_torrents(
     let history = (!keyword.is_empty() && query.save_history && !query.skip_history && page == 1)
         .then(|| history::next_history_target(user_id));
     // Review L2: the scoped Site list is a Store read on the search hot path.
-    let sites = match store_read(&state, &[store::Db::App], move |store| {
-        scoped_sites(store, &sites_requested)
+    let (sites, is_admin) = match store_read(&state, &[store::Db::App], move |store| {
+        (
+            scoped_sites(store, &sites_requested),
+            store.user_role(user_id).is_ok_and(|r| r == "admin"),
+        )
     })
     .await
     {
-        Ok(sites) => sites,
+        Ok(pair) => pair,
         Err(error) => return error.response(),
     };
     // Site fetches are blocking HTTP; run them under the shared search budget in a
@@ -120,12 +150,46 @@ pub(crate) async fn search_torrents(
     // every Site at once used to make Sites beyond the 4 permits fail with
     // "capacity exhausted" inside the very same request.
     let state = Arc::new(state);
-    let (total, items, statuses) =
-        fanout::collect_site_results(&state, sites, &keyword, page, &categories, None).await;
+    let sb = {
+        let st = Arc::clone(&state);
+        let kw = keyword.clone();
+        let cats = categories.clone();
+        tokio::task::spawn_blocking(move || {
+            crate::plugins::hooks_runtime::run_search_before(&st, sites, kw, page, cats)
+        })
+        .await
+        .map_err(|e| {
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal.error",
+                &e.to_string(),
+            )
+        })
+    };
+    let sb = match sb {
+        Ok(sb) => sb,
+        Err(resp) => return resp.into_response(),
+    };
+    if let Some(reason) = sb.rejected_reason {
+        let msg = scrub_search_reason(&reason, is_admin);
+        return err(StatusCode::FORBIDDEN, "plugin.rejected", &msg).into_response();
+    }
+    let (total, items, statuses, plugin_trace) = fanout::collect_site_results(
+        &state,
+        sb.sites,
+        &sb.keyword,
+        page,
+        &sb.categories,
+        None,
+        sb.traces,
+        is_admin,
+    )
+    .await;
+    let plugin_trace = scrub_search_traces(plugin_trace, is_admin);
     history::save_torrents_history(
         &state,
         history.as_ref(),
-        &keyword,
+        &sb.keyword,
         total,
         None,
         &items,
@@ -134,10 +198,11 @@ pub(crate) async fn search_torrents(
     )
     .await;
     ok(json!({
-        "keyword": keyword,
+        "keyword": sb.keyword,
         "total": total,
         "items": items,
         "sites": statuses,
+        "plugin_trace": plugin_trace,
     }))
     .into_response()
 }
@@ -155,28 +220,59 @@ pub(crate) async fn search_stream(
     let page = query.page.unwrap_or(1).clamp(1, 100);
     let history = (!keyword.is_empty() && query.save_history && !query.skip_history && page == 1)
         .then(|| history::next_history_target(user_id));
-    let sites = match store_read(&state, &[store::Db::App], move |store| {
-        scoped_sites(store, &sites_requested)
+    let (sites, is_admin) = match store_read(&state, &[store::Db::App], move |store| {
+        (
+            scoped_sites(store, &sites_requested),
+            store.user_role(user_id).is_ok_and(|r| r == "admin"),
+        )
     })
     .await
     {
-        Ok(sites) => sites,
+        Ok(pair) => pair,
         Err(error) => return error.response(),
     };
+    let state = Arc::new(state);
+    let sb = {
+        let st = Arc::clone(&state);
+        let kw = keyword.clone();
+        let cats = categories.clone();
+        tokio::task::spawn_blocking(move || {
+            crate::plugins::hooks_runtime::run_search_before(&st, sites, kw, page, cats)
+        })
+        .await
+    };
+    let sb = match sb {
+        Ok(sb) => sb,
+        Err(e) => {
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal.error",
+                &e.to_string(),
+            )
+            .into_response();
+        }
+    };
+    if let Some(reason) = sb.rejected_reason {
+        let msg = scrub_search_reason(&reason, is_admin);
+        return err(StatusCode::FORBIDDEN, "plugin.rejected", &msg).into_response();
+    }
     tokio::spawn(stream_search_events(
-        Arc::new(state),
+        state,
         tx,
-        keyword,
+        sb.keyword,
         page,
         history,
-        sites,
-        categories,
+        sb.sites,
+        sb.categories,
+        sb.traces,
+        is_admin,
     ));
     Sse::new(ReceiverStream::new(rx))
         .keep_alive(KeepAlive::default())
         .into_response()
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn stream_search_events(
     state: Arc<ApiState>,
     tx: mpsc::Sender<Result<Event, Infallible>>,
@@ -185,11 +281,23 @@ async fn stream_search_events(
     history: Option<history::HistoryTarget>,
     sites: Vec<domain::Site>,
     categories: Vec<String>,
+    initial_traces: Vec<hooks::HookTrace>,
+    is_admin: bool,
 ) {
     send_search_start(&tx, &keyword, &sites).await;
     let started = Instant::now();
-    let (total, items, statuses) =
-        fanout::collect_site_results(&state, sites, &keyword, page, &categories, Some(&tx)).await;
+    let (total, items, statuses, plugin_trace) = fanout::collect_site_results(
+        &state,
+        sites,
+        &keyword,
+        page,
+        &categories,
+        Some(&tx),
+        initial_traces,
+        is_admin,
+    )
+    .await;
+    let plugin_trace = scrub_search_traces(plugin_trace, is_admin);
     let elapsed_ms = started.elapsed().as_millis() as i64;
     // 客户端断开也要落盘已收集结果：历史条目与快照必须成对，否则回放只能拿到
     // 404 死链（历史里有条目 ⇒ 快照一定可取）。
@@ -208,7 +316,7 @@ async fn stream_search_events(
     if partial {
         return;
     }
-    send_search_done(&tx, total, elapsed_ms, statuses).await;
+    send_search_done(&tx, total, elapsed_ms, items, statuses, plugin_trace).await;
 }
 
 async fn send_search_start(
@@ -231,11 +339,20 @@ async fn send_search_done(
     tx: &mpsc::Sender<Result<Event, Infallible>>,
     total: i64,
     elapsed_ms: i64,
+    items: Vec<Value>,
     statuses: Vec<Value>,
+    plugin_trace: Vec<hooks::HookTrace>,
 ) {
     let _ = tx
         .send(Ok(Event::default().event("done").data(
-            json!({"total": total, "elapsed_ms": elapsed_ms, "sites": statuses}).to_string(),
+            json!({
+                "total": total,
+                "elapsed_ms": elapsed_ms,
+                "items": items,
+                "sites": statuses,
+                "plugin_trace": plugin_trace,
+            })
+            .to_string(),
         )))
         .await;
 }

@@ -15,7 +15,7 @@ use axum::{
 };
 use domain::{User, UserId, UserRole};
 use downloader::MemoryDownloader;
-use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
+use indexer::{FetchRequest, Fetcher, IndexerError, RegistrySnapshot};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
@@ -40,7 +40,7 @@ impl Fixture {
         let state = ApiState::new(
             Store::open(temp.path().join("data")).unwrap(),
             ADMIN_TOKEN.into(),
-            ProfileSet::load(None).unwrap(),
+            RegistrySnapshot::builtin().unwrap(),
             Arc::new(Offline),
             Arc::new(MemoryDownloader::new(temp.path().join("stage"))),
         )

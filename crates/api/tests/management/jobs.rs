@@ -56,7 +56,7 @@ async fn global_rss_job_fetches_once_and_routes_to_each_subscribe() {
     for id in &ids {
         assert_eq!(store.load_pending(*id).unwrap().len(), 1);
     }
-    assert_eq!(downloader.added().len(), 2);
+    assert_eq!(downloader.added().len(), 1);
     let response = app
         .clone()
         .oneshot(request(
@@ -68,7 +68,7 @@ async fn global_rss_job_fetches_once_and_routes_to_each_subscribe() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(downloader.added().len(), 2);
+    assert_eq!(downloader.added().len(), 1);
     let first_filter = store.get_subscribe(ids[0]).unwrap().unwrap().filter_id;
     store.delete_filter(first_filter).unwrap();
     Connection::open(tmp.path().join("data/subscribe.db"))
@@ -98,7 +98,7 @@ async fn global_rss_job_fetches_once_and_routes_to_each_subscribe() {
         3
     );
     assert_eq!(store.load_pending(ids[1]).unwrap().len(), 1);
-    assert_eq!(downloader.added().len(), 3);
+    assert_eq!(downloader.added().len(), 1);
 }
 
 #[tokio::test]

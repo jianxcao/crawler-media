@@ -5,7 +5,7 @@ use axum::{
 };
 use domain::{Filter, FilterId, Media, MediaId, MediaKind};
 use downloader::MemoryDownloader;
-use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
+use indexer::{FetchRequest, Fetcher, IndexerError, RegistrySnapshot};
 use serde_json::{Value, json};
 use std::{
     collections::HashMap,
@@ -56,7 +56,7 @@ impl Fixture {
         let state = ApiState::new(
             store,
             TOKEN.into(),
-            ProfileSet::load(None).unwrap(),
+            RegistrySnapshot::builtin().unwrap(),
             Arc::new(Offline),
             Arc::new(MemoryDownloader::new(temp.path().join("stage"))),
         )

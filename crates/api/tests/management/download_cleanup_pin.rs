@@ -8,7 +8,7 @@ use api::{ApiState, DownloaderEnv, DynamicDownloader, Store, router};
 use axum::http::StatusCode;
 use domain::{DownloaderId, SubscribeId, Torrent};
 use downloader::{Downloader, DownloaderError};
-use indexer::ProfileSet;
+use indexer::RegistrySnapshot;
 use parking_lot::Mutex;
 use serde_json::{Value, json};
 use tower::ServiceExt;
@@ -22,8 +22,15 @@ struct PartialIdentityDownloads {
 }
 
 impl Downloader for PartialIdentityDownloads {
-    fn add(&self, _: &Torrent) -> Result<(), DownloaderError> {
-        Ok(())
+    fn submit_verified(
+        &self,
+        payload: &downloader::SubmitPayload,
+        _options: &downloader::SubmitOptions,
+    ) -> Result<downloader::ClientSubmitResult, DownloaderError> {
+        Ok(downloader::ClientSubmitResult::Added {
+            already_owned: false,
+            info_hash: payload.info_hash().to_string(),
+        })
     }
 
     fn completed_files(&self, _: &Torrent) -> Result<Vec<std::path::PathBuf>, DownloaderError> {
@@ -283,7 +290,7 @@ fn switch_fixture(tmp: &tempfile::TempDir) -> SwitchFixture {
         ApiState::new_arc(
             store.clone(),
             "management-secret".into(),
-            ProfileSet::load(None).unwrap(),
+            RegistrySnapshot::builtin().unwrap(),
             Arc::new(Fixtures {
                 requests: Mutex::new(Vec::new()),
                 bodies: HashMap::new(),

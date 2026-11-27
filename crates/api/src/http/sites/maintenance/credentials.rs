@@ -10,11 +10,11 @@ use crate::http::store_wait::with_foreground_store;
 
 pub(super) struct AdmittedCredentials<'a> {
     state: &'a ApiState,
-    expected: Site,
+    expected: store::SiteObservation,
     rejected: RefCell<Option<Response>>,
 }
 impl<'a> AdmittedCredentials<'a> {
-    pub(super) fn new(state: &'a ApiState, expected: Site) -> Self {
+    pub(super) fn new(state: &'a ApiState, expected: store::SiteObservation) -> Self {
         Self {
             state,
             expected,
@@ -32,24 +32,24 @@ impl<'a> AdmittedCredentials<'a> {
     }
     fn refused(&self, response: Response) -> PluginError {
         self.rejected.replace(Some(response));
-        tracing::warn!(site_id = %self.expected.id, "Site credential publication rejected by write admission");
+        tracing::warn!(site_id = %self.expected.site().id, "Site credential publication rejected by write admission");
         PluginError::Fetch("Site maintenance write admission changed".into())
     }
     fn unchanged_site(&self, store: &crate::Store) -> Result<Site, PluginError> {
         let current = store
-            .get_site(self.expected.id)
+            .observe_site(self.expected.site().id)
             .map_err(|error| PluginError::Fetch(error.to_string()))?
             .ok_or(PluginError::NotFound)?;
         if current != self.expected {
-            tracing::warn!(site_id = %self.expected.id, "Site changed during credential maintenance; stale result discarded");
+            tracing::warn!(site_id = %self.expected.site().id, "Site changed during credential maintenance; stale result discarded");
             return Err(PluginError::Fetch("Site changed during maintenance".into()));
         }
-        Ok(current)
+        Ok(current.site().clone())
     }
 }
 impl SiteCredentials for AdmittedCredentials<'_> {
     fn load(&self, id: SiteId) -> Result<Site, PluginError> {
-        if id != self.expected.id {
+        if id != self.expected.site().id {
             return Err(PluginError::NotFound);
         }
         self.state
@@ -60,12 +60,12 @@ impl SiteCredentials for AdmittedCredentials<'_> {
         self.unchanged_site(&reader)
     }
     fn save(&self, site: &Site) -> Result<(), PluginError> {
-        if site.id != self.expected.id {
+        if site.id != self.expected.site().id {
             return Err(PluginError::NotFound);
         }
         self.with_store(|store| {
             match store
-                .save_site_if_current(site, &self.expected)
+                .save_site_if_current(&self.expected, site.cookie.as_deref())
                 .map_err(|error| PluginError::Fetch(error.to_string()))?
             {
                 true => Ok(()),

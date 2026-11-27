@@ -181,7 +181,7 @@ fn provider(root: &Path) -> api::media_server_provider::ApiServerProvider {
         ApiState::new(
             Store::open(root.join("data")).unwrap(),
             "admin-token".into(),
-            ProfileSet::load(None).unwrap(),
+            RegistrySnapshot::builtin().unwrap(),
             Arc::new(NoFetch),
             Arc::new(MemoryDownloader::new(root.join("stage"))),
         )

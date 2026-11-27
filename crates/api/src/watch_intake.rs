@@ -1,41 +1,74 @@
 use std::path::PathBuf;
 
 use domain::{Media, MediaId, MediaKind};
-use library::{WatchJob, WatchKind, scan_watch_intake_controlled};
+use library::{
+    WatchJob, WatchKind, plan_watch_intake_candidates,
+    scan_watch_intake_controlled_with_destinations,
+};
 
 use crate::management::ApiState;
 use crate::scrape_store::ScrapeStoreExt;
+struct IntakeSnapshot {
+    intake: PathBuf,
+    movie_library: store::Library,
+    movie_rev: i64,
+    tv_library: Option<store::Library>,
+    tv_rev: Option<i64>,
+    nfo: bool,
+}
+
+fn load_intake_snapshot(store: &crate::Store) -> Result<Option<IntakeSnapshot>, String> {
+    let Some(path) = store.watch_intake().map_err(|e| e.to_string())? else {
+        return Ok(None);
+    };
+    if path.is_empty() {
+        return Ok(None);
+    }
+    let movie_library = store
+        .default_library(MediaKind::Movie)
+        .map_err(|e| e.to_string())?
+        .ok_or("Movie Library 不存在")?;
+    let movie_rev = store
+        .library_config_revision(&movie_library.id)
+        .map_err(|e| e.to_string())?;
+    let tv_library = store
+        .default_library(MediaKind::Tv)
+        .map_err(|e| e.to_string())?;
+    let tv_rev = tv_library
+        .as_ref()
+        .map(|lib| store.library_config_revision(&lib.id))
+        .transpose()
+        .map_err(|e| e.to_string())?;
+    let nfo = store
+        .get_scrape_config()
+        .map_err(|e| e.to_string())?
+        .effective
+        .mirror_nfo;
+    Ok(Some(IntakeSnapshot {
+        intake: PathBuf::from(path),
+        movie_library,
+        movie_rev,
+        tv_library,
+        tv_rev,
+        nfo,
+    }))
+}
+
 pub fn run(state: &ApiState) -> Result<(), String> {
-    let (intake, movie_library, tv_library, nfo) = {
-        let store = state.store.as_ref();
-        let Some(path) = store.watch_intake().map_err(|e| e.to_string())? else {
-            return Ok(());
-        };
-        if path.is_empty() {
-            return Ok(());
-        }
-        let movie = store
-            .default_library(MediaKind::Movie)
-            .map_err(|e| e.to_string())?
-            .ok_or("Movie Library 不存在")?;
-        let tv = store
-            .default_library(MediaKind::Tv)
-            .map_err(|e| e.to_string())?;
-        let nfo = store
-            .get_scrape_config()
-            .map_err(|e| e.to_string())?
-            .effective
-            .mirror_nfo;
-        (PathBuf::from(path), movie, tv, nfo)
+    let Some(IntakeSnapshot {
+        intake,
+        movie_library,
+        movie_rev,
+        tv_library,
+        tv_rev,
+        nfo,
+    }) = load_intake_snapshot(state.store.as_ref())?
+    else {
+        return Ok(());
     };
     if !intake.is_dir() {
         return Ok(());
     }
-    let movie_lease = state.acquire_library_work(&movie_library.id)?;
-    let tv_lease = tv_library
-        .as_ref()
-        .map(|library| state.acquire_library_work(&library.id))
-        .transpose()?;
     let library_root = movie_library
         .root_paths
         .first()
@@ -64,11 +97,31 @@ pub fn run(state: &ApiState) -> Result<(), String> {
         tv_library_root,
         scrape: nfo,
     };
-    let outcome = scan_watch_intake_controlled(
+    let planned_renames =
+        preplan_intake_renames(state, &job, &probe, &movie_library.id, tv_library.as_ref())?;
+    let movie_lease = state.acquire_library_work(&movie_library.id)?;
+    let tv_lease = tv_library
+        .as_ref()
+        .map(|library| state.acquire_library_work(&library.id))
+        .transpose()?;
+    let renamed_destinations = {
+        let store = state.store.as_ref();
+        check_intake_libraries(&store, &movie_lease, tv_lease.as_ref())?;
+        verify_leased_intake_state(
+            &store,
+            &movie_library.id,
+            movie_rev,
+            tv_library.as_ref().map(|l| l.id.as_str()),
+            tv_rev,
+            planned_renames,
+        )?
+    };
+    let outcome = scan_watch_intake_controlled_with_destinations(
         &job,
         &probe,
         movie_lease.control(),
         tv_lease.as_ref().map(|lease| lease.control()),
+        &renamed_destinations,
     )
     .map_err(|e| e.to_string())?;
     let transferred = outcome.transferred;
@@ -92,6 +145,9 @@ pub fn run(state: &ApiState) -> Result<(), String> {
         check_intake_libraries(&store, &movie_lease, tv_lease.as_ref())?;
         observed.record(&store)?
     };
+    if !inserted.is_empty() {
+        crate::plugins::events::wake(state);
+    }
 
     finish_intake_metadata(
         state,
@@ -114,6 +170,114 @@ pub fn run(state: &ApiState) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+fn preplan_intake_renames(
+    state: &ApiState,
+    job: &WatchJob,
+    probe: &Media,
+    movie_library_id: &str,
+    tv_library: Option<&store::Library>,
+) -> Result<Vec<(PathBuf, PathBuf, MediaKind)>, String> {
+    let candidates = plan_watch_intake_candidates(job, probe).map_err(|e| e.to_string())?;
+    let mut out = Vec::with_capacity(candidates.len());
+    for cand in candidates {
+        let (target_lib_str, media_kind) = if cand.is_tv {
+            let Some(tv) = tv_library else {
+                continue;
+            };
+            (tv.id.as_str(), MediaKind::Tv)
+        } else {
+            (movie_library_id, MediaKind::Movie)
+        };
+        let Ok(library_id) = target_lib_str.parse::<domain::LibraryId>() else {
+            continue;
+        };
+        let dest = crate::plugins::transfer_rename::run_transfer_rename(
+            state,
+            &crate::plugins::transfer_rename::TransferRenameRequest {
+                workflow_id: format!("watch:{}", library_id),
+                library_id,
+                library_root: cand.target_root,
+                media_id: MediaId::new(),
+                media_kind,
+                subscribe_id: None,
+                source_path: cand.source_path.clone(),
+                proposed_relative_path: cand.proposed_relative_path,
+            },
+        );
+        out.push((cand.source_path, dest, media_kind));
+    }
+    Ok(out)
+}
+
+fn resolve_existing_ancestor_path(path: &std::path::Path) -> PathBuf {
+    for anc in path.ancestors() {
+        if anc.as_os_str().is_empty() {
+            break;
+        }
+        if let Ok(canon) = std::fs::canonicalize(anc) {
+            return match path.strip_prefix(anc) {
+                Ok(rem) if !rem.as_os_str().is_empty() => canon.join(rem),
+                _ => canon,
+            };
+        }
+    }
+    path.to_path_buf()
+}
+
+fn verify_leased_intake_state(
+    store: &crate::Store,
+    movie_id: &str,
+    movie_rev: i64,
+    tv_id: Option<&str>,
+    tv_rev: Option<i64>,
+    planned: Vec<(PathBuf, PathBuf, MediaKind)>,
+) -> Result<std::collections::HashMap<PathBuf, PathBuf>, String> {
+    let cur_movie = store
+        .default_library(MediaKind::Movie)
+        .map_err(|e| e.to_string())?;
+    if cur_movie.as_ref().map(|l| l.id.as_str()) != Some(movie_id)
+        || store
+            .library_config_revision(movie_id)
+            .map_err(|e| e.to_string())?
+            != movie_rev
+    {
+        return Err("Watch intake 默认 Movie Library 配置已变更".into());
+    }
+    let cur_tv = store
+        .default_library(MediaKind::Tv)
+        .map_err(|e| e.to_string())?;
+    if cur_tv.as_ref().map(|l| l.id.as_str()) != tv_id {
+        return Err("Watch intake 默认 TV Library 配置已变更".into());
+    }
+    if let (Some(tid), Some(expected_rev)) = (tv_id, tv_rev)
+        && store
+            .library_config_revision(tid)
+            .map_err(|e| e.to_string())?
+            != expected_rev
+    {
+        return Err("Watch intake 目标 TV Library 配置已变更".into());
+    }
+    let mut verified = std::collections::HashMap::with_capacity(planned.len());
+    for (src, dest, kind) in planned {
+        let expected_owner = match kind {
+            MediaKind::Tv => tv_id.ok_or("TV Library 未配置")?,
+            _ => movie_id,
+        };
+        let resolved = resolve_existing_ancestor_path(&dest);
+        let owner = store
+            .library_root_owning_key(&resolved, kind)
+            .map_err(|e| e.to_string())?;
+        if owner.as_ref().map(|(lib_id, _)| lib_id.as_str()) != Some(expected_owner) {
+            return Err(format!(
+                "Watch intake 目标路径越出所属 Library 根目录: {}",
+                dest.display()
+            ));
+        }
+        verified.insert(src, dest);
+    }
+    Ok(verified)
 }
 
 fn finish_intake_metadata(
@@ -210,7 +374,7 @@ mod tests {
     use std::sync::Arc;
 
     use downloader::MemoryDownloader;
-    use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
+    use indexer::{FetchRequest, Fetcher, IndexerError, RegistrySnapshot};
 
     use super::*;
 
@@ -233,7 +397,7 @@ mod tests {
         let state = ApiState::new(
             store,
             "test-token".into(),
-            ProfileSet::load(None).unwrap(),
+            RegistrySnapshot::builtin().unwrap(),
             Arc::new(EmptyFetcher),
             Arc::new(MemoryDownloader::new(tmp.path().join("stage"))),
         )
@@ -256,7 +420,7 @@ mod tests {
         let state = ApiState::new(
             store,
             "test-token".into(),
-            ProfileSet::load(None).unwrap(),
+            RegistrySnapshot::builtin().unwrap(),
             Arc::new(EmptyFetcher),
             Arc::new(MemoryDownloader::new(tmp.path().join("stage"))),
         )
@@ -319,7 +483,7 @@ mod tests {
         let state = ApiState::new(
             store,
             "test-token".into(),
-            ProfileSet::load(None).unwrap(),
+            RegistrySnapshot::builtin().unwrap(),
             Arc::new(EmptyFetcher),
             Arc::new(MemoryDownloader::new(tmp.path().join("stage"))),
         )
@@ -376,5 +540,74 @@ mod tests {
         );
         let queued = state.probe.take_queued_for_test().unwrap();
         assert!(queued.force_fingerprint);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn leased_intake_revalidation_rejects_symlink_nested_root_and_revision_drift() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = crate::Store::open(tmp.path().join("data")).unwrap();
+        let movie = store.default_library(MediaKind::Movie).unwrap().unwrap();
+        let root = movie.root_paths[0].clone();
+        let tv = store.default_library(MediaKind::Tv).unwrap();
+        let tv_id = tv.as_ref().map(|l| l.id.as_str());
+        let tv_rev = tv
+            .as_ref()
+            .map(|l| store.library_config_revision(&l.id).unwrap());
+
+        let src = tmp.path().join("in.mkv");
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("escape")).unwrap();
+        let sym_dest = root.join("escape/Movie (2024)/Movie (2024).mkv");
+        assert!(
+            verify_leased_intake_state(
+                &store,
+                &movie.id,
+                0,
+                tv_id,
+                tv_rev,
+                vec![(src.clone(), sym_dest, MediaKind::Movie)],
+            )
+            .is_err()
+        );
+
+        let nested_dir = root.join("nested_lib");
+        std::fs::create_dir_all(&nested_dir).unwrap();
+        store
+            .create_library(
+                MediaKind::Movie,
+                "Nested",
+                &[nested_dir.to_str().unwrap()],
+                "everyone",
+                false,
+                &[],
+            )
+            .unwrap();
+        let nested_dest = nested_dir.join("Movie (2024).mkv");
+        assert!(
+            verify_leased_intake_state(
+                &store,
+                &movie.id,
+                0,
+                tv_id,
+                tv_rev,
+                vec![(src.clone(), nested_dest, MediaKind::Movie)],
+            )
+            .is_err()
+        );
+
+        let valid_dest = root.join("Safe (2024)/Safe (2024).mkv");
+        assert!(
+            verify_leased_intake_state(
+                &store,
+                &movie.id,
+                99,
+                tv_id,
+                tv_rev,
+                vec![(src, valid_dest, MediaKind::Movie)],
+            )
+            .is_err()
+        );
     }
 }

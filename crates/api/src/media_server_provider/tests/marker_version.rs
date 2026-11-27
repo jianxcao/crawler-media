@@ -5,7 +5,7 @@ fn fixture_state(root: &std::path::Path) -> ApiState {
     ApiState::new(
         Store::open(root.join("data")).unwrap(),
         "management-secret".into(),
-        ProfileSet::load(None).unwrap(),
+        RegistrySnapshot::builtin().unwrap(),
         Arc::new(NoFetch),
         Arc::new(MemoryDownloader::new(root.join("stage"))),
     )

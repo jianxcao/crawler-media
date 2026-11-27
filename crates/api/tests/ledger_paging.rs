@@ -6,7 +6,7 @@ use axum::{
 };
 use domain::{Confidence, Media, MediaId, MediaKind, QualitySource};
 use downloader::MemoryDownloader;
-use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
+use indexer::{FetchRequest, Fetcher, IndexerError, RegistrySnapshot};
 use media_server::{
     provider::QueryTiming,
     query_metrics::{QueryMetrics, QueryMetricsSnapshot},
@@ -138,7 +138,7 @@ async fn ledger_rows_preserve_owner_media_transfer_and_size() {
     let state = ApiState::new(
         store,
         "ledger-test".into(),
-        ProfileSet::load(None).unwrap(),
+        RegistrySnapshot::builtin().unwrap(),
         Arc::new(NoFetch),
         Arc::new(MemoryDownloader::new(dir.path().join("stage"))),
     )
@@ -208,7 +208,7 @@ fn ledger_work(files: usize) -> QueryMetricsSnapshot {
     let state = ApiState::new(
         store,
         "ledger-test".into(),
-        ProfileSet::load(None).unwrap(),
+        RegistrySnapshot::builtin().unwrap(),
         Arc::new(NoFetch),
         Arc::new(MemoryDownloader::new(dir.path().join("stage"))),
     )
@@ -358,7 +358,7 @@ async fn ledger_reports_copy_when_hardlink_fell_back_or_move_left_source_intact(
     let state = ApiState::new(
         store,
         "ledger-test".into(),
-        ProfileSet::load(None).unwrap(),
+        RegistrySnapshot::builtin().unwrap(),
         Arc::new(NoFetch),
         Arc::new(MemoryDownloader::new(dir.path().join("stage"))),
     )

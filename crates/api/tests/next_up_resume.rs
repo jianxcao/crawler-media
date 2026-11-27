@@ -9,7 +9,7 @@ use domain::{
     TypedItemId, UnitKey, User, UserId, UserRole,
 };
 use downloader::MemoryDownloader;
-use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
+use indexer::{FetchRequest, Fetcher, IndexerError, RegistrySnapshot};
 use media_server::{
     provider::QueryTiming,
     query_metrics::{QueryMetrics, QueryMetricsSnapshot},
@@ -39,7 +39,7 @@ impl Fixture {
         let state = ApiState::new(
             store,
             TOKEN.into(),
-            ProfileSet::load(None).unwrap(),
+            RegistrySnapshot::builtin().unwrap(),
             Arc::new(NoFetch),
             Arc::new(MemoryDownloader::new(dir.path().join("stage"))),
         )

@@ -21,7 +21,7 @@ fn state(root: &std::path::Path) -> crate::management::ApiState {
     crate::management::ApiState::new(
         crate::Store::open(root.join("data")).unwrap(),
         "secret".into(),
-        indexer::ProfileSet::load(None).unwrap(),
+        indexer::RegistrySnapshot::builtin().unwrap(),
         Arc::new(NoFetch),
         Arc::new(downloader::MemoryDownloader::new(root.join("stage"))),
     )

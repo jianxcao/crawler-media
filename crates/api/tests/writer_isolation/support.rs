@@ -6,7 +6,7 @@ use domain::{
     Torrent,
 };
 use downloader::{Downloader, DownloaderError};
-use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
+use indexer::{FetchRequest, Fetcher, IndexerError, RegistrySnapshot};
 use parking_lot::{Condvar, Mutex};
 use serde_json::Value;
 use std::path::PathBuf;
@@ -18,6 +18,37 @@ pub const TOKEN: &str = "writer-isolation-fixture";
 pub const POSITIVE_SLO: Duration = Duration::from_secs(2);
 pub const NEGATIVE_SLO: Duration = Duration::from_millis(200);
 pub struct Offline;
+struct StubPayloadFetcher;
+impl api::download_service::fetcher::TorrentPayloadFetcher for StubPayloadFetcher {
+    fn prepare(
+        &self,
+        source: &downloader::TorrentSource,
+        purpose: downloader::SubmissionPurpose,
+        policy: &net_guard::TargetPolicy,
+    ) -> Result<downloader::PreparedTorrent, downloader::TorrentFetchError> {
+        match source {
+            downloader::TorrentSource::Http(http)
+                if !http.url.starts_with("http://127.0.0.1")
+                    && !http.url.starts_with("http://localhost") =>
+            {
+                let name = http.url.as_str();
+                let bytes = format!(
+                    "d8:announce20:https://tracker/test4:infod6:lengthi1024e4:name{}:{name}12:piece lengthi16384e6:pieces20:01234567890123456789ee",
+                    name.len()
+                );
+                Ok(downloader::PreparedTorrent::TorrentFile(
+                    downloader::parse_verified_torrent(bytes.as_bytes()).unwrap(),
+                ))
+            }
+            _ => downloader::prepare_download_payload(
+                &net_guard::NetGuardClient::new(),
+                source,
+                purpose,
+                policy,
+            ),
+        }
+    }
+}
 impl Fetcher for Offline {
     fn fetch(&self, _: &FetchRequest) -> Result<String, IndexerError> {
         Err(IndexerError::Fetch(
@@ -81,8 +112,15 @@ impl Drop for ReleaseOnDrop {
 
 struct IdleDownloader;
 impl Downloader for IdleDownloader {
-    fn add(&self, _: &Torrent) -> Result<(), DownloaderError> {
-        Ok(())
+    fn submit_verified(
+        &self,
+        payload: &downloader::SubmitPayload,
+        _options: &downloader::SubmitOptions,
+    ) -> Result<downloader::ClientSubmitResult, DownloaderError> {
+        Ok(downloader::ClientSubmitResult::Added {
+            already_owned: false,
+            info_hash: payload.info_hash().to_string(),
+        })
     }
     fn completed_files(&self, _: &Torrent) -> Result<Vec<PathBuf>, DownloaderError> {
         Ok(vec![])
@@ -94,8 +132,15 @@ pub struct GatedDownloader {
     pub completed: PathBuf,
 }
 impl Downloader for GatedDownloader {
-    fn add(&self, _: &Torrent) -> Result<(), DownloaderError> {
-        Ok(())
+    fn submit_verified(
+        &self,
+        payload: &downloader::SubmitPayload,
+        _options: &downloader::SubmitOptions,
+    ) -> Result<downloader::ClientSubmitResult, DownloaderError> {
+        Ok(downloader::ClientSubmitResult::Added {
+            already_owned: false,
+            info_hash: payload.info_hash().to_string(),
+        })
     }
     fn completed_files(&self, _: &Torrent) -> Result<Vec<PathBuf>, DownloaderError> {
         self.gate.block();
@@ -154,11 +199,12 @@ impl Fixture {
         let state = ApiState::new(
             store,
             TOKEN.into(),
-            ProfileSet::load(None).unwrap(),
+            RegistrySnapshot::builtin().unwrap(),
             fetcher,
             downloader,
         )
         .unwrap()
+        .with_torrent_payload_fetcher(Arc::new(StubPayloadFetcher))
         .with_catalog(Arc::new(Offline));
         let user = state.store().user_by_token(TOKEN).unwrap().unwrap().id;
         let subscribe = Subscribe {

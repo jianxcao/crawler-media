@@ -15,7 +15,7 @@ use api::{ApiState, Store, router};
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use downloader::Downloader;
-use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
+use indexer::{FetchRequest, Fetcher, IndexerError, RegistrySnapshot};
 use parking_lot::Mutex;
 use serde_json::{Value, json};
 use tower::ServiceExt;
@@ -82,6 +82,39 @@ pub(crate) async fn json_error(response: axum::response::Response) -> Value {
     error
 }
 
+pub(crate) struct StubPayloadFetcher;
+
+impl api::download_service::fetcher::TorrentPayloadFetcher for StubPayloadFetcher {
+    fn prepare(
+        &self,
+        source: &downloader::TorrentSource,
+        purpose: downloader::SubmissionPurpose,
+        policy: &net_guard::TargetPolicy,
+    ) -> Result<downloader::PreparedTorrent, downloader::TorrentFetchError> {
+        match source {
+            downloader::TorrentSource::Http(http)
+                if !http.url.starts_with("http://127.0.0.1")
+                    && !http.url.starts_with("http://localhost") =>
+            {
+                let name = http.url.as_str();
+                let bytes = format!(
+                    "d8:announce20:https://tracker/test4:infod6:lengthi1024e4:name{}:{name}12:piece lengthi16384e6:pieces20:01234567890123456789ee",
+                    name.len()
+                );
+                Ok(downloader::PreparedTorrent::TorrentFile(
+                    downloader::parse_verified_torrent(bytes.as_bytes()).unwrap(),
+                ))
+            }
+            _ => downloader::prepare_download_payload(
+                &net_guard::NetGuardClient::new(),
+                source,
+                purpose,
+                policy,
+            ),
+        }
+    }
+}
+
 pub(crate) fn state(
     root: &Path,
     fetcher: Arc<Fixtures>,
@@ -90,11 +123,12 @@ pub(crate) fn state(
     ApiState::new(
         Store::open(root.join("data")).unwrap(),
         "management-secret".into(),
-        ProfileSet::load(None).unwrap(),
+        RegistrySnapshot::builtin().unwrap(),
         fetcher,
         downloader,
     )
     .unwrap()
+    .with_torrent_payload_fetcher(Arc::new(StubPayloadFetcher))
 }
 
 pub(crate) fn site_payload() -> Value {

@@ -29,14 +29,12 @@ async fn deleting_subscription_keeps_claimed_task_files() {
         state: "downloading".into(),
         source: "manual".into(),
     });
-    h.run_subscribe(id).await;
-    assert_eq!(h.qb.add_count(), 0, "claimed, not added");
+    let (run_status, body) = h.run_subscribe_raw(id).await;
+    assert_eq!(run_status, StatusCode::BAD_GATEWAY, "{body}");
+    assert_eq!(h.qb.add_count(), 0, "foreign task never re-added");
+    assert_eq!(h.qb.add_tags.lock().len(), 0, "foreign task never claimed");
     let task = h.qb.tasks.lock()[0].clone();
-    assert!(
-        task.tags.iter().any(|t| t == downloader::CLAIMED_TAG),
-        "claimed tag: {:?}",
-        task.tags
-    );
+    assert_eq!(task.tags, vec!["mine".to_string()]);
 
     let response = h
         .app
@@ -51,9 +49,8 @@ async fn deleting_subscription_keeps_claimed_task_files() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let deletes = h.qb.deletes.lock().clone();
-    assert!(!deletes.is_empty(), "task removed from client");
     assert!(
-        deletes.iter().all(|req| req.contains("deleteFiles=false")),
-        "claimed task files must be kept: {deletes:?}"
+        deletes.is_empty(),
+        "foreign task must never be deleted when subscription is deleted: {deletes:?}"
     );
 }

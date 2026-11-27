@@ -7,7 +7,7 @@ use axum::{
 };
 use domain::{LibraryId, MediaKind};
 use downloader::MemoryDownloader;
-use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
+use indexer::{FetchRequest, Fetcher, IndexerError, RegistrySnapshot};
 use std::sync::Arc;
 use std::time::Instant;
 use tower::ServiceExt;
@@ -48,7 +48,7 @@ fn fixture(size: usize) -> (tempfile::TempDir, ApiState, axum::Router, LibraryId
     let state = ApiState::new(
         store,
         TOKEN.into(),
-        ProfileSet::load(None).unwrap(),
+        RegistrySnapshot::builtin().unwrap(),
         Arc::new(NoFetch),
         Arc::new(MemoryDownloader::new(dir.path().join("stage"))),
     )

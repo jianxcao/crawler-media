@@ -4,7 +4,7 @@ use api::{
 };
 use domain::{Media, MediaId, MediaKind};
 use downloader::MemoryDownloader;
-use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
+use indexer::{FetchRequest, Fetcher, IndexerError, RegistrySnapshot};
 use std::sync::Arc;
 use store::test_support::{FixtureFile, publish_fixture_file};
 
@@ -21,7 +21,7 @@ async fn root_reassignment_resumes_after_locale_without_manual_drain_or_restart(
     let state = ApiState::new(
         store::Store::open(temp.path().join("data")).unwrap(),
         "token".into(),
-        ProfileSet::load(None).unwrap(),
+        RegistrySnapshot::builtin().unwrap(),
         Arc::new(NoFetch),
         Arc::new(MemoryDownloader::new(temp.path().join("stage"))),
     )
@@ -123,7 +123,7 @@ async fn frozen_root_does_not_starve_an_independent_ready_root() {
     let state = ApiState::new(
         store::Store::open(temp.path().join("data")).unwrap(),
         "token".into(),
-        ProfileSet::load(None).unwrap(),
+        RegistrySnapshot::builtin().unwrap(),
         Arc::new(NoFetch),
         Arc::new(MemoryDownloader::new(temp.path().join("stage"))),
     )
@@ -262,7 +262,7 @@ async fn idle_root_driver_releases_its_instance_budget_on_shutdown() {
     let state = ApiState::new(
         store::Store::open(temp.path().join("data")).unwrap(),
         "token".into(),
-        ProfileSet::load(None).unwrap(),
+        RegistrySnapshot::builtin().unwrap(),
         Arc::new(NoFetch),
         Arc::new(MemoryDownloader::new(temp.path().join("stage"))),
     )
@@ -285,7 +285,7 @@ async fn formal_root_addition_queues_cross_library_ownership_until_ready() {
     let state = ApiState::new(
         store::Store::open(temp.path().join("data")).unwrap(),
         "token".into(),
-        ProfileSet::load(None).unwrap(),
+        RegistrySnapshot::builtin().unwrap(),
         Arc::new(NoFetch),
         Arc::new(MemoryDownloader::new(temp.path().join("stage"))),
     )

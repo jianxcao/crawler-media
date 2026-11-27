@@ -19,7 +19,7 @@ use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode, header};
 use domain::{User, UserId, UserRole};
 use downloader::MemoryDownloader;
-use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
+use indexer::{FetchRequest, Fetcher, IndexerError, RegistrySnapshot};
 use serde_json::json;
 use tower::ServiceExt;
 
@@ -120,7 +120,7 @@ fn setup(root: &Path, gate: Arc<Gate>, concurrency: usize) -> (ApiState, axum::R
     let state = ApiState::new(
         store,
         "admin-token".into(),
-        ProfileSet::load(None).unwrap(),
+        RegistrySnapshot::builtin().unwrap(),
         Arc::new(NoFetch),
         Arc::new(MemoryDownloader::new(root.join("stage"))),
     )

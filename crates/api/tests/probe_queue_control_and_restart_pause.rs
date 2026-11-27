@@ -10,7 +10,7 @@ use std::time::Duration;
 use axum::http::StatusCode;
 use domain::{Confidence, LedgerId, Media, MediaId, MediaKind, QualitySource, UnitKey};
 use downloader::MemoryDownloader;
-use indexer::ProfileSet;
+use indexer::RegistrySnapshot;
 use parking_lot::Mutex;
 use serde_json::{Value, json};
 use store::ScannedLedger;
@@ -164,7 +164,7 @@ fn production_state_with_writable(
         .unwrap();
         api::ApiState::new_production_with_admin_bootstrap_writable(
             store,
-            ProfileSet::load(None).unwrap(),
+            RegistrySnapshot::builtin().unwrap(),
             Arc::new(common::Fixtures {
                 requests: Mutex::new(Vec::new()),
                 bodies: HashMap::new(),

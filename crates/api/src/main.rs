@@ -14,11 +14,27 @@ use api::{
     cli, router,
 };
 use downloader::Downloader;
-use indexer::ProfileSet;
+use indexer::RegistrySnapshot;
 
 #[tokio::main]
 async fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(|s| s.as_str()) == Some("plugin") {
+        match plugin_cli::run(&args[1..]) {
+            Ok(out) => {
+                print!("{out}");
+                return;
+            }
+            Err(error) => {
+                eprintln!("{error}");
+                let code = match error {
+                    plugin_cli::CliError::Usage(_) => 2,
+                    _ => 1,
+                };
+                std::process::exit(code);
+            }
+        }
+    }
     let command = match cli::Command::parse(&args) {
         Ok(command) => command,
         Err(error) => {
@@ -168,14 +184,18 @@ fn spawn_background_services(
     state: &ApiState,
     address: SocketAddr,
     initial_lease: std::io::Result<Option<Arc<api::instance_lease::InstanceLease>>>,
-) -> api::job_loop::JobLoopHandle {
+) -> (
+    api::job_loop::JobLoopHandle,
+    api::PluginEventDispatcherHandle,
+) {
     tokio::spawn(api::ssdp::run(
         address.port(),
         state.jellyfin_server_id().to_string(),
     ));
     let jobs = api::spawn_job_loop_with_lease(state.clone(), initial_lease);
     api::spawn_fs_watcher(state.clone());
-    jobs
+    let events = api::spawn_plugin_event_dispatcher_with_handle(state.clone());
+    (jobs, events)
 }
 
 /// Review N-2: resolve on SIGTERM (docker stop/restart) or SIGINT (Ctrl-C).
@@ -215,17 +235,26 @@ fn create_api_state(
         DownloaderEnv::from_server_config(config),
         data_dir,
     ));
+    let listen_addr: SocketAddr = config.listen.parse()?;
     let browser = api::runtime_browser::production_browser(store.clone())?;
-    let mut state = ApiState::new_production_with_admin_bootstrap_writable(
+    let mut state = ApiState::new_arc_with_bootstrap_options(
         store.clone(),
-        ProfileSet::load(Some(overlay_dir))?,
-        Arc::new(HttpFetcher),
+        RegistrySnapshot::load_with_overlay(Some(overlay_dir))?,
+        Arc::new(HttpFetcher::with_store_and_self_listen(
+            store.clone(),
+            listen_addr,
+        )),
         downloader,
         action,
-        initial_writable,
-    )?
-    .with_log_buffer(log_buffer)
-    .with_browser(Arc::new(browser));
+        api::ApiStateBootstrapOptions {
+            log_buffer: Some(log_buffer),
+            browser: Some(Arc::new(browser)),
+            self_listen: Some(listen_addr),
+            indexer_overlay_dir: Some(overlay_dir.to_path_buf()),
+            initial_writable,
+            pause_background_probe: true,
+        },
+    )?;
 
     let sources = load_catalog_sources(&state, config.tvdb_key.as_deref());
     if !sources.is_empty() {
@@ -293,7 +322,7 @@ async fn serve() -> Result<(), Box<dyn std::error::Error>> {
     let listener = tokio::net::TcpListener::bind(address).await?;
     println!("crawler-media 已监听 http://{address}");
 
-    let jobs = spawn_background_services(&state, address, initial_lease);
+    let (jobs, plugin_events) = spawn_background_services(&state, address, initial_lease);
 
     let app = api::ui::attach_ui(router(state.clone()), config.ui_dir.clone());
     // Graceful shutdown waits for open connections (SSE streams can stay
@@ -330,12 +359,16 @@ async fn serve() -> Result<(), Box<dyn std::error::Error>> {
         let mut signalled_rx = signalled_rx;
         let _ = signalled_rx.wait_for(|signalled| *signalled).await;
         let stop_workers = async {
-            let (jobs, probe, frames) = tokio::join!(
+            let (jobs, events, probe, frames) = tokio::join!(
                 jobs.shutdown(),
+                plugin_events.shutdown(),
                 state.probe.shutdown_workers(),
                 chapter_frames.shutdown(),
             );
-            for error in [jobs, probe, frames].into_iter().filter_map(Result::err) {
+            for error in [jobs, events, probe, frames]
+                .into_iter()
+                .filter_map(Result::err)
+            {
                 tracing::warn!(%error, "停止后台任务失败");
             }
         };

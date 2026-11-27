@@ -4,7 +4,7 @@ use std::sync::Arc;
 use api::{ApiState, Store};
 use domain::FileCoverage;
 use downloader::MemoryDownloader;
-use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
+use indexer::{FetchRequest, Fetcher, IndexerError, RegistrySnapshot};
 
 struct NoFetch;
 
@@ -34,7 +34,7 @@ pub async fn resolved_chapters(
     let state = ApiState::new_arc(
         store,
         "test-token".into(),
-        ProfileSet::load(None).unwrap(),
+        RegistrySnapshot::builtin().unwrap(),
         Arc::new(NoFetch),
         Arc::new(MemoryDownloader::new(root.join("stage"))),
     )

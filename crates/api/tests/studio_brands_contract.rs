@@ -10,7 +10,7 @@ use domain::{
     MetadataPreferences, QualitySource,
 };
 use downloader::MemoryDownloader;
-use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
+use indexer::{FetchRequest, Fetcher, IndexerError, RegistrySnapshot};
 use media::{BrandMeta, CatalogHit, DoubanSubject, ItemMeta};
 use serde_json::{Value, json};
 use store::metadata::ScrapedDisplay;
@@ -115,7 +115,7 @@ fn app_state(root: &Path, store: Store, tv_media: Media) -> ApiState {
     ApiState::new(
         store,
         "admin-token".into(),
-        ProfileSet::load(None).unwrap(),
+        RegistrySnapshot::builtin().unwrap(),
         Arc::new(NoFetch),
         Arc::new(MemoryDownloader::new(root.join("stage"))),
     )

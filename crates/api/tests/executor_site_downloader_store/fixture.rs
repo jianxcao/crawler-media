@@ -1,7 +1,7 @@
 use api::{ApiState, Store};
 use domain::{DownloaderId, Site, SiteId};
 use downloader::MemoryDownloader;
-use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
+use indexer::{FetchRequest, Fetcher, IndexerError, RegistrySnapshot};
 use serde_json::{Value, json};
 use std::sync::Arc;
 
@@ -24,7 +24,7 @@ impl Fixture {
         let state = ApiState::new(
             Store::open(tmp.path().join("data")).unwrap(),
             "site-downloader-secret".into(),
-            ProfileSet::load(None).unwrap(),
+            RegistrySnapshot::builtin().unwrap(),
             Arc::new(NoFetch),
             Arc::new(MemoryDownloader::new(tmp.path().join("stage"))),
         )
@@ -49,6 +49,8 @@ impl Fixture {
                     downloader_id: None,
                     enabled: true,
                     maintenance_via: domain::MaintenanceVia::Http,
+                    browser_search: false,
+                    timezone: "UTC".into(),
                 })
                 .unwrap();
             store
@@ -104,39 +106,37 @@ pub fn route(f: &Fixture, route: usize) -> (&'static str, String, Value, u16) {
         6 => ("PUT", f.site_uri(""), f.site_body(), 200),
         7 => ("PATCH", f.site_uri(""), json!({"name":"Changed Site"}), 200),
         8 => ("DELETE", f.site_uri(""), Value::Null, 200),
-        9 => ("PATCH", f.site_uri("/boost"), json!({"enabled":true}), 200),
-        10 => (
+        9 => (
             "POST",
             "/api/v1/downloaders".into(),
             f.downloader_body(),
             201,
         ),
-        11 => (
+        10 => (
             "PATCH",
             f.downloader_uri(""),
             json!({"name":"Changed Downloader"}),
             200,
         ),
-        12 => ("DELETE", f.downloader_uri(""), Value::Null, 200),
-        13 => (
+        11 => ("DELETE", f.downloader_uri(""), Value::Null, 200),
+        12 => (
             "PUT",
             "/api/v1/downloaders/target-prefs/movie".into(),
             json!({"kind":"default"}),
             200,
         ),
-        14 => ("POST", f.downloader_uri("/verify"), Value::Null, 400),
-        15 => ("POST", f.site_uri("/verify"), Value::Null, 200),
-        16 => ("POST", f.site_uri("/login"), Value::Null, 400),
-        17 => ("POST", f.site_uri("/check-in"), Value::Null, 400),
-        18 => ("GET", "/api/v1/sites/boost-stats".into(), Value::Null, 200),
-        19 => ("GET", "/api/v1/downloaders/tasks".into(), Value::Null, 200),
-        20 => (
+        13 => ("POST", f.downloader_uri("/verify"), Value::Null, 400),
+        14 => ("POST", f.site_uri("/verify"), Value::Null, 200),
+        15 => ("POST", f.site_uri("/login"), Value::Null, 400),
+        16 => ("POST", f.site_uri("/check-in"), Value::Null, 400),
+        17 => ("GET", "/api/v1/downloaders/tasks".into(), Value::Null, 200),
+        18 => (
             "POST",
             "/api/v1/downloaders/tasks/remove".into(),
             json!({"task_id":"missing"}),
             404,
         ),
-        21 => (
+        19 => (
             "POST",
             "/api/v1/downloaders/tasks/replace".into(),
             json!({"task_id":"missing"}),

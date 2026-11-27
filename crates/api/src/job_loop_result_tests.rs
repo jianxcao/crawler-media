@@ -42,7 +42,7 @@ fn assert_completed_result_retries(sql_busy: bool) {
     let state = ApiState::new(
         crate::Store::open(tmp.path().join("data")).unwrap(),
         "test".into(),
-        indexer::ProfileSet::load(None).unwrap(),
+        indexer::RegistrySnapshot::builtin().unwrap(),
         Arc::new(Offline),
         Arc::new(downloader::MemoryDownloader::new(tmp.path().join("stage"))),
     )

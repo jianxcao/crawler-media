@@ -107,12 +107,24 @@ pub(crate) fn search_torrents_for_subscribe(
     media: &domain::Media,
     coverage: &Coverage,
 ) -> (Vec<domain::Torrent>, Vec<String>, bool, Vec<String>) {
+    let snapshot = state.indexer.snapshot();
+    search_torrents_for_subscribe_with_snapshot(state, &snapshot, sites, media, coverage)
+}
+
+pub(crate) fn search_torrents_for_subscribe_with_snapshot(
+    state: &ApiState,
+    snapshot: &indexer::RegistrySnapshot,
+    sites: &[domain::Site],
+    media: &domain::Media,
+    coverage: &Coverage,
+) -> (Vec<domain::Torrent>, Vec<String>, bool, Vec<String>) {
     let keywords = search_keywords_for(media, coverage);
-    search_keywords(state, sites, media, coverage, keywords)
+    search_keywords(state, snapshot, sites, media, coverage, keywords)
 }
 
 fn search_keywords(
     state: &ApiState,
+    snapshot: &indexer::RegistrySnapshot,
     sites: &[domain::Site],
     media: &Media,
     coverage: &Coverage,
@@ -123,24 +135,115 @@ fn search_keywords(
     let mut succeeded = keywords.is_empty() || sites.is_empty();
     let mut failures = Vec::new();
     for keyword in &keywords {
-        let outcome = state.indexer.search_page(sites, keyword, 1);
-        succeeded |=
-            report_site_failures(&outcome, sites, &format!("search {keyword}"), &mut failures);
-        let continue_page =
-            page_is_full_and_irrelevant(media, coverage, keyword, &outcome.torrents);
-        absorb(&mut seen, &mut merged, outcome.torrents);
+        let sb = crate::plugins::hooks_runtime::run_search_before(
+            state,
+            sites.to_vec(),
+            keyword.clone(),
+            1,
+            Vec::new(),
+        );
+        if sb.rejected_reason.is_some() || sb.sites.is_empty() {
+            tracing::info!(
+                keyword = %keyword,
+                rejected_reason = ?sb.rejected_reason,
+                "search.before 过滤跳过当前关键词搜索"
+            );
+            succeeded = true;
+            continue;
+        }
+        let outcome = state.indexer.search_page_categories_with_snapshot(
+            snapshot,
+            &sb.sites,
+            &sb.keyword,
+            1,
+            &sb.categories,
+        );
+        succeeded |= report_site_failures(
+            &outcome,
+            &sb.sites,
+            &format!("search {}", sb.keyword),
+            &mut failures,
+        );
+        let page1 =
+            apply_subscribe_search_hooks(state, &sb.sites, &sb.keyword, 1, &sb.categories, outcome);
+        let continue_page = page_is_full_and_irrelevant(media, coverage, &sb.keyword, &page1);
+        absorb(&mut seen, &mut merged, page1);
         if continue_page {
-            let second = state.indexer.search_page(sites, keyword, 2);
+            let sb2 = crate::plugins::hooks_runtime::run_search_before(
+                state,
+                sites.to_vec(),
+                keyword.clone(),
+                2,
+                Vec::new(),
+            );
+            if sb2.rejected_reason.is_some() || sb2.sites.is_empty() {
+                tracing::info!(
+                    keyword = %keyword,
+                    rejected_reason = ?sb2.rejected_reason,
+                    "search.before 过滤跳过第二页搜索"
+                );
+                continue;
+            }
+            let second = state.indexer.search_page_categories_with_snapshot(
+                snapshot,
+                &sb2.sites,
+                &sb2.keyword,
+                2,
+                &sb2.categories,
+            );
             succeeded |= report_site_failures(
                 &second,
-                sites,
-                &format!("search {keyword} page 2"),
+                &sb2.sites,
+                &format!("search {} page 2", sb2.keyword),
                 &mut failures,
             );
-            absorb(&mut seen, &mut merged, second.torrents);
+            let page2 = apply_subscribe_search_hooks(
+                state,
+                &sb2.sites,
+                &sb2.keyword,
+                2,
+                &sb2.categories,
+                second,
+            );
+            absorb(&mut seen, &mut merged, page2);
         }
     }
     (merged, keywords, succeeded, failures)
+}
+
+fn apply_subscribe_search_hooks(
+    state: &ApiState,
+    sites: &[domain::Site],
+    keyword: &str,
+    page: u32,
+    categories: &[String],
+    outcome: indexer::SearchOutcome,
+) -> Vec<domain::Torrent> {
+    let site_map: std::collections::HashMap<domain::SiteId, &domain::Site> =
+        sites.iter().map(|s| (s.id, s)).collect();
+    let mut by_site: std::collections::HashMap<domain::SiteId, Vec<domain::Torrent>> =
+        std::collections::HashMap::new();
+    for t in outcome.torrents {
+        by_site.entry(t.site_id).or_default().push(t);
+    }
+    let mut after_site = Vec::new();
+    for (site_id, torrents) in by_site {
+        if let Some(site) = site_map.get(&site_id) {
+            let (kept, _) = crate::plugins::hooks_runtime::run_search_site_after(
+                state, site, keyword, page, categories, torrents,
+            );
+            for t in kept {
+                after_site.push((t, site.name.clone()));
+            }
+        } else {
+            for t in torrents {
+                after_site.push((t, String::new()));
+            }
+        }
+    }
+    let (after_all, _) =
+        crate::plugins::hooks_runtime::run_search_after(state, after_site, &outcome.failures);
+    after_all.into_iter().map(|(t, _)| t).collect()
 }
 
 fn absorb(
@@ -167,8 +270,9 @@ pub(crate) fn report_site_failures(
             .find(|s| s.id == failure.site_id)
             .map(|s| s.name.as_str())
             .unwrap_or("未知站点");
-        let detail = format!("{}: {}", site_name, failure.error);
-        tracing::warn!(site_id = %failure.site_id, site = %site_name, operation, error = %failure.error, "站点搜索失败");
+        let clean_error = hooks::sanitize_reason(&failure.error);
+        let detail = format!("{}: {}", site_name, clean_error);
+        tracing::warn!(site_id = %failure.site_id, site = %site_name, operation, error = %clean_error, "站点搜索失败");
         failures.push(detail);
     }
     sites.is_empty() || outcome.failures.len() < sites.len()
@@ -217,7 +321,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use domain::{Coverage, Media, MediaId, MediaKind, Site, SiteId};
-    use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
+    use indexer::{FetchRequest, Fetcher, IndexerError, RegistrySnapshot};
 
     use super::search_torrents_for_subscribe;
     use crate::management::ApiState;
@@ -255,7 +359,7 @@ mod tests {
         let state = ApiState::new(
             crate::Store::open(tmp.path()).unwrap(),
             "token".into(),
-            ProfileSet::load(None).unwrap(),
+            RegistrySnapshot::builtin().unwrap(),
             scripted.clone(),
             Arc::new(downloader::MemoryDownloader::new(tmp.path().join("stage"))),
         )
@@ -274,6 +378,8 @@ mod tests {
             downloader_id: None,
             enabled: true,
             maintenance_via: domain::MaintenanceVia::Http,
+            browser_search: false,
+            timezone: "UTC".into(),
         };
         let media = Media {
             id: MediaId::new(),

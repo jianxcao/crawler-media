@@ -25,11 +25,18 @@ struct ManualDownloader {
     block_add: bool,
 }
 impl Downloader for ManualDownloader {
-    fn add(&self, _: &domain::Torrent) -> Result<(), DownloaderError> {
+    fn submit_verified(
+        &self,
+        payload: &downloader::SubmitPayload,
+        _options: &downloader::SubmitOptions,
+    ) -> Result<downloader::ClientSubmitResult, DownloaderError> {
         if self.block_add {
             self.gate.block();
         }
-        Ok(())
+        Ok(downloader::ClientSubmitResult::Added {
+            already_owned: false,
+            info_hash: payload.info_hash().to_string(),
+        })
     }
     fn completed_files(&self, _: &domain::Torrent) -> Result<Vec<PathBuf>, DownloaderError> {
         if !self.block_add {
@@ -71,6 +78,8 @@ fn with_site(fixture: Fixture) -> Fixture {
             downloader_id: None,
             enabled: true,
             maintenance_via: domain::MaintenanceVia::Http,
+            browser_search: false,
+            timezone: "UTC".into(),
         })
         .unwrap();
     fixture
@@ -322,11 +331,44 @@ struct GatedTaskList {
     tasks: Arc<parking_lot::Mutex<Vec<domain::Torrent>>>,
 }
 impl Downloader for GatedTaskList {
-    fn add(&self, torrent: &domain::Torrent) -> Result<(), DownloaderError> {
+    fn submit_verified(
+        &self,
+        payload: &downloader::SubmitPayload,
+        options: &downloader::SubmitOptions,
+    ) -> Result<downloader::ClientSubmitResult, DownloaderError> {
         if self.tasks.lock().is_empty() {
             self.gate.block();
         }
-        self.tasks.lock().push(torrent.clone());
+        self.tasks.lock().push(domain::Torrent {
+            site_id: domain::SiteId::new(),
+            title: options.ownership_tag.clone(),
+            enclosure: payload.info_hash().to_string(),
+            size_bytes: None,
+            seeders: None,
+            free: false,
+            hr: None,
+            imdb_id: None,
+            id: None,
+            leechers: None,
+            snatched: None,
+            upload_time: None,
+            detail_url: None,
+            category: None,
+            poster_url: None,
+        });
+        Ok(downloader::ClientSubmitResult::Added {
+            already_owned: false,
+            info_hash: payload.info_hash().to_string(),
+        })
+    }
+    fn remember_identity(
+        &self,
+        torrent: &domain::Torrent,
+        _hash: &str,
+    ) -> Result<(), DownloaderError> {
+        if let Some(last) = self.tasks.lock().last_mut() {
+            last.enclosure = torrent.enclosure.clone();
+        }
         Ok(())
     }
     fn completed_files(&self, _: &domain::Torrent) -> Result<Vec<PathBuf>, DownloaderError> {
@@ -554,9 +596,16 @@ struct RollbackCheckDownloader {
     subscribe: Arc<parking_lot::Mutex<domain::SubscribeId>>,
 }
 impl Downloader for RollbackCheckDownloader {
-    fn add(&self, _: &domain::Torrent) -> Result<(), DownloaderError> {
+    fn submit_verified(
+        &self,
+        payload: &downloader::SubmitPayload,
+        _options: &downloader::SubmitOptions,
+    ) -> Result<downloader::ClientSubmitResult, DownloaderError> {
         self.add_gate.block();
-        Ok(())
+        Ok(downloader::ClientSubmitResult::Added {
+            already_owned: false,
+            info_hash: payload.info_hash().to_string(),
+        })
     }
     fn completed_files(&self, _: &domain::Torrent) -> Result<Vec<PathBuf>, DownloaderError> {
         Ok(vec![])
@@ -582,7 +631,7 @@ fn seed_tv_submit_fixture(
     let state = api::ApiState::new(
         api::Store::open(tmp.join("data2")).unwrap(),
         TOKEN.into(),
-        indexer::ProfileSet::load(None).unwrap(),
+        indexer::RegistrySnapshot::builtin().unwrap(),
         Arc::new(SearchPage),
         dl,
     )

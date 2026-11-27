@@ -11,7 +11,7 @@ use api::{ApiState, Store, router};
 use axum::http::StatusCode;
 use domain::{SubscribeId, Torrent};
 use downloader::{Downloader, DownloaderError, MemoryDownloader};
-use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
+use indexer::{FetchRequest, Fetcher, IndexerError, RegistrySnapshot};
 use parking_lot::Mutex;
 use serde_json::{Value, json};
 use std::str::FromStr;
@@ -48,9 +48,20 @@ struct TrackingDownloader {
 }
 
 impl Downloader for TrackingDownloader {
-    fn add(&self, torrent: &Torrent) -> Result<(), DownloaderError> {
-        self.added_torrents.lock().push(torrent.clone());
-        self.inner.add(torrent)
+    fn remember_identity(&self, torrent: &Torrent, hash: &str) -> Result<(), DownloaderError> {
+        let mut added = self.added_torrents.lock();
+        if !added.iter().any(|t| t.enclosure == torrent.enclosure) {
+            added.push(torrent.clone());
+        }
+        self.inner.remember_identity(torrent, hash)
+    }
+
+    fn submit_verified(
+        &self,
+        payload: &downloader::SubmitPayload,
+        options: &downloader::SubmitOptions,
+    ) -> Result<downloader::ClientSubmitResult, DownloaderError> {
+        self.inner.submit_verified(payload, options)
     }
 
     fn remove(&self, torrent: &Torrent, delete_files: bool) -> Result<(), DownloaderError> {
@@ -221,7 +232,7 @@ async fn pause_during_legacy_run_search_skips_downloader_add() {
     let api_state = ApiState::new(
         Store::open(tmp.path().join("data")).unwrap(),
         "management-secret".into(),
-        ProfileSet::load(None).unwrap(),
+        RegistrySnapshot::builtin().unwrap(),
         fetcher,
         downloader,
     )

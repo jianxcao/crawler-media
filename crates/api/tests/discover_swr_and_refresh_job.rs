@@ -14,7 +14,7 @@ use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use domain::{Media, MediaId, MediaKind, User, UserId, UserRole};
 use downloader::MemoryDownloader;
-use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
+use indexer::{FetchRequest, Fetcher, IndexerError, RegistrySnapshot};
 use jobs::{JobIdentity, JobKind, Runner};
 use media::response_cache::CacheSource;
 use media::{CatalogGet, Douban, Tmdb, TmdbError};
@@ -193,7 +193,7 @@ fn build_fixture() -> (tempfile::TempDir, ApiState, FakeHttp, FakeHttp) {
     let state = ApiState::new(
         store,
         ADMIN_TOKEN.into(),
-        ProfileSet::load(None).unwrap(),
+        RegistrySnapshot::builtin().unwrap(),
         Arc::new(OfflineFetcher),
         Arc::new(MemoryDownloader::new(dir.path().join("stage"))),
     )

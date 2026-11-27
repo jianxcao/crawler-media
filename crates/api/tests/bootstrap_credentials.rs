@@ -8,7 +8,7 @@ use api::{ApiState, Store, router};
 use axum::http::StatusCode;
 use domain::{User, UserId, UserRole};
 use downloader::MemoryDownloader;
-use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
+use indexer::{FetchRequest, Fetcher, IndexerError, RegistrySnapshot};
 use rusqlite::Connection;
 use serde_json::{Value, json};
 use tower::ServiceExt;
@@ -178,7 +178,7 @@ async fn seed_admin_rolls_back_when_token_insert_fails() {
         store.clone(),
         "cli-token".to_string(),
         Some("admin-password".to_string()),
-        ProfileSet::load(None).unwrap(),
+        RegistrySnapshot::builtin().unwrap(),
         Arc::new(NoopFetcher),
         Arc::new(MemoryDownloader::new(tmp.path().join("stage"))),
     );
@@ -197,7 +197,7 @@ fn build_test_app(store: Arc<Store>, tmp: &tempfile::TempDir, token: &str) -> ax
         store,
         token.to_string(),
         Some("independent-password".to_string()),
-        ProfileSet::load(None).unwrap(),
+        RegistrySnapshot::builtin().unwrap(),
         Arc::new(NoopFetcher),
         Arc::new(MemoryDownloader::new(tmp.path().join("stage"))),
     )
@@ -296,7 +296,7 @@ async fn bootstrap_admin_password_and_cli_token_are_separated() {
         store.clone(),
         cli_token.to_string(),
         Some(admin_pw.to_string()),
-        ProfileSet::load(None).unwrap(),
+        RegistrySnapshot::builtin().unwrap(),
         Arc::new(NoopFetcher),
         Arc::new(MemoryDownloader::new(tmp.path().join("stage"))),
     )

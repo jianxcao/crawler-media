@@ -16,7 +16,26 @@ use crate::management::ApiState;
 
 const SESSION_COOKIE: &str = "mc_session";
 
-pub(crate) async fn login(State(state): State<ApiState>, Json(body): Json<Value>) -> Response {
+fn request_is_https(headers: &axum::http::HeaderMap) -> bool {
+    let forwarded_proto_https = headers
+        .get("x-forwarded-proto")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|proto| proto.split(',').next())
+        .is_some_and(|first| first.trim().eq_ignore_ascii_case("https"));
+    if forwarded_proto_https {
+        return true;
+    }
+    headers
+        .get("forwarded")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|fwd| fwd.to_ascii_lowercase().contains("proto=https"))
+}
+
+pub(crate) async fn login(
+    State(state): State<ApiState>,
+    headers: axum::http::HeaderMap,
+    Json(body): Json<Value>,
+) -> Response {
     let username = body["username"].as_str().unwrap_or_default();
     let password = body["password"].as_str().unwrap_or_default();
     if username.is_empty() || password.is_empty() {
@@ -74,7 +93,12 @@ pub(crate) async fn login(State(state): State<ApiState>, Json(body): Json<Value>
         },
     }))
     .into_response();
-    let cookie = format!("{SESSION_COOKIE}={token}; Path=/; HttpOnly; SameSite=Lax");
+    let secure = if request_is_https(&headers) {
+        "; Secure"
+    } else {
+        ""
+    };
+    let cookie = format!("{SESSION_COOKIE}={token}; Path=/; HttpOnly; SameSite=Lax{secure}");
     if let Ok(value) = HeaderValue::from_str(&cookie) {
         payload.headers_mut().append(header::SET_COOKIE, value);
     }
@@ -84,6 +108,7 @@ pub(crate) async fn login(State(state): State<ApiState>, Json(body): Json<Value>
 /// POST /auth/logout — 撤销当前会话 token（Header 或 cookie 之一命中即撤销），
 /// 并清除浏览器会话 cookie。幂等：无 token / 未知 token 也返回成功。
 pub(crate) async fn logout(State(state): State<ApiState>, request: Request) -> Response {
+    let is_https = request_is_https(request.headers());
     let mut tokens = Vec::new();
     if let Some(bearer) = bearer_token(&request) {
         tokens.push(bearer);
@@ -101,7 +126,8 @@ pub(crate) async fn logout(State(state): State<ApiState>, request: Request) -> R
     }
 
     let mut response = ok(Value::Null).into_response();
-    let clear = format!("{SESSION_COOKIE}=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax");
+    let secure = if is_https { "; Secure" } else { "" };
+    let clear = format!("{SESSION_COOKIE}=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax{secure}");
     if let Ok(value) = HeaderValue::from_str(&clear) {
         response.headers_mut().append(header::SET_COOKIE, value);
     }
@@ -335,6 +361,55 @@ pub(crate) async fn require_admin(
             "只有管理员可以执行该操作",
         )
     }
+}
+
+/// Rejects Bearer-only or principal-mismatched requests on browser-only asset routes that require an active `mc_session` cookie.
+pub(crate) async fn require_cookie_auth(
+    State(state): State<ApiState>,
+    mut request: Request,
+    next: Next,
+) -> Response {
+    let Some(cookie) = cookie_token(&request) else {
+        return err(
+            StatusCode::UNAUTHORIZED,
+            "auth.required",
+            "需要浏览器会话 Cookie",
+        );
+    };
+    let deadline = std::time::Instant::now() + AUTH_READ_DEADLINE;
+    let cookie_owned = cookie.clone();
+    let lookup = crate::library_read_work::run_app_read_stage_named(
+        &state,
+        deadline,
+        "auth_cookie",
+        move |reader| reader.user_id_by_token(&cookie_owned),
+    )
+    .await
+    .map_err(|error| auth_stage_response(&error));
+    let cookie_user_id = match lookup {
+        Ok(Some(uid)) => uid,
+        Ok(None) => {
+            return err(
+                StatusCode::UNAUTHORIZED,
+                "auth.required",
+                "未登录或会话已过期",
+            );
+        }
+        Err(response) => return response,
+    };
+    if let Some(&existing_uid) = request.extensions().get::<domain::UserId>()
+        && existing_uid != cookie_user_id
+    {
+        return err(
+            StatusCode::FORBIDDEN,
+            "auth.forbidden",
+            "会话 Cookie 与请求凭据身份不一致",
+        );
+    }
+    request.extensions_mut().insert(cookie_user_id);
+    request.extensions_mut().insert(cookie);
+    request.extensions_mut().insert(Some(cookie_user_id));
+    next.run(request).await
 }
 
 pub(crate) async fn me(

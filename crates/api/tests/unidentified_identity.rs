@@ -6,7 +6,7 @@ use axum::{
     http::{Request, StatusCode},
 };
 use domain::{Confidence, MediaKind};
-use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
+use indexer::{FetchRequest, Fetcher, IndexerError, RegistrySnapshot};
 use serde_json::Value;
 use tower::ServiceExt;
 
@@ -48,7 +48,7 @@ async fn tv_unidentified_lists_and_filters_by_persisted_owner() {
     let state = ApiState::new(
         store,
         "secret".into(),
-        ProfileSet::load(None).unwrap(),
+        RegistrySnapshot::builtin().unwrap(),
         Arc::new(NoFetch),
         Arc::new(downloader::MemoryDownloader::new(tmp.path().join("stage"))),
     )
@@ -100,7 +100,7 @@ async fn identify_and_transfer_may_change_parked_movie_owner_to_explicit_tv_targ
     let state = ApiState::new(
         store,
         "secret".into(),
-        ProfileSet::load(None).unwrap(),
+        RegistrySnapshot::builtin().unwrap(),
         Arc::new(NoFetch),
         Arc::new(downloader::MemoryDownloader::new(tmp.path().join("stage"))),
     )

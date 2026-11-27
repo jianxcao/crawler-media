@@ -12,6 +12,7 @@ pub struct TrTask {
     pub hash: String,
     pub name: String,
     pub filename: String,
+    pub labels: Vec<String>,
     pub percent: f64,
     /// (name relative to download dir, length, bytes completed, wanted)
     pub files: Vec<(String, u64, u64, bool)>,
@@ -117,11 +118,26 @@ impl MockTransmissionState {
             }
             "torrent-add" => {
                 let n = self.next.fetch_add(1, Ordering::SeqCst);
-                let hash = format!("{n:040x}");
+                let filename = args["filename"].as_str().unwrap_or_default().to_string();
+                let hash = args["metainfo"]
+                    .as_str()
+                    .and_then(decode_b64)
+                    .and_then(|bytes| downloader::torrent_info_hash(&bytes))
+                    .or_else(|| downloader::magnet_info_hash(&filename))
+                    .unwrap_or_else(|| format!("{n:040x}"));
+                let labels = args["labels"]
+                    .as_array()
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str().map(String::from))
+                            .collect()
+                    })
+                    .unwrap_or_default();
                 self.tasks.lock().push(TrTask {
                     hash: hash.clone(),
                     name: format!("task-{n}"),
-                    filename: args["filename"].as_str().unwrap_or_default().into(),
+                    filename,
+                    labels,
                     percent: 0.0,
                     files: std::mem::take(&mut *self.next_files.lock())
                         .into_iter()
@@ -132,6 +148,22 @@ impl MockTransmissionState {
             }
             "torrent-set" => {
                 self.sets.lock().push(args.clone());
+                if let Some(labels) = args["labels"].as_array() {
+                    let parsed: Vec<String> = labels
+                        .iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect();
+                    let ids: Vec<u64> = args["ids"]
+                        .as_array()
+                        .map(|arr| arr.iter().filter_map(|v| v.as_u64()).collect())
+                        .unwrap_or_default();
+                    let mut tasks = self.tasks.lock();
+                    for (i, t) in tasks.iter_mut().enumerate() {
+                        if ids.is_empty() || ids.contains(&((i + 1) as u64)) {
+                            t.labels = parsed.clone();
+                        }
+                    }
+                }
                 json!({"result": "success", "arguments": {}})
             }
             "torrent-get" => {
@@ -141,7 +173,7 @@ impl MockTransmissionState {
                     .enumerate()
                     .map(|(i, t)| {
                         let size: u64 = t.files.iter().map(|f| f.1).sum();
-                        json!({
+                        let mut row = json!({
                             "id": i + 1, "name": t.name, "hashString": t.hash,
                             "totalSize": size, "sizeWhenDone": size, "percentDone": t.percent,
                             "downloadDir": self.download_dir.display().to_string(),
@@ -149,7 +181,11 @@ impl MockTransmissionState {
                             "downloadedEver": 0, "uploadedEver": 0,
                             "files": t.files.iter().map(|f| json!({"name": f.0, "length": f.1, "bytesCompleted": f.2})).collect::<Vec<_>>(),
                             "fileStats": t.files.iter().map(|f| json!({"wanted": f.3})).collect::<Vec<_>>(),
-                        })
+                        });
+                        if self.rpc_version >= 16 {
+                            row["labels"] = json!(t.labels);
+                        }
+                        row
                     })
                     .collect();
                 json!({"result": "success", "arguments": {"torrents": rows}})
@@ -157,4 +193,28 @@ impl MockTransmissionState {
             _ => json!({"result": "success", "arguments": {}}),
         }
     }
+}
+
+fn decode_b64(input: &str) -> Option<Vec<u8>> {
+    let mut out = Vec::new();
+    let mut acc: u32 = 0;
+    let mut bits: u8 = 0;
+    for b in input.bytes() {
+        let val = match b {
+            b'A'..=b'Z' => b - b'A',
+            b'a'..=b'z' => b - b'a' + 26,
+            b'0'..=b'9' => b - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            b'=' | b'\r' | b'\n' | b' ' => continue,
+            _ => return None,
+        };
+        acc = (acc << 6) | u32::from(val);
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push(((acc >> bits) & 0xff) as u8);
+        }
+    }
+    Some(out)
 }

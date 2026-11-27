@@ -7,7 +7,7 @@ mod writer_hold {
 use api::{ApiState, Store};
 use domain::UserRole;
 use downloader::MemoryDownloader;
-use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
+use indexer::{FetchRequest, Fetcher, IndexerError, RegistrySnapshot};
 use media_server::provider::MediaServerProvider;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -24,7 +24,7 @@ fn state_with_admin(root: &std::path::Path) -> (ApiState, String) {
     let state = ApiState::new(
         Store::open(root.join("data")).unwrap(),
         "executor-secret".into(),
-        ProfileSet::load(None).unwrap(),
+        RegistrySnapshot::builtin().unwrap(),
         Arc::new(NoFetch),
         Arc::new(MemoryDownloader::new(root.join("stage"))),
     )

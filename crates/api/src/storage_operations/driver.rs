@@ -272,7 +272,7 @@ async fn finalize(state: &ApiState, library_id: &str, operation_id: &str) {
 mod tests {
     use super::*;
     use downloader::MemoryDownloader;
-    use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
+    use indexer::{FetchRequest, Fetcher, IndexerError, RegistrySnapshot};
     use std::sync::Arc;
 
     struct NoFetch;
@@ -287,7 +287,7 @@ mod tests {
         ApiState::new(
             store,
             "secret".into(),
-            ProfileSet::load(None).unwrap(),
+            RegistrySnapshot::builtin().unwrap(),
             Arc::new(NoFetch),
             Arc::new(MemoryDownloader::new(dir.join("stage"))),
         )

@@ -15,7 +15,7 @@ use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use domain::Torrent;
 use downloader::{Downloader, DownloaderError};
-use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
+use indexer::{FetchRequest, Fetcher, IndexerError, RegistrySnapshot};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
@@ -120,8 +120,15 @@ impl GatedDownloader {
 }
 
 impl Downloader for GatedDownloader {
-    fn add(&self, _torrent: &Torrent) -> Result<(), DownloaderError> {
-        Ok(())
+    fn submit_verified(
+        &self,
+        payload: &downloader::SubmitPayload,
+        _options: &downloader::SubmitOptions,
+    ) -> Result<downloader::ClientSubmitResult, DownloaderError> {
+        Ok(downloader::ClientSubmitResult::Added {
+            already_owned: false,
+            info_hash: payload.info_hash().to_string(),
+        })
     }
 
     fn completed_files(
@@ -150,8 +157,15 @@ impl Downloader for GatedDownloader {
 struct NoopDownloader;
 
 impl Downloader for NoopDownloader {
-    fn add(&self, _torrent: &Torrent) -> Result<(), DownloaderError> {
-        Ok(())
+    fn submit_verified(
+        &self,
+        payload: &downloader::SubmitPayload,
+        _options: &downloader::SubmitOptions,
+    ) -> Result<downloader::ClientSubmitResult, DownloaderError> {
+        Ok(downloader::ClientSubmitResult::Added {
+            already_owned: false,
+            info_hash: payload.info_hash().to_string(),
+        })
     }
 
     fn completed_files(
@@ -169,7 +183,11 @@ impl Downloader for NoopDownloader {
 struct UnavailableDownloader;
 
 impl Downloader for UnavailableDownloader {
-    fn add(&self, _torrent: &Torrent) -> Result<(), DownloaderError> {
+    fn submit_verified(
+        &self,
+        _payload: &downloader::SubmitPayload,
+        _options: &downloader::SubmitOptions,
+    ) -> Result<downloader::ClientSubmitResult, DownloaderError> {
         Err(DownloaderError::Message("qBittorrent is offline".into()))
     }
 
@@ -213,7 +231,7 @@ fn make_state(
     ApiState::new(
         Store::open(root.join("data")).unwrap(),
         TOKEN.into(),
-        ProfileSet::load(None).unwrap(),
+        RegistrySnapshot::builtin().unwrap(),
         Arc::new(NoFetch),
         downloader,
     )

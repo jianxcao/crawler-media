@@ -40,7 +40,11 @@ mod watch_intake;
 mod watch_ledger;
 mod watch_scrape;
 pub mod worker;
+#[doc(hidden)]
+pub use check_in::run as check_in_run_for_test;
 pub use scrape_store::ScrapeStoreExt;
+#[doc(hidden)]
+pub use watch_intake::run as watch_intake_run_for_test;
 #[doc(hidden)]
 pub use worker::{page_is_full_and_irrelevant, search_keywords_for};
 mod admit;
@@ -65,6 +69,7 @@ pub mod library_presence;
 /// the result is NOT an authorization decision).
 pub mod library_reconciliation;
 pub mod maintenance;
+pub mod maintenance_window;
 pub mod management;
 pub mod marker_resolver;
 pub mod media_posters;
@@ -72,6 +77,7 @@ pub mod media_server_provider;
 pub mod metadata_service;
 pub(crate) mod pending_reconcile;
 pub mod playback_events;
+pub mod plugins;
 mod poster;
 mod poster_fetch;
 pub(crate) mod probe_wait;
@@ -102,6 +108,7 @@ pub mod blocking_budget;
 pub mod cli;
 pub mod config;
 pub mod douban_http;
+pub mod download_service;
 pub mod fs_watcher;
 #[cfg(test)]
 mod fs_watcher_tests;
@@ -121,11 +128,19 @@ pub mod tvdb_http;
 pub mod user_agent;
 
 pub use config::ServerConfig;
+pub use download_service::ApiDownloadService;
+pub use downloader::{
+    DownloadOpContext, DownloadOutcome, DownloadSubmitError, DownloadSubmitter, FrozenDownloadPlan,
+    SubmissionPurpose, TorrentSource,
+};
 pub use dynamic_downloader::DynamicDownloader;
 pub use fs_watcher::spawn_fs_watcher;
 pub use http::notify::notify_transport::NotifyTransport;
 pub use job_loop::{spawn_job_loop, spawn_job_loop_with, spawn_job_loop_with_lease};
-pub use management::{ApiState, router};
+pub use management::{ApiState, ApiStateBootstrapOptions, router};
+pub use plugins::entrypoints::*;
+pub use plugins::events::PluginEventDispatcherHandle;
+pub use plugins::{PluginInvocationRole, SubmitPluginCommand};
 pub use runtime_downloader::{ChosenDownloader, DownloaderEnv, choose_downloader};
 pub use store::{ResolvedResume, Store};
 pub use subtitle_delivery::{SubtitleDelivery, SubtitleRequest, SubtitleServiceError};

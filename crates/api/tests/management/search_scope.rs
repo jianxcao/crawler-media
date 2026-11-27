@@ -4,7 +4,7 @@ use api::{ApiState, Store, router};
 use axum::body::to_bytes;
 use axum::http::StatusCode;
 use downloader::MemoryDownloader;
-use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
+use indexer::{FetchRequest, Fetcher, IndexerError, RegistrySnapshot};
 use parking_lot::Mutex;
 use serde_json::{Value, json};
 use tower::ServiceExt;
@@ -34,7 +34,7 @@ async fn manual_search_applies_categories_and_private_history_for_json_and_sse()
         ApiState::new(
             Store::open(tmp.path().join("data")).unwrap(),
             "management-secret".into(),
-            ProfileSet::load(None).unwrap(),
+            RegistrySnapshot::builtin().unwrap(),
             fetcher.clone(),
             Arc::new(MemoryDownloader::new(tmp.path().join("stage"))),
         )
@@ -135,7 +135,7 @@ async fn empty_keyword_browse_works_for_json_and_stream_without_history() {
         ApiState::new(
             Store::open(tmp.path().join("data")).unwrap(),
             "management-secret".into(),
-            ProfileSet::load(None).unwrap(),
+            RegistrySnapshot::builtin().unwrap(),
             fetcher.clone(),
             Arc::new(MemoryDownloader::new(tmp.path().join("stage"))),
         )

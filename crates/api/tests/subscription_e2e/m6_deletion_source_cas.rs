@@ -40,8 +40,15 @@ impl FileStatRead for PausedIdentity {
 
 struct ReadyDownloader(parking_lot::Mutex<Vec<PathBuf>>);
 impl downloader::Downloader for ReadyDownloader {
-    fn add(&self, _: &domain::Torrent) -> Result<(), downloader::DownloaderError> {
-        Ok(())
+    fn submit_verified(
+        &self,
+        payload: &downloader::SubmitPayload,
+        _options: &downloader::SubmitOptions,
+    ) -> Result<downloader::ClientSubmitResult, downloader::DownloaderError> {
+        Ok(downloader::ClientSubmitResult::Added {
+            already_owned: false,
+            info_hash: payload.info_hash().to_string(),
+        })
     }
     fn completed_files(
         &self,

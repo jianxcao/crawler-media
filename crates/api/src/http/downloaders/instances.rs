@@ -100,6 +100,32 @@ fn downloader_json_with_store(row: &crate::store::DownloaderRow, store: &crate::
     downloader_json_with_meta(row, status, last_error)
 }
 
+fn downloader_admin(store: &crate::Store, user_id: domain::UserId) -> bool {
+    match store.user_role(user_id) {
+        Ok(role) => role == "admin",
+        Err(error) => {
+            tracing::error!(%user_id, %error, "Failed to resolve Downloader credential access");
+            false
+        }
+    }
+}
+
+fn downloader_public(
+    row: &crate::store::DownloaderRow,
+    store: &crate::Store,
+    admin: bool,
+) -> Value {
+    let mut v = downloader_json_with_store(row, store);
+    if !admin {
+        v["url"] = json!("");
+        v["username"] = Value::Null;
+        v["has_api_key"] = json!(false);
+        v["has_password"] = json!(false);
+        v["last_error"] = Value::Null;
+    }
+    v
+}
+
 fn validate_auth_type(kind: Option<&str>, auth_type: Option<&str>) -> Result<(), &'static str> {
     if let Some(auth) = auth_type {
         if !matches!(auth, "password" | "apikey") {
@@ -125,7 +151,10 @@ fn parse_path_maps(input: Vec<PathMapInput>) -> Vec<downloader::PathMap> {
         .collect()
 }
 
-pub(crate) async fn list_downloaders(State(state): State<ApiState>) -> Response {
+pub(crate) async fn list_downloaders(
+    State(state): State<ApiState>,
+    axum::Extension(user_id): axum::Extension<domain::UserId>,
+) -> Response {
     crate::http::store_wait::store_read(&state, &[store::Db::App], move |store| {
         let rows = match store.list_downloaders() {
             Ok(rows) => rows,
@@ -137,9 +166,10 @@ pub(crate) async fn list_downloaders(State(state): State<ApiState>) -> Response 
                 );
             }
         };
+        let admin = downloader_admin(&store, user_id);
         ok_list(
             rows.iter()
-                .map(|r| downloader_json_with_store(r, &store))
+                .map(|r| downloader_public(r, &store, admin))
                 .collect(),
         )
         .into_response()
@@ -214,6 +244,7 @@ pub(crate) async fn create_downloader(
 
 pub(crate) async fn get_downloader(
     State(state): State<ApiState>,
+    axum::Extension(user_id): axum::Extension<domain::UserId>,
     Path(id): Path<String>,
 ) -> Response {
     let id = match DownloaderId::from_str(&id) {
@@ -228,7 +259,10 @@ pub(crate) async fn get_downloader(
     };
     crate::http::store_wait::store_read(&state, &[store::Db::App], move |store| {
         match store.get_downloader(id) {
-            Ok(Some(row)) => ok(downloader_json_with_store(&row, &store)).into_response(),
+            Ok(Some(row)) => {
+                let admin = downloader_admin(&store, user_id);
+                ok(downloader_public(&row, &store, admin)).into_response()
+            }
             Ok(None) => err(StatusCode::NOT_FOUND, "downloader.missing", "下载器不存在"),
             Err(error) => err(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -387,10 +421,17 @@ pub(crate) async fn delete_downloader(
         let _ = store.delete_setting(&format!("downloader.{id}.verified"));
         let _ = store.delete_setting(&format!("downloader.{id}.last_error"));
         match store.delete_downloader(id) {
-            Ok(true) => Ok(store.mark_pending_orphaned(id).unwrap_or_else(|error| {
-                tracing::warn!(%id, %error, "标记已删除下载器的 pending 失败");
-                0
-            })),
+            Ok(true) => {
+                if let Err(error) =
+                    store.retire_deleted_downloader_records(id, crate::job_loop::unix_now())
+                {
+                    tracing::warn!(%id, %error, "清理已删除下载器的操作与配额记录失败");
+                }
+                Ok(store.mark_pending_orphaned(id).unwrap_or_else(|error| {
+                    tracing::warn!(%id, %error, "标记已删除下载器的 pending 失败");
+                    0
+                }))
+            }
             _ => Err(err(
                 StatusCode::NOT_FOUND,
                 "downloader.missing",

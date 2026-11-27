@@ -64,7 +64,7 @@ fn recent_sidecar_export_survives_retention_until_its_millisecond_timestamp() {
     let state = crate::management::ApiState::new(
         store,
         "test-token".into(),
-        indexer::ProfileSet::load(None).unwrap(),
+        indexer::RegistrySnapshot::builtin().unwrap(),
         Arc::new(EmptyFetcher),
         Arc::new(downloader::MemoryDownloader::new(temp.path().join("stage"))),
     )

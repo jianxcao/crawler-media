@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use api::HttpFetcher;
 use domain::SubscribeFacts;
 use downloader::{QbitConfig, QbitDownloader};
-use indexer::{Indexer, ProfileSet};
+use indexer::{Indexer, RegistrySnapshot};
 use library::TransferMode;
 use subscribe::{RunInput, run};
 use support::{choose, env, print_hits, site, subscribe_bundle};
@@ -42,7 +42,10 @@ fn run_live() -> Result<(), Box<dyn std::error::Error>> {
         Some(env("PTER_COOKIE")),
         None,
     );
-    let indexer = Indexer::new(ProfileSet::load(overlay.as_deref())?, Arc::new(HttpFetcher));
+    let indexer = Indexer::new(
+        RegistrySnapshot::load_with_overlay(overlay.as_deref())?,
+        Arc::new(HttpFetcher::new()),
+    );
 
     println!("searching M-Team for {keyword:?}");
     let mt = indexer.search(&[mteam], &keyword);
@@ -85,10 +88,13 @@ fn run_live() -> Result<(), Box<dyn std::error::Error>> {
             transfer_mode: Some(TransferMode::Copy),
             scrape: true,
             hooks: None,
+            policy_hooks: None,
+            submitter: None,
             naming: None,
             preserve_removed: false,
             overlap: Default::default(),
             absolute: None,
+            renamed_destinations: Default::default(),
         })?;
         println!(
             "run files={} completed={}",

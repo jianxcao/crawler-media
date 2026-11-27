@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use axum::http::{Request, StatusCode};
 use domain::{Media, MediaId, MediaKind, Torrent};
 use downloader::{Downloader, DownloaderError};
-use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
+use indexer::{FetchRequest, Fetcher, IndexerError, RegistrySnapshot};
 use media::CatalogHit;
 use tower::ServiceExt;
 
@@ -72,8 +72,15 @@ impl ImageFetcher for MockFetcher {
 struct NullDownloader;
 
 impl Downloader for NullDownloader {
-    fn add(&self, _: &Torrent) -> Result<(), DownloaderError> {
-        Ok(())
+    fn submit_verified(
+        &self,
+        payload: &downloader::SubmitPayload,
+        _options: &downloader::SubmitOptions,
+    ) -> Result<downloader::ClientSubmitResult, DownloaderError> {
+        Ok(downloader::ClientSubmitResult::Added {
+            already_owned: false,
+            info_hash: payload.info_hash().to_string(),
+        })
     }
     fn completed_files(&self, _: &Torrent) -> Result<Vec<std::path::PathBuf>, DownloaderError> {
         Ok(Vec::new())
@@ -121,7 +128,7 @@ async fn media_poster_route_serves_public_bytes_and_caches_on_disk() {
     let state = ApiState::new(
         store,
         "test-secret".into(),
-        ProfileSet::load(None).unwrap(),
+        RegistrySnapshot::builtin().unwrap(),
         Arc::new(NullFetcher),
         Arc::new(NullDownloader),
     )

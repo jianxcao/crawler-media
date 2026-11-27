@@ -7,7 +7,7 @@ use axum::{
     http::{Request, StatusCode},
 };
 use domain::MediaKind;
-use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
+use indexer::{FetchRequest, Fetcher, IndexerError, RegistrySnapshot};
 use serde_json::Value;
 use tower::ServiceExt;
 
@@ -27,7 +27,7 @@ async fn facets_obey_worker_budget_and_recover_after_capacity_returns() {
     let state = ApiState::new(
         store,
         "secret".into(),
-        ProfileSet::load(None).unwrap(),
+        RegistrySnapshot::builtin().unwrap(),
         Arc::new(NoFetch),
         Arc::new(downloader::MemoryDownloader::new(tmp.path().join("stage"))),
     )

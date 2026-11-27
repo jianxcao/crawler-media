@@ -6,7 +6,7 @@ use axum::{
 };
 use domain::{Media, MediaId, MediaKind};
 use downloader::MemoryDownloader;
-use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
+use indexer::{FetchRequest, Fetcher, IndexerError, RegistrySnapshot};
 use media::{CatalogHit, CountryRow, PersonDetails};
 use serde_json::Value;
 use std::sync::{
@@ -142,7 +142,7 @@ fn fixture(source: Arc<dyn Catalog>) -> (tempfile::TempDir, axum::Router) {
     let state = ApiState::new(
         Store::open(dir.path().join("data")).unwrap(),
         TOKEN.into(),
-        ProfileSet::load(None).unwrap(),
+        RegistrySnapshot::builtin().unwrap(),
         Arc::new(Offline),
         Arc::new(MemoryDownloader::new(dir.path().join("stage"))),
     )

@@ -16,7 +16,12 @@ downloader.workspace = true
 filter.workspace = true
 jobs.workspace = true
 hooks.workspace = true
+plugin-api.workspace = true
+plugin-host.workspace = true
+plugin-package.workspace = true
+plugin-cli.workspace = true
 indexer.workspace = true
+net-guard.workspace = true
 library.workspace = true
 marker.workspace = true
 media.workspace = true
@@ -49,12 +54,16 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 tracing-appender.workspace = true
 sha2.workspace = true
+encoding_rs.workspace = true
 libc.workspace = true
 
 [dev-dependencies]
 store = { workspace = true, features = ["test-support"] }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
+blake2 = "0.10"
+crc32fast = "1"
+ring = "0.17"
 
 [[bin]]
 name = "crawler-media"
@@ -547,3 +556,35 @@ path = "tests/watch_stats_regression.rs"
 [[test]]
 name = "write_admission"
 path = "tests/write_admission.rs"
+
+[[test]]
+name = "plugin_boost"
+path = "tests/plugin_boost.rs"
+
+[[test]]
+name = "plugin_slice_e_r4"
+path = "tests/plugin_slice_e_r4.rs"
+
+[[test]]
+name = "plugin_slice_d_r4"
+path = "tests/plugin_slice_d_r4/main.rs"
+
+[[test]]
+name = "plugin_slice_d_r5"
+path = "tests/plugin_slice_d_r5/main.rs"
+
+[[test]]
+name = "plugin_slice_d_r6"
+path = "tests/plugin_slice_d_r6/main.rs"
+
+[[test]]
+name = "plugin_slice_e_r5"
+path = "tests/plugin_slice_e_r5/main.rs"
+
+[[test]]
+name = "plugin_slice_e_r6"
+path = "tests/plugin_slice_e_r6/main.rs"
+
+[[test]]
+name = "plugin_slice_e_r8"
+path = "tests/plugin_slice_e_r8/main.rs"

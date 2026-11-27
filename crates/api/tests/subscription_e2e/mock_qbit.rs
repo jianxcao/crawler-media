@@ -109,7 +109,7 @@ impl MockQbit {
         let shared = state.clone();
         let server = crate::lifecycle::FakeServer::start(move |request, stream| {
             before_request();
-            let (status, body, extra) = shared.route(&request.raw);
+            let (status, body, extra) = shared.route(&request.raw, &request.body);
             crate::lifecycle::respond(
                 stream,
                 status,
@@ -203,7 +203,7 @@ impl MockQbit {
 }
 
 impl MockQbitState {
-    fn route(&self, req: &str) -> (&'static str, String, &'static str) {
+    fn route(&self, req: &str, body_bytes: &[u8]) -> (&'static str, String, &'static str) {
         if req.starts_with("POST /api/v2/auth/login") {
             self.logins.fetch_add(1, Ordering::SeqCst);
             if self.reject_login.load(Ordering::SeqCst) {
@@ -231,7 +231,7 @@ impl MockQbitState {
             return ("403 Forbidden", "Forbidden".into(), "");
         }
         if let Some(response) = self
-            .create_torrent(req)
+            .create_torrent(req, body_bytes)
             .or_else(|| self.read_torrents(req))
             .or_else(|| self.control_torrent(req))
         {
@@ -242,7 +242,11 @@ impl MockQbitState {
         }
         ("200 OK", "Ok.".into(), "")
     }
-    fn create_torrent(&self, req: &str) -> Option<(&'static str, String, &'static str)> {
+    fn create_torrent(
+        &self,
+        req: &str,
+        body_bytes: &[u8],
+    ) -> Option<(&'static str, String, &'static str)> {
         if req.starts_with("POST /api/v2/torrents/add ")
             || req.starts_with("POST /api/v2/torrents/add?")
         {
@@ -254,8 +258,12 @@ impl MockQbitState {
                 multipart_field(req, "urls").unwrap_or_default()
             };
             let n = self.next.fetch_add(1, Ordering::SeqCst);
+            let derived_hash = multipart_bytes(body_bytes, "torrents")
+                .and_then(downloader::torrent_info_hash)
+                .or_else(|| downloader::magnet_info_hash(&source))
+                .unwrap_or_else(|| format!("{n:040x}"));
             self.tasks.lock().push(Task {
-                hash: format!("{n:040x}"),
+                hash: derived_hash,
                 name: format!("task-{n}"),
                 tags: tags
                     .split(',')
@@ -413,6 +421,21 @@ pub fn read_request(stream: &mut TcpStream) -> String {
         }
     }
     String::from_utf8_lossy(&request).into_owned()
+}
+
+fn multipart_bytes<'a>(raw: &'a [u8], name: &str) -> Option<&'a [u8]> {
+    let marker = format!("name=\"{name}\"");
+    let start = raw
+        .windows(marker.len())
+        .position(|w| w == marker.as_bytes())?;
+    let rest = &raw[start..];
+    let body_start = rest.windows(4).position(|w| w == b"\r\n\r\n")? + 4;
+    let body = &rest[body_start..];
+    let end = body
+        .windows(4)
+        .position(|w| w == b"\r\n--")
+        .unwrap_or(body.len());
+    Some(&body[..end])
 }
 
 fn multipart_field(req: &str, name: &str) -> Option<String> {

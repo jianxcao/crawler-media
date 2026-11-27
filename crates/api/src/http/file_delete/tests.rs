@@ -282,7 +282,7 @@ fn removal_waits_for_an_admitted_file_deletion_before_finishing() {
     let state = crate::ApiState::new_arc(
         f.store.clone(),
         "secret".into(),
-        indexer::ProfileSet::load(None).unwrap(),
+        indexer::RegistrySnapshot::builtin().unwrap(),
         Arc::new(NoFetch),
         Arc::new(downloader::MemoryDownloader::new(
             f._dir.path().join("stage"),

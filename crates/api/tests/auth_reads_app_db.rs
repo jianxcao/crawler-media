@@ -23,7 +23,7 @@ use api::{ApiState, Store, router};
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use downloader::MemoryDownloader;
-use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
+use indexer::{FetchRequest, Fetcher, IndexerError, RegistrySnapshot};
 use media_server::provider::QueryTiming;
 use serde_json::Value;
 use tower::ServiceExt;
@@ -43,7 +43,7 @@ fn fixture() -> (tempfile::TempDir, ApiState) {
     let state = ApiState::new(
         store,
         TOKEN.into(),
-        ProfileSet::load(None).unwrap(),
+        RegistrySnapshot::builtin().unwrap(),
         Arc::new(NoFetch),
         Arc::new(MemoryDownloader::new(dir.path().join("stage"))),
     )

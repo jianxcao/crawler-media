@@ -7,7 +7,7 @@ use api::{ApiState, Store, router};
 use axum::http::StatusCode;
 use domain::SubscribeId;
 use downloader::{Downloader, DownloaderError, MemoryDownloader};
-use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
+use indexer::{FetchRequest, Fetcher, IndexerError, RegistrySnapshot};
 use parking_lot::Mutex;
 use rusqlite::Connection;
 use serde_json::{Value, json};
@@ -30,11 +30,12 @@ async fn pausing_during_site_search_prevents_the_search_from_adding_torrents() {
         ApiState::new(
             Store::open(tmp.path().join("data")).unwrap(),
             "management-secret".into(),
-            ProfileSet::load(None).unwrap(),
+            RegistrySnapshot::builtin().unwrap(),
             fetcher,
             downloader.clone(),
         )
-        .unwrap(),
+        .unwrap()
+        .with_torrent_payload_fetcher(Arc::new(super::common::StubPayloadFetcher)),
     );
     create_site(&app).await;
     let created = json_data(
@@ -121,7 +122,7 @@ async fn manual_search_rejects_a_paused_subscription() {
         ApiState::new(
             Store::open(tmp.path().join("data")).unwrap(),
             "management-secret".into(),
-            ProfileSet::load(None).unwrap(),
+            RegistrySnapshot::builtin().unwrap(),
             fetcher,
             Arc::new(MemoryDownloader::new(tmp.path().join("stage"))),
         )
@@ -202,7 +203,7 @@ async fn deleting_subscription_waits_for_search_submission_and_cleans_its_torren
     );
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(tick_response.status(), StatusCode::OK);
-    assert!(!fixture.downloader.inner.added().is_empty());
+    assert!(!fixture.downloader.inner.submitted().is_empty());
     assert_eq!(fixture.downloader.inner.removed().len(), 1);
     let store = Store::open(tmp.path().join("data")).unwrap();
     let id = SubscribeId::from_str(&fixture.id).unwrap();
@@ -234,11 +235,12 @@ async fn deletion_fixture(root: &Path) -> DeletionFixture {
         ApiState::new(
             Store::open(root.join("data")).unwrap(),
             "management-secret".into(),
-            ProfileSet::load(None).unwrap(),
+            RegistrySnapshot::builtin().unwrap(),
             fetcher,
             downloader.clone(),
         )
-        .unwrap(),
+        .unwrap()
+        .with_torrent_payload_fetcher(Arc::new(super::common::StubPayloadFetcher)),
     );
     create_site(&app).await;
     let created = super::common::create_subscribe(&app, "search").await;
@@ -289,7 +291,19 @@ struct GatedDownloader {
 }
 
 impl Downloader for GatedDownloader {
-    fn add(&self, torrent: &domain::Torrent) -> Result<(), DownloaderError> {
+    fn remember_identity(
+        &self,
+        torrent: &domain::Torrent,
+        hash: &str,
+    ) -> Result<(), DownloaderError> {
+        self.inner.remember_identity(torrent, hash)
+    }
+
+    fn submit_verified(
+        &self,
+        payload: &downloader::SubmitPayload,
+        options: &downloader::SubmitOptions,
+    ) -> Result<downloader::ClientSubmitResult, DownloaderError> {
         let started = { self.started.lock().take() };
         if let Some(started) = started {
             let resume = { self.resume.lock().take().unwrap() };
@@ -298,7 +312,7 @@ impl Downloader for GatedDownloader {
                 .recv_timeout(std::time::Duration::from_secs(30))
                 .expect("test must resume the gated downloader");
         }
-        self.inner.add(torrent)
+        self.inner.submit_verified(payload, options)
     }
 
     fn remove(&self, torrent: &domain::Torrent, delete_files: bool) -> Result<(), DownloaderError> {

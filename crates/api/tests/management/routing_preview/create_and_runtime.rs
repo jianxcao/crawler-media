@@ -7,7 +7,7 @@ use api::{ApiState, Store, router};
 use axum::http::StatusCode;
 use domain::{Media, MediaKind};
 use downloader::MemoryDownloader;
-use indexer::ProfileSet;
+use indexer::RegistrySnapshot;
 use parking_lot::Mutex;
 use serde_json::{Value, json};
 use tower::ServiceExt;
@@ -79,7 +79,7 @@ async fn create_subscription_survives_slow_contended_catalog_cache() {
     let state = ApiState::new_arc(
         store.clone(),
         "management-secret".into(),
-        ProfileSet::load(None).unwrap(),
+        RegistrySnapshot::builtin().unwrap(),
         Arc::new(Fixtures {
             requests: Mutex::new(Vec::new()),
             bodies: HashMap::new(),
@@ -263,7 +263,7 @@ fn cn_transfer_app(tmp: &tempfile::TempDir) -> axum::Router {
     let state = ApiState::new_arc(
         store,
         "management-secret".into(),
-        ProfileSet::load(None).unwrap(),
+        RegistrySnapshot::builtin().unwrap(),
         Arc::new(Fixtures {
             requests: Mutex::new(Vec::new()),
             bodies: HashMap::from([("search", CN_SEARCH_HTML)]),
@@ -271,7 +271,8 @@ fn cn_transfer_app(tmp: &tempfile::TempDir) -> axum::Router {
         downloader,
     )
     .unwrap()
-    .with_catalog(catalog);
+    .with_catalog(catalog)
+    .with_torrent_payload_fetcher(Arc::new(StubPayloadFetcher));
     router(state)
 }
 
@@ -407,7 +408,7 @@ async fn concurrent_deletion_of_auto_matched_library_falls_back_to_default_libra
     let state = ApiState::new_arc(
         store.clone(),
         "management-secret".into(),
-        ProfileSet::load(None).unwrap(),
+        RegistrySnapshot::builtin().unwrap(),
         Arc::new(Fixtures {
             requests: Mutex::new(Vec::new()),
             bodies: HashMap::new(),
@@ -482,7 +483,7 @@ async fn auto_matched_library_hidden_during_metadata_io_falls_back_to_default_li
     let state = ApiState::new_arc(
         store,
         "management-secret".into(),
-        ProfileSet::load(None).unwrap(),
+        RegistrySnapshot::builtin().unwrap(),
         Arc::new(Fixtures {
             requests: Mutex::new(Vec::new()),
             bodies: HashMap::new(),

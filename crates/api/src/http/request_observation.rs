@@ -45,6 +45,12 @@ const SECRET_QUERY_KEYS: &[&str] = &[
     "access_token",
     "access-token",
     "refresh_token",
+    "reauth_token",
+    "x-plugin-reauth",
+    "x_plugin_reauth",
+    "consent_token",
+    "cookie",
+    "mc_session",
     "password",
     "passwd",
     "secret",
@@ -247,6 +253,14 @@ mod tests {
         assert_eq!(
             redact_query("q=hello&Access_Token=abc&page=2"),
             "q=hello&Access_Token=[redacted]&page=2"
+        );
+        assert_eq!(
+            redact_query("reauth_token=r1&X-Plugin-Reauth=r2&consent_token=c1"),
+            "reauth_token=[redacted]&X-Plugin-Reauth=[redacted]&consent_token=[redacted]"
+        );
+        assert_eq!(
+            redact_query("cookie=c1&mc_session=s1&x_plugin_reauth=r3&%43ookie=c2"),
+            "cookie=[redacted]&mc_session=[redacted]&x_plugin_reauth=[redacted]&Cookie=[redacted]"
         );
         assert_eq!(redact_query("q=hello&page=2"), "q=hello&page=2");
         assert_eq!(redact_query(""), "");

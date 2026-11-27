@@ -23,7 +23,7 @@ pub(crate) async fn list_sites(
             sites
                 .iter()
                 .map(|site| {
-                    let auth = auth_type_for(site, indexer.profile(&site.profile_id));
+                    let auth = auth_type_for(site, indexer.profile(&site.profile_id).as_deref());
                     site_public(site, auth, admin)
                 })
                 .collect(),
@@ -51,14 +51,14 @@ pub(crate) async fn get_site(
 ) -> Response {
     let id = match SiteId::from_str(&id) {
         Ok(id) => id,
-        Err(_) => return err(StatusCode::BAD_REQUEST, "site.invalid", "站点 id 无效"),
+        Err(_) => return err(StatusCode::NOT_FOUND, "site.missing", "站点不存在"),
     };
     let indexer = state.indexer.clone();
     crate::http::store_wait::store_read(&state, &[store::Db::App], move |store| {
         let Some(site) = store.get_site(id).ok().flatten() else {
             return err(StatusCode::NOT_FOUND, "site.missing", "站点不存在");
         };
-        let auth = auth_type_for(&site, indexer.profile(&site.profile_id));
+        let auth = auth_type_for(&site, indexer.profile(&site.profile_id).as_deref());
         ok(site_public(&site, auth, site_admin(&store, user_id))).into_response()
     })
     .await

@@ -56,7 +56,7 @@ fn holder(f: &Fixture, readonly: bool) -> std::thread::JoinHandle<()> {
 #[test]
 fn site_downloader_routes_keep_executor_responsive() {
     let mut blocked = Vec::new();
-    for index in 0..23 {
+    for index in 0..21 {
         let f = Fixture::new();
         let (method, uri, body, expected) = route(&f, index);
         let app = router(f.state.clone());
@@ -87,7 +87,7 @@ fn site_downloader_routes_keep_executor_responsive() {
 
 #[test]
 fn site_downloader_mutations_recheck_admission_after_lock_wait() {
-    for index in 5..14 {
+    for index in 5..13 {
         let f = Fixture::new();
         let (method, uri, body, _) = route(&f, index);
         let app = router(f.state.clone());
@@ -150,7 +150,7 @@ fn update_site_after_conflict(method: &str, body: Value) -> domain::Site {
                     let mut site = app.get_site(site_id)?.unwrap();
                     site.enabled = false;
                     site.cookie = Some("refreshed-cookie".into());
-                    assert!(app.save_site(&site)?);
+                    assert!(app.save_site(&site, store::ManualCredentialWrite::Replace)?);
                     Ok(())
                 })
                 .unwrap();

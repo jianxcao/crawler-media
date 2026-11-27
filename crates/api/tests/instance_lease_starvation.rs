@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use api::{ApiState, Store, job_loop};
 use downloader::MemoryDownloader;
-use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
+use indexer::{FetchRequest, Fetcher, IndexerError, RegistrySnapshot};
 
 struct NoFetch;
 
@@ -29,7 +29,7 @@ fn open(root: &Path) -> ApiState {
     ApiState::new(
         Store::open(root.join("data")).unwrap(),
         "lease-secret".into(),
-        ProfileSet::load(None).unwrap(),
+        RegistrySnapshot::builtin().unwrap(),
         Arc::new(NoFetch),
         Arc::new(MemoryDownloader::new(root.join("stage"))),
     )
@@ -132,7 +132,7 @@ async fn standby_instance_defers_startup_writes_until_lease_acquired() {
             .unwrap();
             let state = ApiState::new_arc_with_admin_bootstrap_writable(
                 store,
-                ProfileSet::load(None).unwrap(),
+                RegistrySnapshot::builtin().unwrap(),
                 Arc::new(NoFetch),
                 Arc::new(MemoryDownloader::new(stage_dir)),
                 action,

@@ -11,7 +11,7 @@ mod common;
 
 use api::{ApiState, Store, router};
 use axum::http::StatusCode;
-use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
+use indexer::{FetchRequest, Fetcher, IndexerError, RegistrySnapshot};
 use serde_json::{Value, json};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
@@ -24,6 +24,22 @@ impl Fetcher for SlowFetch {
     fn fetch(&self, _: &FetchRequest) -> Result<String, IndexerError> {
         std::thread::sleep(Duration::from_millis(500));
         Ok(common::nexusphp().into())
+    }
+}
+
+struct StubPayloadFetcher;
+
+impl api::download_service::fetcher::TorrentPayloadFetcher for StubPayloadFetcher {
+    fn prepare(
+        &self,
+        _source: &downloader::TorrentSource,
+        _purpose: downloader::SubmissionPurpose,
+        _policy: &net_guard::TargetPolicy,
+    ) -> Result<downloader::PreparedTorrent, downloader::TorrentFetchError> {
+        let bytes = b"d8:announce20:https://tracker/test4:infod6:lengthi1024e4:name4:test12:piece lengthi16384e6:pieces20:01234567890123456789ee";
+        Ok(downloader::PreparedTorrent::TorrentFile(
+            downloader::parse_verified_torrent(bytes).unwrap(),
+        ))
     }
 }
 
@@ -47,13 +63,14 @@ impl Fixture {
         let state = ApiState::new(
             Store::open(tmp.path().join("data")).unwrap(),
             "management-secret".into(),
-            ProfileSet::load(None).unwrap(),
+            RegistrySnapshot::builtin().unwrap(),
             fetcher.clone(),
             downloader.unwrap_or_else(|| {
                 Arc::new(downloader::MemoryDownloader::new(tmp.path().join("stage")))
             }),
         )
-        .unwrap();
+        .unwrap()
+        .with_torrent_payload_fetcher(Arc::new(StubPayloadFetcher));
         let app = router(state.clone());
         let created = runtime().block_on(async {
             common::create_site(&app).await;

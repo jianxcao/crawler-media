@@ -38,7 +38,7 @@ fn watcher_retry_scans_other_library_while_one_is_frozen() {
     let state = crate::management::ApiState::new(
         store,
         "test-token".into(),
-        indexer::ProfileSet::load(None).unwrap(),
+        indexer::RegistrySnapshot::builtin().unwrap(),
         Arc::new(EmptyFetcher),
         Arc::new(downloader::MemoryDownloader::new(temp.path().join("stage"))),
     )
@@ -86,7 +86,7 @@ fn watcher_retry_scans_after_reconfiguration_releases_library() {
     let state = crate::management::ApiState::new(
         store,
         "test-token".into(),
-        indexer::ProfileSet::load(None).unwrap(),
+        indexer::RegistrySnapshot::builtin().unwrap(),
         Arc::new(EmptyFetcher),
         Arc::new(downloader::MemoryDownloader::new(temp.path().join("stage"))),
     )
@@ -132,7 +132,7 @@ fn watcher_retry_eventually_scans_after_store_contention() {
     let state = crate::management::ApiState::new(
         store,
         "test-token".into(),
-        indexer::ProfileSet::load(None).unwrap(),
+        indexer::RegistrySnapshot::builtin().unwrap(),
         Arc::new(EmptyFetcher),
         Arc::new(downloader::MemoryDownloader::new(temp.path().join("stage"))),
     )
@@ -321,7 +321,7 @@ fn realtime_library_root_matches_nested_strm_path() {
     let state = crate::management::ApiState::new(
         store,
         "test-token".into(),
-        indexer::ProfileSet::load(None).unwrap(),
+        indexer::RegistrySnapshot::builtin().unwrap(),
         Arc::new(EmptyFetcher),
         Arc::new(downloader::MemoryDownloader::new(temp.path().join("stage"))),
     )
@@ -364,7 +364,7 @@ fn rescanning_a_show_queues_only_the_new_episode() {
     let state = crate::management::ApiState::new(
         store,
         "test-token".into(),
-        indexer::ProfileSet::load(None).unwrap(),
+        indexer::RegistrySnapshot::builtin().unwrap(),
         Arc::new(EmptyFetcher),
         Arc::new(downloader::MemoryDownloader::new(temp.path().join("stage"))),
     )
@@ -661,7 +661,7 @@ async fn watch_event_enqueues_a_targeted_scan_through_the_coordinator() {
     let state = crate::management::ApiState::new(
         store,
         "test-token".into(),
-        indexer::ProfileSet::load(None).unwrap(),
+        indexer::RegistrySnapshot::builtin().unwrap(),
         Arc::new(EmptyFetcher),
         Arc::new(downloader::MemoryDownloader::new(temp.path().join("stage"))),
     )

@@ -7,7 +7,7 @@ use domain::{
     Coverage, FetchMode, Media, MediaId, MediaKind, Subscribe, SubscribeId, Torrent, UserRole,
 };
 use downloader::{Downloader, DownloaderError};
-use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
+use indexer::{FetchRequest, Fetcher, IndexerError, RegistrySnapshot};
 use media::CatalogHit;
 use serde_json::Value;
 use tower::ServiceExt;
@@ -53,8 +53,15 @@ impl Catalog for ForbiddenPosterCatalog {
 struct NullDownloader;
 
 impl Downloader for NullDownloader {
-    fn add(&self, _: &Torrent) -> Result<(), DownloaderError> {
-        Ok(())
+    fn submit_verified(
+        &self,
+        payload: &downloader::SubmitPayload,
+        _options: &downloader::SubmitOptions,
+    ) -> Result<downloader::ClientSubmitResult, DownloaderError> {
+        Ok(downloader::ClientSubmitResult::Added {
+            already_owned: false,
+            info_hash: payload.info_hash().to_string(),
+        })
     }
     fn completed_files(&self, _: &Torrent) -> Result<Vec<PathBuf>, DownloaderError> {
         Ok(Vec::new())
@@ -88,7 +95,7 @@ fn fixture(
     let state = ApiState::new(
         store,
         "test-secret".into(),
-        ProfileSet::load(None).unwrap(),
+        RegistrySnapshot::builtin().unwrap(),
         Arc::new(NullFetcher),
         Arc::new(NullDownloader),
     )

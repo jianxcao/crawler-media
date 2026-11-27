@@ -4,7 +4,7 @@ mod protocol_observation;
 mod query_phase;
 mod scan_catalog;
 mod state;
-mod subscribes;
+pub(crate) mod subscribes;
 
 use axum::Router;
 
@@ -12,7 +12,7 @@ pub(crate) use error::ApiError;
 pub(crate) use filters::default_filter_id;
 pub use query_phase::QueryPhaseSnapshot;
 pub(crate) use state::SubscribeDeletionReservation;
-pub use state::{ApiState, ApiStateError};
+pub use state::{ApiState, ApiStateBootstrapOptions, ApiStateError};
 pub(crate) use subscribes::run_subscribe;
 
 pub fn router(state: ApiState) -> Router {

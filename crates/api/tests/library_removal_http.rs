@@ -4,7 +4,7 @@ use axum::{
     http::{Request, StatusCode},
 };
 use downloader::MemoryDownloader;
-use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
+use indexer::{FetchRequest, Fetcher, IndexerError, RegistrySnapshot};
 use std::sync::Arc;
 use tower::ServiceExt;
 struct NoFetch;
@@ -27,7 +27,7 @@ async fn delete_returns_operation_and_status_then_preserves_files() {
     let state = ApiState::new(
         store::Store::open(temp.path().join("data")).unwrap(),
         "secret".into(),
-        ProfileSet::load(None).unwrap(),
+        RegistrySnapshot::builtin().unwrap(),
         Arc::new(NoFetch),
         Arc::new(MemoryDownloader::new(temp.path().join("stage"))),
     )

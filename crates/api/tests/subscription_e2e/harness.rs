@@ -18,6 +18,39 @@ pub(crate) use super::common::{install_fake_ffprobe, probed_video, unprobeable_v
 use super::mock_qbit::MockQbit;
 use store::test_support::{FixtureFile, publish_fixture_file};
 
+pub struct StubPayloadFetcher;
+
+impl api::download_service::fetcher::TorrentPayloadFetcher for StubPayloadFetcher {
+    fn prepare(
+        &self,
+        source: &downloader::TorrentSource,
+        purpose: downloader::SubmissionPurpose,
+        policy: &net_guard::TargetPolicy,
+    ) -> Result<downloader::PreparedTorrent, downloader::TorrentFetchError> {
+        match source {
+            downloader::TorrentSource::Http(http)
+                if !http.url.starts_with("http://127.0.0.1")
+                    && !http.url.starts_with("http://localhost") =>
+            {
+                let name = http.url.as_str();
+                let bytes = format!(
+                    "d8:announce20:https://tracker/test4:infod6:lengthi1024e4:name{}:{name}12:piece lengthi16384e6:pieces20:01234567890123456789ee",
+                    name.len()
+                );
+                Ok(downloader::PreparedTorrent::TorrentFile(
+                    downloader::parse_verified_torrent(bytes.as_bytes()).unwrap(),
+                ))
+            }
+            _ => downloader::prepare_download_payload(
+                &net_guard::NetGuardClient::new(),
+                source,
+                purpose,
+                policy,
+            ),
+        }
+    }
+}
+
 pub const TOKEN: &str = "management-secret";
 pub const MATRIX_TITLE: &str = "The.Matrix.1999.2160p.BluRay.x265-GROUP";
 
@@ -98,14 +131,25 @@ impl Harness {
     /// Simulate a process restart: a fresh ApiState (and downloader client) on
     /// the same data directory.
     pub fn restart(&mut self, client: Arc<dyn downloader::Downloader>) {
+        let qb_addr: std::net::SocketAddr = self
+            .qb
+            .url
+            .strip_prefix("http://")
+            .unwrap()
+            .parse()
+            .unwrap();
         let state = ApiState::new(
             api::Store::open(self.tmp.path().join("data")).unwrap(),
             TOKEN.into(),
-            indexer::ProfileSet::load(None).unwrap(),
+            indexer::RegistrySnapshot::builtin().unwrap(),
             self.search.clone(),
             client,
         )
-        .unwrap();
+        .unwrap()
+        .with_torrent_payload_fetcher(Arc::new(StubPayloadFetcher))
+        .with_plugin_http_policy_override(
+            net_guard::TargetPolicy::production().with_test_loopback_socket(qb_addr),
+        );
         self.app = router(state.clone());
         self.state = state;
     }
@@ -118,6 +162,8 @@ impl Harness {
         install_fake_ffprobe();
         let tmp = tempfile::tempdir().unwrap();
         let qb = MockQbit::start(&tmp.path().join("downloads"));
+        let qb_addr: std::net::SocketAddr =
+            qb.url.strip_prefix("http://").unwrap().parse().unwrap();
         let client: Arc<dyn downloader::Downloader> = match client {
             Some(client) => client,
             None => Arc::new(downloader::QbitDownloader::connect(qb.config()).unwrap()),
@@ -129,11 +175,15 @@ impl Harness {
         let state = ApiState::new(
             api::Store::open(tmp.path().join("data")).unwrap(),
             TOKEN.into(),
-            indexer::ProfileSet::load(None).unwrap(),
+            indexer::RegistrySnapshot::builtin().unwrap(),
             search.clone(),
             client,
         )
-        .unwrap();
+        .unwrap()
+        .with_torrent_payload_fetcher(Arc::new(StubPayloadFetcher))
+        .with_plugin_http_policy_override(
+            net_guard::TargetPolicy::production().with_test_loopback_socket(qb_addr),
+        );
         let state = match catalog {
             Some(catalog) => state.with_catalog(catalog),
             None => state,

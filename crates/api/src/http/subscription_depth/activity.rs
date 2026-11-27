@@ -28,6 +28,118 @@ pub(crate) async fn activities(
     }
 }
 
+fn sanitize_for_role(raw: &str, is_admin: bool) -> String {
+    if is_admin {
+        hooks::sanitize_reason(raw)
+    } else {
+        hooks::redact_urls(raw)
+    }
+}
+
+fn job_activity_item(job: &jobs::Job, is_admin: bool, fmt: fn(i64) -> String) -> Value {
+    let status = job.status.as_str();
+    let sanitized_error = job.error.as_deref().map(|e| sanitize_for_role(e, is_admin));
+    let (activity_type, message) = match (job.kind.as_str(), status) {
+        ("subscribe_search" | "subscribe_rss", "succeeded") => {
+            ("searched", "搜索完成，命中的资源已按规则评估".to_string())
+        }
+        ("transfer", "succeeded") => ("imported", "已入库完成".to_string()),
+        ("transfer", "failed") => ("import_failed", "入库失败".to_string()),
+        (kind, "failed") => (
+            "searched",
+            format!(
+                "{kind} 失败：{}",
+                sanitized_error.as_deref().unwrap_or("未知错误")
+            ),
+        ),
+        (kind, other) => (kind, format!("{kind} {other}")),
+    };
+    json!({
+        "id": job.id.to_string(),
+        "type": activity_type,
+        "message": message,
+        "kind": job.kind.as_str(),
+        "status": status,
+        "started_at": job.started_at.map(fmt),
+        "finished_at": job.finished_at.map(fmt),
+        "error": sanitized_error,
+        "wanted_item_id": Value::Null,
+    })
+}
+
+fn redact_enclosure_for_admin(raw: &str) -> String {
+    if let Ok(mut parsed) = url::Url::parse(raw) {
+        let _ = parsed.set_username("");
+        let _ = parsed.set_password(None);
+        parsed.set_query(None);
+        parsed.set_fragment(None);
+        return hooks::sanitize_reason(parsed.as_str());
+    }
+    hooks::sanitize_reason(raw)
+}
+
+fn append_plugin_activities(
+    state: &ApiState,
+    subscribe_id: domain::SubscribeId,
+    limit: usize,
+    is_admin: bool,
+    fmt: fn(i64) -> String,
+    items: &mut Vec<Value>,
+) {
+    let defers = state
+        .store
+        .list_subscribe_defers(subscribe_id, limit)
+        .unwrap_or_default();
+    let plugin_traces = state.plugins.list_subscribe_traces(subscribe_id);
+    for defer in defers {
+        let enclosure = if is_admin {
+            json!(redact_enclosure_for_admin(&defer.enclosure))
+        } else {
+            Value::Null
+        };
+        let reason_text = sanitize_for_role(&defer.reason, is_admin);
+        items.push(json!({
+            "id": format!("defer-{}", defer.defer_id),
+            "type": "deferred_candidate",
+            "message": format!("{} ({}): {}", defer.hook_id, defer.state.as_str(), reason_text),
+            "kind": defer.hook_id,
+            "status": defer.state.as_str(),
+            "started_at": fmt(defer.created_at),
+            "finished_at": fmt(defer.updated_at),
+            "error": Value::Null,
+            "wanted_item_id": Value::Null,
+            "attempt_count": defer.attempt_count,
+            "next_retry_at": fmt(defer.next_retry_at),
+            "enclosure": enclosure,
+        }));
+    }
+    for mut trace in plugin_traces {
+        let sanitized_reason = trace
+            .reason
+            .as_deref()
+            .map(|r| sanitize_for_role(r, is_admin));
+        trace.reason = sanitized_reason.clone();
+        for step in &mut trace.steps {
+            step.reason = step
+                .reason
+                .as_deref()
+                .map(|r| sanitize_for_role(r, is_admin));
+        }
+        items.push(json!({
+            "id": trace.id,
+            "type": "hook_trace",
+            "message": format!("{} -> {}", trace.hook_id, trace.decision),
+            "kind": trace.hook_id,
+            "status": trace.decision,
+            "started_at": Value::Null,
+            "finished_at": Value::Null,
+            "error": sanitized_reason,
+            "wanted_item_id": Value::Null,
+            "plugin_trace": trace,
+        }));
+    }
+}
+
 fn activities_blocking(
     state: ApiState,
     user_id: domain::UserId,
@@ -72,40 +184,17 @@ fn activities_blocking(
         }
     };
     drop(store);
+    let is_admin = state
+        .store
+        .get_user(user_id)
+        .ok()
+        .flatten()
+        .is_some_and(|u| u.role == domain::UserRole::Admin);
     let fmt = crate::store::rfc3339_from_secs;
     let mut items: Vec<Value> = jobs
         .iter()
-        .map(|job| {
-            let status = job.status.as_str();
-            let (activity_type, message) = match (job.kind.as_str(), status) {
-                ("subscribe_search" | "subscribe_rss", "succeeded") => {
-                    ("searched", "搜索完成，命中的资源已按规则评估")
-                }
-                ("transfer", "succeeded") => ("imported", "已入库完成"),
-                ("transfer", "failed") => ("import_failed", "入库失败"),
-                (kind, "failed") => (
-                    "searched",
-                    &format!(
-                        "{kind} 失败：{}",
-                        job.error.as_deref().unwrap_or("未知错误")
-                    )[..],
-                ),
-                (kind, other) => (kind, &format!("{kind} {other}")[..]),
-            };
-            json!({
-                "id": job.id.to_string(),
-                "type": activity_type,
-                "message": message,
-                "kind": job.kind.as_str(),
-                "status": status,
-                "started_at": job.started_at.map(fmt),
-                "finished_at": job.finished_at.map(fmt),
-                "error": job.error,
-                "wanted_item_id": Value::Null,
-            })
-        })
+        .map(|job| job_activity_item(job, is_admin, fmt))
         .collect();
-    // 最近一次入库事实也作为一条 imported 活动（facts 是权威来源，job 记录可能缺）。
     if facts_count > 0 {
         items.push(json!({
             "id": format!("facts-{}", subscribe.id),
@@ -119,6 +208,7 @@ fn activities_blocking(
             "wanted_item_id": Value::Null,
         }));
     }
+    append_plugin_activities(&state, subscribe.id, limit, is_admin, fmt, &mut items);
     let total = items.len();
     ok(json!({ "items": items, "total": total })).into_response()
 }

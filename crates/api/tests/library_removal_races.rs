@@ -1,6 +1,6 @@
 use api::{library_lifecycle::start_library_removal, management::ApiState};
 use downloader::MemoryDownloader;
-use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
+use indexer::{FetchRequest, Fetcher, IndexerError, RegistrySnapshot};
 use std::sync::Arc;
 
 struct NoFetch;
@@ -20,7 +20,7 @@ async fn removal_cancels_work_and_deletes_without_waiting_for_it() {
     let state = ApiState::new(
         store::Store::open(temp.path().join("data")).unwrap(),
         "test-token".into(),
-        ProfileSet::load(None).unwrap(),
+        RegistrySnapshot::builtin().unwrap(),
         Arc::new(NoFetch),
         Arc::new(MemoryDownloader::new(temp.path().join("stage"))),
     )
@@ -75,7 +75,7 @@ async fn startup_recovery_retries_failed_removal_to_completion() {
     let state = ApiState::new(
         store::Store::open(temp.path().join("data")).unwrap(),
         "test-token".into(),
-        ProfileSet::load(None).unwrap(),
+        RegistrySnapshot::builtin().unwrap(),
         Arc::new(NoFetch),
         Arc::new(MemoryDownloader::new(temp.path().join("stage"))),
     )

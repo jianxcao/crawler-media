@@ -7,7 +7,7 @@ use std::time::Duration;
 use axum::http::StatusCode;
 use domain::MediaKind;
 use downloader::MemoryDownloader;
-use indexer::ProfileSet;
+use indexer::RegistrySnapshot;
 use parking_lot::Mutex;
 use serde_json::json;
 use tower::ServiceExt;
@@ -134,7 +134,7 @@ pub(super) fn adaptive_production_state(
         .unwrap();
         api::ApiState::new_production_with_admin_bootstrap_writable(
             store,
-            ProfileSet::load(None).unwrap(),
+            RegistrySnapshot::builtin().unwrap(),
             Arc::new(common::Fixtures {
                 requests: Mutex::new(Vec::new()),
                 bodies: HashMap::new(),

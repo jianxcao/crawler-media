@@ -58,7 +58,7 @@ async fn playback_info_session_matches_snapshot_when_preference_changes() {
         let state = ApiState::new(
             Store::open(f._tmp.path().join("data")).unwrap(),
             "admin-token".into(),
-            ProfileSet::load(None).unwrap(),
+            RegistrySnapshot::builtin().unwrap(),
             Arc::new(NoFetch),
             Arc::new(MemoryDownloader::new(f._tmp.path().join("stage"))),
         )
@@ -146,7 +146,7 @@ async fn playback_info_rejects_snapshot_replaced_during_rendering() {
         let state = ApiState::new(
             Store::open(f._tmp.path().join("data")).unwrap(),
             "admin-token".into(),
-            ProfileSet::load(None).unwrap(),
+            RegistrySnapshot::builtin().unwrap(),
             Arc::new(NoFetch),
             Arc::new(MemoryDownloader::new(f._tmp.path().join("stage"))),
         )
@@ -193,7 +193,7 @@ async fn playback_info_rejects_library_hidden_during_rendering() {
         let state = ApiState::new(
             Store::open(f._tmp.path().join("data")).unwrap(),
             "admin-token".into(),
-            ProfileSet::load(None).unwrap(),
+            RegistrySnapshot::builtin().unwrap(),
             Arc::new(NoFetch),
             Arc::new(MemoryDownloader::new(f._tmp.path().join("stage"))),
         )

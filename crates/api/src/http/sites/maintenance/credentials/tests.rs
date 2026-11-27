@@ -15,7 +15,7 @@ mod api_fixture {
         let state = ApiState::new(
             crate::Store::open(tmp.path().join("data")).unwrap(),
             "credential-secret".into(),
-            indexer::ProfileSet::load(None).unwrap(),
+            indexer::RegistrySnapshot::builtin().unwrap(),
             Arc::new(NoFetch),
             Arc::new(downloader::MemoryDownloader::new(tmp.path().join("stage"))),
         )
@@ -34,6 +34,8 @@ mod api_fixture {
             downloader_id: None,
             enabled: true,
             maintenance_via: domain::MaintenanceVia::Http,
+            browser_search: false,
+            timezone: "UTC".into(),
         };
         state.store().insert_site(&site).unwrap();
         (tmp, state, site)
@@ -44,7 +46,10 @@ mod api_fixture {
 fn credential_save_rechecks_readonly_and_maintenance_after_load() {
     for maintenance in [false, true] {
         let (_tmp, state, site) = fixture();
-        let creds = AdmittedCredentials::new(&state, site.clone());
+        let creds = AdmittedCredentials::new(
+            &state,
+            state.store().observe_site(site.id).unwrap().unwrap(),
+        );
         let mut renewed = creds.load(site.id).unwrap();
         renewed.cookie = Some("renewed".into());
         let gate = state.write_gate();
@@ -71,12 +76,18 @@ fn credential_save_rechecks_readonly_and_maintenance_after_load() {
 #[test]
 fn credential_save_does_not_overwrite_a_concurrent_site_update() {
     let (_tmp, state, site) = fixture();
-    let creds = AdmittedCredentials::new(&state, site.clone());
+    let creds = AdmittedCredentials::new(
+        &state,
+        state.store().observe_site(site.id).unwrap().unwrap(),
+    );
     let mut renewed = creds.load(site.id).unwrap();
     renewed.cookie = Some("renewed".into());
     let mut changed = site.clone();
     changed.url = "https://changed.invalid".into();
-    state.store().save_site(&changed).unwrap();
+    state
+        .store()
+        .save_site(&changed, store::ManualCredentialWrite::Unchanged)
+        .unwrap();
     assert!(creds.save(&renewed).is_err());
     assert!(state.store().get_site(site.id).unwrap().unwrap() == changed);
 }
@@ -84,12 +95,74 @@ fn credential_save_does_not_overwrite_a_concurrent_site_update() {
 #[test]
 fn credential_save_publishes_current_cookie() {
     let (_tmp, state, site) = fixture();
-    let creds = AdmittedCredentials::new(&state, site.clone());
+    let creds = AdmittedCredentials::new(
+        &state,
+        state.store().observe_site(site.id).unwrap().unwrap(),
+    );
     let mut renewed = creds.load(site.id).unwrap();
     renewed.cookie = Some("renewed".into());
     creds.save(&renewed).unwrap();
     assert!(creds.take_rejection().is_none());
     assert!(state.store().get_site(site.id).unwrap().unwrap() == renewed);
+}
+
+fn invocation_adapter_discards_delayed_aba_refresh(scheduled: bool) {
+    let (_tmp, state, site) = fixture();
+    let observed = state.store().observe_site(site.id).unwrap().unwrap();
+    let adapter: Box<dyn SiteCredentials + '_> = if scheduled {
+        Box::new(crate::check_in::StoreSites::new(&state, observed))
+    } else {
+        Box::new(AdmittedCredentials::new(&state, observed))
+    };
+    let mut renewed = adapter.load(site.id).unwrap();
+    renewed.cookie = Some("renewed".into());
+    let mut changed = site.clone();
+    changed.cookie = Some("manual".into());
+    state
+        .store()
+        .save_site(&changed, store::ManualCredentialWrite::Replace)
+        .unwrap();
+    state
+        .store()
+        .save_site(&site, store::ManualCredentialWrite::Replace)
+        .unwrap();
+    assert!(adapter.save(&renewed).is_err());
+    assert_eq!(state.store().get_site(site.id).unwrap(), Some(site));
+}
+
+#[test]
+fn foreground_adapter_discards_delayed_aba_refresh() {
+    invocation_adapter_discards_delayed_aba_refresh(false);
+}
+
+#[test]
+fn scheduled_adapter_discards_delayed_aba_refresh() {
+    invocation_adapter_discards_delayed_aba_refresh(true);
+}
+
+#[test]
+fn scheduled_adapter_publishes_current_refresh() {
+    let (_tmp, state, site) = fixture();
+    let observed = state.store().observe_site(site.id).unwrap().unwrap();
+    let adapter = crate::check_in::StoreSites::new(&state, observed);
+    let mut renewed = adapter.load(site.id).unwrap();
+    renewed.cookie = Some("renewed".into());
+    adapter.save(&renewed).unwrap();
+    assert_eq!(state.store().get_site(site.id).unwrap(), Some(renewed));
+}
+
+#[test]
+fn scheduled_adapter_rechecks_admission_before_publication() {
+    let (_tmp, state, site) = fixture();
+    let observed = state.store().observe_site(site.id).unwrap().unwrap();
+    let adapter = crate::check_in::StoreSites::new(&state, observed);
+    let mut renewed = adapter.load(site.id).unwrap();
+    renewed.cookie = Some("renewed".into());
+    let gate = state.write_gate();
+    let closed = gate.close();
+    assert!(adapter.save(&renewed).is_err());
+    assert_eq!(state.store().get_site(site.id).unwrap(), Some(site));
+    drop(closed);
 }
 
 fn queued_credential_save(maintenance: bool) {
@@ -105,10 +178,11 @@ fn queued_credential_save(maintenance: bool) {
     };
     let (entered_tx, entered_rx) = mpsc::channel();
     let (finished_tx, finished_rx) = mpsc::channel();
+    let observed = state.store().observe_site(site.id).unwrap().unwrap();
     let (worker, closed) = writers
         .with_writer(store::Db::App, |_| {
             let state_for_save = state.clone();
-            let expected = site.clone();
+            let expected = observed.clone();
             let candidate = renewed.clone();
             let worker = std::thread::spawn(move || {
                 let creds = AdmittedCredentials::new(&state_for_save, expected);
@@ -143,7 +217,10 @@ fn queued_credential_save(maintenance: bool) {
     assert!(state.store().get_site(site.id).unwrap().unwrap() == site);
     drop(closed);
     let _ = state.clone().with_instance_writable(true);
-    let creds = AdmittedCredentials::new(&state, site);
+    let creds = AdmittedCredentials::new(
+        &state,
+        state.store().observe_site(site.id).unwrap().unwrap(),
+    );
     creds.save(&renewed).unwrap();
     assert!(creds.take_rejection().is_none());
     assert!(state.store().get_site(renewed.id).unwrap().unwrap() == renewed);

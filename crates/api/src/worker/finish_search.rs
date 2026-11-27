@@ -46,8 +46,6 @@ pub(super) fn finish_search(
     };
 
     let context = load_search_context(state, &subscribe, &media)?;
-    let library_lease = state.acquire_library_work(&context.library_id)?;
-    library_lease.control().check().map_err(|e| e.to_string())?;
 
     tracing::info!(
         subscribe_id = %subscribe.id,
@@ -65,22 +63,25 @@ pub(super) fn finish_search(
     if !rejected.is_empty() {
         torrents.retain(|torrent| !rejected.contains(&torrent.enclosure));
     }
+    filter_active_defers(state, subscribe.id, &mut torrents);
 
-    {
+    let policy_binding = {
         let guard = state.subscribe_guard(subscribe.id);
         let _guard = guard.lock();
         decision::ensure_current(state, &subscribe)?;
-        let store = state.store.as_ref();
-        if !store
-            .library_accepts_work(&context.library_id)
+        ensure_library_active(state, &context.library_id)?;
+        if !state
+            .store
+            .subscribe_snapshot_is_current(&context.snapshot, &Default::default())
             .map_err(|e| e.to_string())?
-            || !store
-                .subscribe_snapshot_is_current(&context.snapshot, &Default::default())
-                .map_err(|e| e.to_string())?
         {
             return Err("Library 配置或订阅事实在观察期间已变更，放弃本轮提交".into());
         }
-    }
+        state
+            .store
+            .subscribe_policy_binding(subscribe.id)
+            .map_err(|e| e.to_string())?
+    };
 
     let add_errors = admit_candidates(
         state,
@@ -88,9 +89,9 @@ pub(super) fn finish_search(
         &media,
         &filter,
         &context,
+        &policy_binding,
         torrents,
         search_keywords,
-        library_lease.control(),
     )?;
     notify_subscription_complete(state, &subscribe, &media)?;
     if !add_errors.is_empty() {
@@ -191,15 +192,28 @@ fn subscribe_is_active(state: &ApiState, id: domain::SubscribeId) -> Result<bool
         .is_some_and(|subscribe| subscribe.tracking_state != "paused"))
 }
 
+fn ensure_library_active(state: &ApiState, library_id: &str) -> Result<(), String> {
+    let active = !state.library_work().is_cancelled(library_id)
+        && state
+            .store
+            .library_accepts_work(library_id)
+            .map_err(|e| e.to_string())?;
+    if !active {
+        return Err("Library 配置或订阅事实在观察期间已变更，放弃本轮提交".into());
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
 fn admit_candidates(
     state: &ApiState,
     subscribe: &domain::Subscribe,
     media: &domain::Media,
     filter: &domain::Filter,
     context: &SearchContext,
+    policy_binding: &Option<store::SubscribePolicyBinding>,
     torrents: Vec<domain::Torrent>,
     search_keywords: Vec<String>,
-    control: &library::WorkControl,
 ) -> Result<Vec<String>, String> {
     let routed =
         crate::delivery::RoutedDownloader::with_pending(state, subscribe, &context.existing);
@@ -209,12 +223,14 @@ fn admit_candidates(
         crate::season_check::absolute_map(state, media, torrents.iter().map(|t| t.title.as_str()));
     let selective = crate::selective_files::enabled(state).then(|| facts.clone());
     let chooser = crate::pack_fallback::effective(state, subscribe);
-    let downloader = decision::AdmittedDownloader {
-        state,
-        expected: subscribe,
-        routed: &routed,
-        control,
-    };
+    let submitter = crate::download_service::LibraryCancelSubmitter::new(
+        state.clone(),
+        context.library_id.clone(),
+        subscribe.id,
+        None,
+    )
+    .with_expected_subscribe(Some(subscribe.clone()));
+    let policy_hooks = crate::plugins::hooks_runtime::ApiSubscribeHooks::new(state.clone());
     let added = admit_and_add(RunInput {
         subscribe: &chooser,
         media,
@@ -223,7 +239,7 @@ fn admit_candidates(
         torrents,
         search_keywords,
         facts,
-        downloader: &downloader,
+        downloader: &routed,
         library_root: &context.library_root,
         library_id: subscribe.library_id,
         root_id: None,
@@ -231,15 +247,21 @@ fn admit_candidates(
         transfer_mode: context.transfer_mode,
         scrape: context.scrape,
         hooks: None,
+        policy_hooks: Some(&policy_hooks),
+        submitter: Some(&submitter),
         naming: Some(&context.naming),
         preserve_removed: false,
         overlap,
         absolute: absolute.as_ref(),
+        renamed_destinations: Default::default(),
     })
     .map_err(|e| {
         tracing::error!(subscribe_id = %subscribe.id, media = %media.title, error = %e, "收录并添加种子失败");
         e.to_string()
     })?;
+    for (enc, (dl_id, hash)) in &added.submitted_meta {
+        routed.record_submitted_meta(enc, *dl_id, hash.clone());
+    }
     {
         // An accepted external add remains tracked even if paused while it was
         // in flight. A late response must never recreate a deleted Subscribe.
@@ -256,7 +278,14 @@ fn admit_candidates(
         }
         merge_added_pending(state, subscribe, &added, &routed)?;
         decision::ensure_current(state, subscribe)?;
-        control.check().map_err(|error| error.to_string())?;
+        ensure_library_active(state, &context.library_id)?;
+        record_select_defers(
+            state,
+            subscribe.id,
+            policy_binding,
+            added.select_deferred(),
+            crate::job_loop::unix_now(),
+        );
     }
     let deferred = selective
         .as_ref()
@@ -287,7 +316,7 @@ fn admit_candidates(
                 .set_pending_selective(subscribe.id, enclosure, Some(missing))
                 .map_err(|error| error.to_string())?;
         }
-        control.check().map_err(|error| error.to_string())?;
+        ensure_library_active(state, &context.library_id)?;
         record_wanted_round(state, subscribe, &added, cap, catalog_max)?;
     }
     notify_search_additions(state, subscribe, media, &added);
@@ -332,21 +361,41 @@ fn merge_added_pending<D: downloader::Downloader + ?Sized>(
     added: &subscribe::Added<'_, D>,
     routed: &crate::delivery::RoutedDownloader<'_>,
 ) -> Result<(), String> {
-    let pending: Vec<(i32, crate::store::PendingDownload)> = added
+    let mut pending: Vec<(i32, crate::store::PendingDownload)> = added
         .chosen
         .iter()
         .map(|scored| {
+            let meta_dl_id = added
+                .submitted_meta
+                .get(&scored.torrent.enclosure)
+                .and_then(|(id, _)| *id)
+                .or_else(|| routed.used_id(&scored.torrent));
             (
                 scored.score,
                 crate::store::PendingDownload {
                     submitted_at: None,
                     torrent: scored.torrent.clone(),
                     release_override: None,
-                    downloader_id: routed.used_id(&scored.torrent),
+                    downloader_id: meta_dl_id,
                 },
             )
         })
         .collect();
+    for scored in &added.unknown {
+        let meta_dl_id = added
+            .submitted_meta
+            .get(&scored.torrent.enclosure)
+            .and_then(|(id, _)| *id);
+        pending.push((
+            scored.score,
+            crate::store::PendingDownload {
+                submitted_at: Some(0),
+                torrent: scored.torrent.clone(),
+                release_override: None,
+                downloader_id: meta_dl_id,
+            },
+        ));
+    }
     let store = state.store.as_ref();
     // D-M3: the same torrent reached through another enclosure (other site /
     // link) is one download: keep a single pending row per info hash.
@@ -409,6 +458,60 @@ fn merge_added_pending<D: downloader::Downloader + ?Sized>(
     Ok(())
 }
 
+pub(crate) fn record_select_defers(
+    state: &ApiState,
+    subscribe_id: domain::SubscribeId,
+    policy_binding: &Option<store::SubscribePolicyBinding>,
+    select_deferred: &[(filter::ScoredTorrent, i64, String)],
+    now_utc: i64,
+) {
+    if select_deferred.is_empty() {
+        return;
+    }
+    let Some(binding) = policy_binding else {
+        return;
+    };
+    let plugin_id = state
+        .plugins
+        .list_subscribe_traces(subscribe_id)
+        .into_iter()
+        .rev()
+        .filter(|t| t.hook_id == "subscribe.select")
+        .flat_map(|t| t.steps.into_iter().rev())
+        .find(|s| {
+            matches!(
+                s.status,
+                hooks::HookStepStatus::Deferred | hooks::HookStepStatus::Error
+            )
+        })
+        .map(|s| s.plugin_id);
+    for (scored, until_unix, reason) in select_deferred {
+        match state
+            .store
+            .record_subscribe_defer(&store::RecordSubscribeDeferInput {
+                defer_id: uuid::Uuid::new_v4().to_string(),
+                subscribe_id,
+                subscribe_generation: binding.jobs_sync_generation.clone(),
+                policy_revision: binding.policy_revision,
+                enclosure: scored.torrent.enclosure.clone(),
+                info_hash: None,
+                plugin_id: plugin_id.clone(),
+                hook_id: "subscribe.select".to_string(),
+                reason: hooks::sanitize_reason(reason),
+                next_retry_at: *until_unix,
+                now_utc,
+            }) {
+            Ok(_)
+            | Err(store::StoreError::Plugin(
+                store::plugins::PluginError::Denied | store::plugins::PluginError::StaleAuthority,
+            )) => {}
+            Err(err) => {
+                tracing::warn!(%err, %subscribe_id, "record_subscribe_defer failed for subscribe.select");
+            }
+        }
+    }
+}
+
 fn facts_with_pending(
     facts: domain::SubscribeFacts,
     existing: &[(i32, crate::store::PendingDownload)],
@@ -443,4 +546,30 @@ pub(crate) fn overlap_policy(state: &ApiState) -> subscribe::OverlapPolicy {
         .flatten()
         .map(|value| subscribe::OverlapPolicy::parse(&value))
         .unwrap_or_default()
+}
+
+pub(crate) fn filter_active_defers(
+    state: &ApiState,
+    subscribe_id: domain::SubscribeId,
+    torrents: &mut Vec<domain::Torrent>,
+) {
+    let Ok(Some(binding)) = state.store.subscribe_policy_binding(subscribe_id) else {
+        return;
+    };
+    let now = crate::job_loop::unix_now();
+    torrents.retain(|t| {
+        let Ok(Some(defer)) = state.store.get_subscribe_defer(subscribe_id, &t.enclosure) else {
+            return true;
+        };
+        if defer.subscribe_generation != binding.jobs_sync_generation
+            || defer.policy_revision != binding.policy_revision
+        {
+            return true;
+        }
+        match defer.state {
+            store::SubscribeDeferState::Rejected => false,
+            store::SubscribeDeferState::Deferred => defer.next_retry_at <= now,
+            store::SubscribeDeferState::Invalidated | store::SubscribeDeferState::Resolved => true,
+        }
+    });
 }

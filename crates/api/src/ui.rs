@@ -81,13 +81,53 @@ pub fn attach_ui(app: Router, ui_dir: Option<PathBuf>) -> Router {
         return app;
     }
     let index = dir.join("index.html");
+    let index_for_fallback = index.clone();
     let not_found = service_fn(move |request| {
-        let index = index.clone();
+        let index = index_for_fallback.clone();
         async move { Ok::<_, std::convert::Infallible>(spa_or_json_404(request, &index).await) }
     });
     // 注意用 .fallback() 而非 .not_found_service():后者会把 fallback 的
-    // 状态码强制改成 404,SPA 分支的 200 会被覆盖。
-    app.fallback_service(ServeDir::new(dir).fallback(not_found))
+    // 状态码强制改成 404,SPA 分支的 200 会被覆盖; API / Jellyfin 路径在进入
+    // ServeDir 前即返回 JSON 404,避免 PATCH/POST/PUT 等非 GET 方法被 ServeDir 拒为 405。
+    let serve_dir = ServeDir::new(dir).fallback(not_found);
+    let fallback = service_fn(move |request: axum::http::Request<Body>| {
+        let serve_dir = serve_dir.clone();
+        async move {
+            if is_api_or_jellyfin_path(request.uri().path()) {
+                return Ok::<_, std::convert::Infallible>(json_404_response());
+            }
+            use tower::ServiceExt as _;
+            let resp = match serve_dir.oneshot(request).await {
+                Ok(resp) => resp.into_response(),
+                Err(err) => match err {},
+            };
+            Ok::<_, std::convert::Infallible>(resp)
+        }
+    });
+    app.fallback_service(fallback)
+}
+
+fn is_api_or_jellyfin_path(path: &str) -> bool {
+    let first = path
+        .trim_start_matches('/')
+        .split('/')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    path.starts_with("/api/")
+        || path == "/api"
+        || path == "/sessions"
+        || path.starts_with("/sessions/")
+        || JELLYFIN_NAMESPACES.contains(&first.as_str())
+}
+
+fn json_404_response() -> Response {
+    (
+        StatusCode::NOT_FOUND,
+        [(header::CONTENT_TYPE, "application/json")],
+        "{\"error\":\"not found\"}",
+    )
+        .into_response()
 }
 
 /// 文件未命中时:API / Jellyfin 命名空间返回 JSON 404,其余返回 index.html
@@ -96,24 +136,8 @@ async fn spa_or_json_404(
     request: axum::http::Request<axum::body::Body>,
     index: &std::path::Path,
 ) -> Response {
-    let path = request.uri().path();
-    let first = path
-        .trim_start_matches('/')
-        .split('/')
-        .next()
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    let api_like = path.starts_with("/api/")
-        || path == "/sessions"
-        || path.starts_with("/sessions/")
-        || JELLYFIN_NAMESPACES.contains(&first.as_str());
-    if api_like {
-        return (
-            StatusCode::NOT_FOUND,
-            [(header::CONTENT_TYPE, "application/json")],
-            "{\"error\":\"not found\"}",
-        )
-            .into_response();
+    if is_api_or_jellyfin_path(request.uri().path()) {
+        return json_404_response();
     }
     match tokio::fs::read(index).await {
         Ok(bytes) => (
@@ -123,5 +147,92 @@ async fn spa_or_json_404(
         )
             .into_response(),
         Err(_) => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::body::{Body, to_bytes};
+    use axum::http::{Request, StatusCode, header};
+    use tower::ServiceExt;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn attach_ui_serves_plugin_apps_spa_and_keeps_jellyfin_plugins_404_json() {
+        let dir = tempfile::tempdir_in("/tmp").unwrap();
+        std::fs::write(
+            dir.path().join("index.html"),
+            "<!doctype html><html><body><div id=\"root\"></div></body></html>",
+        )
+        .unwrap();
+        let app = attach_ui(
+            Router::new().route("/api/v1/health", axum::routing::get(|| async { "ok" })),
+            Some(dir.path().to_path_buf()),
+        );
+
+        let r_plugins = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/plugins/org.example.demo/checkin")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r_plugins.status(), StatusCode::NOT_FOUND);
+        assert!(
+            r_plugins
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("")
+                .contains("application/json")
+        );
+        let b_plugins = to_bytes(r_plugins.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(b_plugins.as_ref(), br#"{"error":"not found"}"#);
+
+        let r_patch_api = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri("/api/v1/sites/00000000-0000-0000-0000-000000000000/boost")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r_patch_api.status(), StatusCode::NOT_FOUND);
+        let b_patch_api = to_bytes(r_patch_api.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(b_patch_api.as_ref(), br#"{"error":"not found"}"#);
+
+        for spa_path in [
+            "/plugin-apps/org.example.demo/checkin",
+            "/settings/plugins/builtin.checkin",
+        ] {
+            let r_spa = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(spa_path)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(r_spa.status(), StatusCode::OK, "path={spa_path}");
+            assert!(
+                r_spa
+                    .headers()
+                    .get(header::CONTENT_TYPE)
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("")
+                    .contains("text/html")
+            );
+            let b_spa = to_bytes(r_spa.into_body(), usize::MAX).await.unwrap();
+            assert!(String::from_utf8_lossy(&b_spa).contains("<div id=\"root\">"));
+        }
     }
 }

@@ -526,3 +526,101 @@ async fn patch_preserves_password_when_omitted_and_honors_auth_type_transitions(
         .unwrap();
     assert_eq!(bad_auth.status(), StatusCode::BAD_REQUEST);
 }
+
+#[tokio::test]
+async fn member_downloader_reads_redact_admin_endpoint_credentials_and_errors() {
+    let tmp = tempfile::tempdir().unwrap();
+    let app = app(&tmp);
+    let created = post_dl(
+        &app,
+        json!({
+            "name": "qb-lan",
+            "kind": "qbittorrent",
+            "url": "http://user:secret@10.0.0.42:8080/internal",
+            "username": "qb-admin",
+            "api_key": "qbt_key_secret",
+            "category": "movies",
+            "path_maps": [{ "from": "/downloads", "to": "/mnt/media/downloads" }],
+            "is_default": true
+        }),
+    )
+    .await;
+    let id = created["id"].as_str().unwrap().to_string();
+
+    let store = Store::open(tmp.path().join("data")).unwrap();
+    store
+        .put_setting(
+            &format!("downloader.{id}.last_error"),
+            "connect 10.0.0.42:8080 refused (auth=qb-admin)",
+        )
+        .unwrap();
+    store
+        .put_setting(&format!("downloader.{id}.verified"), "false")
+        .unwrap();
+
+    let (_member_id, member_token) = create_member(&app, "alice-dl-member").await;
+
+    for uri in [
+        "/api/v1/downloaders".to_string(),
+        format!("/api/v1/downloaders/{id}"),
+    ] {
+        let member_resp = app
+            .clone()
+            .oneshot(request("GET", &uri, Some(&member_token), Value::Null))
+            .await
+            .unwrap();
+        assert_eq!(member_resp.status(), StatusCode::OK, "uri={uri}");
+        let data = json_data(member_resp).await;
+        let row = if data.is_array() { &data[0] } else { &data };
+        assert_eq!(row["id"], id);
+        assert_eq!(row["name"], "qb-lan");
+        assert_eq!(row["kind"], "qbittorrent");
+        assert_eq!(
+            row["url"], "",
+            "member must not see internal downloader URL: {row}"
+        );
+        assert_eq!(
+            row["username"],
+            Value::Null,
+            "member must not see username: {row}"
+        );
+        assert_eq!(
+            row["has_api_key"], false,
+            "member must not see has_api_key: {row}"
+        );
+        assert_eq!(
+            row["has_password"], false,
+            "member must not see has_password: {row}"
+        );
+        assert_eq!(
+            row["last_error"],
+            Value::Null,
+            "member must not see last_error: {row}"
+        );
+        assert_eq!(row["category"], "movies");
+        assert_eq!(row["status"], "failed");
+    }
+
+    let admin_detail = json_data(
+        app.oneshot(request(
+            "GET",
+            &format!("/api/v1/downloaders/{id}"),
+            Some("management-secret"),
+            Value::Null,
+        ))
+        .await
+        .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        admin_detail["url"],
+        "http://user:secret@10.0.0.42:8080/internal"
+    );
+    assert_eq!(admin_detail["has_api_key"], true);
+    assert!(
+        admin_detail["last_error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("10.0.0.42:8080")
+    );
+}

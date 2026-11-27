@@ -59,21 +59,21 @@ pub(crate) fn target_id_from_store(
     Ok(store.default_downloader().map_err(error)?.map(|row| row.id))
 }
 
-pub(crate) fn client_for_id(
-    state: &ApiState,
+pub(crate) fn client_for_store_id(
+    store: &crate::Store,
+    default_dl: &Arc<dyn Downloader>,
     id: Option<DownloaderId>,
 ) -> Result<Arc<dyn Downloader>, DownloaderError> {
     let Some(id) = id else {
-        return Ok(state.downloader.clone());
+        return Ok(default_dl.clone());
     };
+    if id.as_uuid().is_nil() {
+        return Ok(default_dl.clone());
+    }
     let row = {
-        let store = state.store.clone();
-        if store
-            .default_downloader()
-            .map_err(error)?
-            .is_some_and(|row| row.id == id)
-        {
-            return Ok(state.downloader.clone());
+        let default_row = store.default_downloader().map_err(error)?;
+        if default_row.as_ref().is_some_and(|row| row.id == id) {
+            return Ok(default_dl.clone());
         }
         store
             .get_downloader(id)
@@ -92,6 +92,22 @@ pub(crate) fn client_for_id(
     }
 }
 
+pub(crate) fn frozen_client_for_store_id(
+    store: &crate::Store,
+    default_dl: &Arc<dyn Downloader>,
+    id: Option<DownloaderId>,
+) -> Result<Arc<dyn Downloader>, DownloaderError> {
+    let client = client_for_store_id(store, default_dl, id)?;
+    Ok(client.snapshot_client()?.unwrap_or(client))
+}
+
+pub(crate) fn client_for_id(
+    state: &ApiState,
+    id: Option<DownloaderId>,
+) -> Result<Arc<dyn Downloader>, DownloaderError> {
+    client_for_store_id(&state.store, &state.downloader, id)
+}
+
 /// Concrete client for a route, frozen at this moment.
 ///
 /// The default route may be a runtime proxy that re-selects configuration on
@@ -103,46 +119,6 @@ pub(crate) fn frozen_client_for_id(
 ) -> Result<Arc<dyn Downloader>, DownloaderError> {
     let client = client_for_id(state, id)?;
     Ok(client.snapshot_client()?.unwrap_or(client))
-}
-
-pub(crate) fn submit_torrent_with_options(
-    state: &ApiState,
-    torrent: &Torrent,
-    id: Option<DownloaderId>,
-    save_path: Option<&str>,
-) -> Result<(), DownloaderError> {
-    let client = client_for_id(state, id)?;
-    submit_on(state, client.as_ref(), torrent, save_path)
-}
-
-/// Submit `torrent` on an already resolved client (keeps its in-memory identity).
-fn submit_on(
-    state: &ApiState,
-    client: &dyn Downloader,
-    torrent: &Torrent,
-    save_path: Option<&str>,
-) -> Result<(), DownloaderError> {
-    let site = state
-        .store
-        .as_ref()
-        .get_site(torrent.site_id)
-        .map_err(error)?;
-    let resolved_url = site
-        .as_ref()
-        .map(|site| state.indexer.resolve_torrent_download(site, torrent))
-        .transpose()
-        .map_err(|err| {
-            if err.is_definitive_source_rejection() {
-                DownloaderError::SourceRejected(err.to_string())
-            } else {
-                DownloaderError::Message(err.to_string())
-            }
-        })?
-        .flatten();
-    match resolved_url {
-        Some(url) => client.add_with_options(torrent, &url, save_path),
-        None => client.add_with_options(torrent, &torrent.enclosure, save_path),
-    }
 }
 
 pub(crate) struct RoutedDownloader<'a> {
@@ -193,6 +169,20 @@ impl<'a> RoutedDownloader<'a> {
     /// D-M3: info hash of a torrent submitted through this router, if known.
     pub(crate) fn submitted_hash(&self, torrent: &Torrent) -> Option<String> {
         self.hashes.lock().get(&torrent.enclosure).cloned()
+    }
+
+    pub(crate) fn record_submitted_meta(
+        &self,
+        enclosure: &str,
+        downloader_id: Option<DownloaderId>,
+        info_hash: Option<String>,
+    ) {
+        self.used
+            .lock()
+            .insert(enclosure.to_string(), downloader_id);
+        if let Some(hash) = info_hash {
+            self.hashes.lock().insert(enclosure.to_string(), hash);
+        }
     }
 
     /// G-M2: torrents rejected because their existing task is broken.
@@ -328,34 +318,24 @@ impl Downloader for RoutedDownloader<'_> {
         self.client_for(torrent)?.select_files(torrent, keep)
     }
 
-    fn add(&self, torrent: &Torrent) -> Result<(), DownloaderError> {
-        let id = match self.pending.get(&torrent.enclosure) {
-            Some(id) => *id,
-            None => target_id(self.state, self.subscribe, torrent)?,
-        };
-        self.used.lock().insert(torrent.enclosure.clone(), id);
-        let client = self.client_for(torrent)?;
-        if let Err(error) = submit_on(self.state, client.as_ref(), torrent, None) {
-            if matches!(
-                error,
-                DownloaderError::ExistingTaskBroken(..) | DownloaderError::SourceRejected(..)
-            ) {
-                self.broken.lock().push(torrent.clone());
-            } else {
-                self.used.lock().remove(&torrent.enclosure);
-            }
-            return Err(error);
-        }
-        match client.owned_identity(torrent) {
-            Ok(Some(hash)) => {
-                self.hashes.lock().insert(torrent.enclosure.clone(), hash);
-            }
-            Ok(None) => {}
-            Err(error) => {
-                tracing::debug!(torrent = %torrent.title, %error, "提交后读取 info hash 失败")
-            }
-        }
-        Ok(())
+    fn submit_verified(
+        &self,
+        payload: &downloader::SubmitPayload,
+        options: &downloader::SubmitOptions,
+    ) -> Result<downloader::ClientSubmitResult, DownloaderError> {
+        client_for_id(self.state, None)?.submit_verified(payload, options)
+    }
+
+    fn query_task_status(
+        &self,
+        info_hash: &str,
+        ownership_tag: &str,
+    ) -> Result<downloader::ClientTaskQuery, DownloaderError> {
+        client_for_id(self.state, None)?.query_task_status(info_hash, ownership_tag)
+    }
+
+    fn supports_labels(&self) -> bool {
+        client_for_id(self.state, None).is_ok_and(|c| c.supports_labels())
     }
 
     fn completed_files(
@@ -400,5 +380,33 @@ impl Downloader for RoutedDownloader<'_> {
                 None
             }
         }
+    }
+
+    fn task_files_by_hash(
+        &self,
+        info_hash: &str,
+    ) -> Result<Option<downloader::TaskFileSet>, DownloaderError> {
+        client_for_id(self.state, None)?.task_files_by_hash(info_hash)
+    }
+
+    fn set_task_tags(&self, info_hash: &str, tags: &[String]) -> Result<(), DownloaderError> {
+        client_for_id(self.state, None)?.set_task_tags(info_hash, tags)
+    }
+
+    fn set_task_category(&self, info_hash: &str, category: &str) -> Result<(), DownloaderError> {
+        client_for_id(self.state, None)?.set_task_category(info_hash, category)
+    }
+
+    fn set_task_limits(
+        &self,
+        info_hash: &str,
+        upload_limit: Option<u64>,
+        download_limit: Option<u64>,
+    ) -> Result<(), DownloaderError> {
+        client_for_id(self.state, None)?.set_task_limits(info_hash, upload_limit, download_limit)
+    }
+
+    fn disk_free_space(&self) -> Result<downloader::DiskSpaceInfo, DownloaderError> {
+        client_for_id(self.state, None)?.disk_free_space()
     }
 }

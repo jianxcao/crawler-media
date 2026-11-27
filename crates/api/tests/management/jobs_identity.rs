@@ -1,5 +1,5 @@
 use super::*;
-use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
+use indexer::{FetchRequest, Fetcher, IndexerError, RegistrySnapshot};
 
 struct RssHook {
     inner: Fixtures,
@@ -40,11 +40,12 @@ async fn assert_global_rss_identity(delete_during_fetch: bool, extra_argument: b
     let state = api::ApiState::new(
         api::Store::open(tmp.path().join("data")).unwrap(),
         "management-secret".into(),
-        ProfileSet::load(None).unwrap(),
+        RegistrySnapshot::builtin().unwrap(),
         fetcher.clone(),
         downloader.clone(),
     )
-    .unwrap();
+    .unwrap()
+    .with_torrent_payload_fetcher(Arc::new(StubPayloadFetcher));
     let app = router(state.clone());
     create_site(&app).await;
     let ids = create_rss_subscribes(&app).await;
@@ -96,10 +97,7 @@ async fn assert_global_rss_identity(delete_during_fetch: bool, extra_argument: b
     if !delete_during_fetch {
         assert_eq!(state.store().load_pending(ids[0]).unwrap().len(), 1);
     }
-    assert_eq!(
-        downloader.added().len(),
-        if delete_during_fetch { 1 } else { 2 }
-    );
+    assert_eq!(downloader.added().len(), 1);
 }
 
 #[tokio::test]

@@ -1,15 +1,105 @@
-//! Freeze manual delivery configuration under SQL lock; resolve/connect outside it.
+//! Freeze manual delivery configuration under SQL lock.
 use crate::runtime_downloader::{ChosenDownloader, DownloaderEnv, row_to_chosen};
 use crate::{ApiState, management::ApiError};
+use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use domain::{DownloaderId, Subscribe, Torrent};
-use downloader::{Downloader, QbitDownloader, TransmissionDownloader};
-use std::sync::Arc;
+use domain::{DownloaderId, Subscribe, SubscribeId, Torrent};
 
 pub(super) struct Delivery {
     pub id: Option<DownloaderId>,
-    client: Arc<dyn Downloader>,
-    site: Option<domain::Site>,
+}
+
+pub(crate) fn ensure_subscribe_library_available(
+    state: &ApiState,
+    sub: &Subscribe,
+) -> Result<(), Response> {
+    let lib_id = match sub.library_id.as_ref() {
+        Some(id) => id.to_string(),
+        None => {
+            let media = match state.store.get_media(sub.media_id) {
+                Ok(Some(m)) => m,
+                Ok(None) => {
+                    return Err(
+                        ApiError::missing("media.missing", "媒体不存在".into()).into_response()
+                    );
+                }
+                Err(
+                    store::StoreError::WriteBusy
+                    | store::StoreError::ReadBusy
+                    | store::StoreError::ReadDeadline,
+                ) => return Err(crate::http::store_wait::busy_response()),
+                Err(err) => return Err(ApiError::from(err).into_response()),
+            };
+            match state.store.default_library(media.kind) {
+                Ok(Some(lib)) => lib.id,
+                Ok(None) => {
+                    return Err(ApiError::with(
+                        StatusCode::CONFLICT,
+                        "library.unavailable",
+                        "目标媒体库不可写入".into(),
+                    )
+                    .into_response());
+                }
+                Err(
+                    store::StoreError::WriteBusy
+                    | store::StoreError::ReadBusy
+                    | store::StoreError::ReadDeadline,
+                ) => return Err(crate::http::store_wait::busy_response()),
+                Err(err) => return Err(ApiError::from(err).into_response()),
+            }
+        }
+    };
+    let accepts = match state.store.library_accepts_work(&lib_id) {
+        Ok(ok) => ok,
+        Err(
+            store::StoreError::WriteBusy
+            | store::StoreError::ReadBusy
+            | store::StoreError::ReadDeadline,
+        ) => return Err(crate::http::store_wait::busy_response()),
+        Err(err) => return Err(ApiError::from(err).into_response()),
+    };
+    if state.library_work().is_cancelled(&lib_id) || !accepts {
+        return Err(ApiError::with(
+            StatusCode::CONFLICT,
+            "library.unavailable",
+            "目标媒体库不可写入".into(),
+        )
+        .into_response());
+    }
+    Ok(())
+}
+
+pub(super) struct ManualAdmitGuard {
+    inflight: std::sync::Arc<parking_lot::Mutex<std::collections::HashSet<(SubscribeId, String)>>>,
+    key: (SubscribeId, String),
+}
+
+impl ManualAdmitGuard {
+    pub(super) fn acquire(
+        state: &ApiState,
+        subscribe_id: SubscribeId,
+        enclosure: &str,
+    ) -> Result<Self, Response> {
+        let key = (subscribe_id, enclosure.to_string());
+        if !state.manual_admit_inflight.lock().insert(key.clone()) {
+            return Err(ApiError::with(
+                StatusCode::CONFLICT,
+                "subscription.admitting",
+                "正在提交该资源，请稍后重试".into(),
+            )
+            .into_response());
+        }
+        Ok(Self {
+            inflight: state.manual_admit_inflight.clone(),
+            key,
+        })
+    }
+}
+
+impl Drop for ManualAdmitGuard {
+    fn drop(&mut self) {
+        self.inflight.lock().remove(&self.key);
+    }
 }
 
 pub(super) fn prepare(
@@ -17,7 +107,7 @@ pub(super) fn prepare(
     subscribe: &Subscribe,
     torrent: &Torrent,
 ) -> Result<Delivery, Response> {
-    let (id, row, site) = super::admitted_store(state, |store| {
+    let (id, row) = super::admitted_store(state, |store| {
         let id = crate::delivery::target_id_from_store(store, Some(subscribe), torrent)
             .map_err(error)?;
         let row = match id {
@@ -26,48 +116,15 @@ pub(super) fn prepare(
             }
             _ => None,
         };
-        Ok((id, row, store.get_site(torrent.site_id)?))
+        Ok((id, row))
     })?;
-    let client: Arc<dyn Downloader> = match row {
-        None => state.downloader.clone(),
-        Some(row) => match row_to_chosen(row, &DownloaderEnv::default()) {
-            ChosenDownloader::Qbittorrent(config) => {
-                Arc::new(QbitDownloader::connect(config).map_err(|e| error(e).into_response())?)
-            }
-            ChosenDownloader::Transmission(config) => Arc::new(
-                TransmissionDownloader::connect(config).map_err(|e| error(e).into_response())?,
-            ),
+    if let Some(row) = row {
+        match row_to_chosen(row, &DownloaderEnv::default()) {
+            ChosenDownloader::Qbittorrent(_) | ChosenDownloader::Transmission(_) => {}
             _ => return Err(error("Downloader is incomplete").into_response()),
-        },
-    };
-    let client = client
-        .snapshot_client()
-        .map_err(|e| error(e).into_response())?
-        .unwrap_or(client);
-    Ok(Delivery { id, client, site })
-}
-
-impl Delivery {
-    pub fn resolve_url(&self, state: &ApiState, torrent: &Torrent) -> Result<String, Response> {
-        self.site
-            .as_ref()
-            .map(|site| state.indexer.resolve_torrent_download(site, torrent))
-            .transpose()
-            .map_err(|e| error(e).into_response())
-            .map(|url| url.flatten().unwrap_or_else(|| torrent.enclosure.clone()))
-    }
-
-    pub fn submit(&self, torrent: &Torrent, url: &str) -> Result<(), Response> {
-        self.client
-            .add_with_options(torrent, url, None)
-            .map_err(|e| error(e).into_response())
-    }
-
-    pub fn rollback(&self, torrent: &Torrent) {
-        if let Err(error) = self.client.remove_owned(torrent, false) {
-            tracing::error!(%error, torrent = %torrent.title, "Failed to roll back manual admit delivery");
         }
     }
+    Ok(Delivery { id })
 }
 
 fn error(error: impl ToString) -> ApiError {

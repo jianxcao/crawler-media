@@ -6,7 +6,7 @@ use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use domain::{Media, MediaId, MediaKind, UserId};
 use downloader::MemoryDownloader;
-use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
+use indexer::{FetchRequest, Fetcher, IndexerError, RegistrySnapshot};
 use serde_json::{Value, json};
 use store::test_support::{FixtureFile, publish_fixture_file};
 use tower::ServiceExt;
@@ -23,7 +23,7 @@ fn app(root: &Path) -> axum::Router {
         ApiState::new(
             Store::open(root.join("data")).unwrap(),
             "admin-token".into(),
-            ProfileSet::load(None).unwrap(),
+            RegistrySnapshot::builtin().unwrap(),
             Arc::new(NoFetch),
             Arc::new(MemoryDownloader::new(root.join("stage"))),
         )
@@ -368,7 +368,7 @@ async fn interrupted_removal_reuses_operation_and_reports_failure() {
     let state = ApiState::new(
         Store::open(tmp.path().join("data")).unwrap(),
         "admin-token".into(),
-        ProfileSet::load(None).unwrap(),
+        RegistrySnapshot::builtin().unwrap(),
         Arc::new(NoFetch),
         Arc::new(MemoryDownloader::new(tmp.path().join("stage"))),
     )

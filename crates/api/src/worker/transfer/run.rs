@@ -285,8 +285,15 @@ fn build_added_input<'a>(
             collection_errors: Vec::new(),
             submission_errors: Vec::new(),
             torrents_added: Vec::new(),
+            deferred_enclosures: Vec::new(),
+            unknown_enclosures: Vec::new(),
+            submitted_meta: Default::default(),
         },
         broken: Vec::new(),
+        deferred: Vec::new(),
+        select_deferred: Vec::new(),
+        unknown: Vec::new(),
+        submitted_meta: Default::default(),
     }
 }
 
@@ -404,6 +411,58 @@ fn prepare_transfer_target(
     ))
 }
 
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+fn acquire_transfer_lease_and_destinations(
+    state: &ApiState,
+    subscribe: &Subscribe,
+    media: &Media,
+    plan: &TransferPlan,
+    destination_library: domain::LibraryId,
+    absolute: Option<&subscribe::AbsoluteEpisodes>,
+    routed: &crate::delivery::RoutedDownloader<'_>,
+    chosen: &[ScoredTorrent],
+) -> Result<
+    Option<(
+        crate::library_lifecycle::LibraryWorkLease,
+        Vec<subscribe::collection_destinations::DestinationMapping>,
+        std::collections::HashMap<std::path::PathBuf, std::path::PathBuf>,
+    )>,
+    String,
+> {
+    if !crate::plugins::transfer_rename::has_transfer_rename_subscribers(state) {
+        let Ok(library_lease) = state.acquire_library_work(&plan.library_id) else {
+            return Ok(None);
+        };
+        library_lease.control().check().map_err(|e| e.to_string())?;
+        let destinations = routed.imported_destinations().map_err(|e| e.to_string())?;
+        return Ok(Some((
+            library_lease,
+            destinations,
+            std::collections::HashMap::new(),
+        )));
+    }
+
+    let destinations = routed.imported_destinations().map_err(|e| e.to_string())?;
+    let renamed_destinations = crate::plugins::transfer_rename::plan_subscribe_renamed_destinations(
+        state,
+        subscribe,
+        media,
+        destination_library,
+        &plan.root,
+        Some(&plan.naming),
+        plan.mode,
+        absolute,
+        routed,
+        chosen,
+        &destinations,
+    );
+    let Ok(library_lease) = state.acquire_library_work(&plan.library_id) else {
+        return Ok(None);
+    };
+    library_lease.control().check().map_err(|e| e.to_string())?;
+    Ok(Some((library_lease, destinations, renamed_destinations)))
+}
+
 fn transfer_after_idle(
     state: &ApiState,
     subscribe_id: SubscribeId,
@@ -438,16 +497,25 @@ fn transfer_after_idle(
         pending.iter().map(|(_, p)| p.torrent.title.as_str()),
     );
     let chosen = filter_matched_pending(&subscribe, &media, pending, absolute.as_ref());
-
-    let Ok(library_lease) = state.acquire_library_work(&plan.library_id) else {
-        return Ok(Attempt::Retarget);
-    };
-    library_lease.control().check().map_err(|e| e.to_string())?;
-    tracing::info!(%subscribe_id, pending_count = chosen.len(), "Transfer 开始");
     let destination_library: domain::LibraryId = plan
         .library_id
         .parse()
         .map_err(|error| format!("Library id {} 无法作为目标身份: {error}", plan.library_id))?;
+    let Some((library_lease, destinations, renamed_destinations)) =
+        acquire_transfer_lease_and_destinations(
+            state,
+            &subscribe,
+            &media,
+            &plan,
+            destination_library,
+            absolute.as_ref(),
+            &routed,
+            &chosen,
+        )?
+    else {
+        return Ok(Attempt::Retarget);
+    };
+    tracing::info!(%subscribe_id, pending_count = chosen.len(), "Transfer 开始");
 
     let baseline_facts = facts.clone();
     let added = build_added_input(
@@ -467,20 +535,52 @@ fn transfer_after_idle(
             transfer_mode: plan.mode,
             scrape: plan.nfo,
             hooks: None,
+            policy_hooks: None,
+            submitter: None,
             naming: Some(&plan.naming),
             preserve_removed: true,
             overlap: Default::default(),
             absolute: absolute.as_ref(),
+            renamed_destinations,
         },
         chosen,
     );
 
-    let destinations = routed.imported_destinations().map_err(|e| e.to_string())?;
     // M7: do not start writing library files for a subscription being deleted.
     if state.subscribe_is_deleting(subscribe_id) {
         tracing::warn!(subscribe_id = %subscribe_id, "订阅已被预留删除，跳过 Transfer");
         return Ok(Attempt::Done);
     }
+    publish_and_commit_transfer(
+        state,
+        subscribe_id,
+        &subscribe,
+        &media,
+        &baseline_facts,
+        added,
+        &destinations,
+        &library_lease,
+        &plan,
+        observation_fingerprint,
+        snapshot,
+    )
+    .map(|()| Attempt::Done)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn publish_and_commit_transfer<'a>(
+    state: &ApiState,
+    subscribe_id: SubscribeId,
+    subscribe: &Subscribe,
+    media: &Media,
+    baseline_facts: &SubscribeFacts,
+    added: Added<'a, crate::delivery::RoutedDownloader<'a>>,
+    destinations: &[subscribe::collection_destinations::DestinationMapping],
+    library_lease: &crate::library_lifecycle::LibraryWorkLease,
+    plan: &TransferPlan,
+    observation_fingerprint: store::ReadFingerprint,
+    snapshot: store::SubscribeLibrarySnapshot,
+) -> Result<(), String> {
     let known: std::collections::HashSet<std::path::PathBuf> = destinations
         .iter()
         .map(|m| m.destination_path.clone())
@@ -490,17 +590,17 @@ fn transfer_after_idle(
     let recorder = PlannedPublicationRecorder::new(
         PublicationRecorder {
             state,
-            subscribe: &subscribe,
-            lease: &library_lease,
-            fingerprint: observation_fingerprint.clone(),
+            subscribe,
+            lease: library_lease,
+            fingerprint: observation_fingerprint,
             snapshot,
         },
-        &plan,
+        plan,
     );
     let outcome = collect_completed_recorded(
         added,
         &library::Ffprobe::default(),
-        &destinations,
+        destinations,
         library_lease.control(),
         Some(&recorder),
     )
@@ -508,16 +608,15 @@ fn transfer_after_idle(
     commit_transfer_round(
         state,
         subscribe_id,
-        &subscribe,
-        &media,
-        &baseline_facts,
+        subscribe,
+        media,
+        baseline_facts,
         &outcome,
-        &library_lease,
-        &plan,
+        library_lease,
+        plan,
         &known,
         fallbacks_before,
     )
-    .map(|()| Attempt::Done)
 }
 
 /// D-M2: apply this round's hardlink fallback policy; returns the counter baseline.

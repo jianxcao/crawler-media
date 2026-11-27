@@ -133,8 +133,15 @@ struct SubtitleRetryDownloader {
 }
 
 impl Downloader for SubtitleRetryDownloader {
-    fn add(&self, _torrent: &Torrent) -> Result<(), DownloaderError> {
-        Ok(())
+    fn submit_verified(
+        &self,
+        payload: &downloader::SubmitPayload,
+        _options: &downloader::SubmitOptions,
+    ) -> Result<downloader::ClientSubmitResult, DownloaderError> {
+        Ok(downloader::ClientSubmitResult::Added {
+            already_owned: false,
+            info_hash: payload.info_hash().to_string(),
+        })
     }
 
     fn remove(&self, _torrent: &Torrent, _delete_files: bool) -> Result<(), DownloaderError> {

@@ -263,13 +263,11 @@ pub(crate) async fn sync_cdp_cookies(State(state): State<ApiState>) -> Response 
         Err(e) => return err(StatusCode::BAD_GATEWAY, "cdp.fetch_error", &e.to_string()),
     };
 
-    // 2. Build list of all supported profile domains
-    let profile_domains: Vec<(String, String)> = state
-        .indexer
-        .profile_ids()
-        .into_iter()
-        .filter_map(|pid| {
-            let profile = state.indexer.profile(&pid)?;
+    // 2. Build list of all supported profile domains from one consistent snapshot
+    let snapshot = state.indexer.snapshot();
+    let profile_domains: Vec<(String, String)> = snapshot
+        .profiles()
+        .filter_map(|profile| {
             let domain = if let Some(base) = &profile.base_url {
                 url_domain(base)
             } else if let Some(web_base) = &profile.web_base_url {
@@ -277,7 +275,7 @@ pub(crate) async fn sync_cdp_cookies(State(state): State<ApiState>) -> Response 
             } else {
                 url_domain(&profile.search.path)
             };
-            domain.map(|d| (pid, d))
+            domain.map(|d| (profile.id.clone(), d))
         })
         .collect();
 
@@ -297,7 +295,9 @@ pub(crate) async fn sync_cdp_cookies(State(state): State<ApiState>) -> Response 
             {
                 // Update cookie
                 existing.cookie = Some(item.cookie_header.clone());
-                if let Err(error) = store.save_site(&existing) {
+                if let Err(error) =
+                    store.save_site(&existing, store::ManualCredentialWrite::Replace)
+                {
                     tracing::error!(site_id=%existing.id, %error, "CDP cookie publication failed");
                     return err(
                         StatusCode::INTERNAL_SERVER_ERROR,

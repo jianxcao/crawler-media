@@ -1,5 +1,6 @@
 //! Scan publication: prepare DB context, observe files without Store, then commit.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use domain::{Confidence, LedgerId, Media, MediaId, MediaKind, QualitySource, Release, UnitKey};
@@ -298,14 +299,55 @@ impl ObservedScanFiles {
                 inserted.push(file.path);
             }
         }
-        let now_ms = crate::job_loop::unix_now() * 1000;
+        let now_ms = crate::job_loop::unix_now().saturating_mul(1_000);
+        let roots_by_lib: HashMap<String, Vec<PathBuf>> = if self.rows.is_empty() {
+            HashMap::new()
+        } else {
+            store
+                .list_libraries()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|lib| (lib.id, lib.root_paths))
+                .collect()
+        };
         for (batch, contexts) in self
             .rows
             .chunks(store::MAX_SCAN_BATCH)
             .zip(self.contexts.chunks(store::MAX_SCAN_BATCH))
         {
+            let outbox_events: Vec<store::plugin_events::EmitOutboxEventInput> = batch
+                .iter()
+                .zip(contexts.iter())
+                .filter_map(|(row, ctx)| {
+                    let roots = roots_by_lib
+                        .get(&ctx.library_id.to_string())
+                        .map(Vec::as_slice)
+                        .unwrap_or(&[]);
+                    let rel_path = crate::plugins::events::strip_library_root_rel(
+                        roots,
+                        std::path::Path::new(&row.path),
+                    );
+                    crate::plugins::events::build_transfer_completed_event(
+                        row.media_id,
+                        ctx.library_id,
+                        None,
+                        rel_path,
+                        1,
+                        row.size_bytes
+                            .and_then(|v| u64::try_from(v).ok())
+                            .unwrap_or(0),
+                        format!("transfer:watch:{}", row.file_id),
+                        now_ms,
+                    )
+                })
+                .collect();
             store
-                .insert_scanned_files_in_contexts(batch, contexts, now_ms)
+                .insert_scanned_files_in_contexts_with_outbox(
+                    batch,
+                    contexts,
+                    now_ms,
+                    &outbox_events,
+                )
                 .map_err(|e| e.to_string())?;
         }
         inserted.extend(self.rows.into_iter().map(|row| PathBuf::from(row.path)));

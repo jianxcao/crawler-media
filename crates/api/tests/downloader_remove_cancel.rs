@@ -17,7 +17,7 @@ use domain::{
     SubscribeId, Torrent, UserId,
 };
 use downloader::{Downloader, DownloaderError};
-use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
+use indexer::{FetchRequest, Fetcher, IndexerError, RegistrySnapshot};
 use serde_json::json;
 use tower::ServiceExt;
 
@@ -85,8 +85,15 @@ struct GatedRemover {
 }
 
 impl Downloader for GatedRemover {
-    fn add(&self, _torrent: &Torrent) -> Result<(), DownloaderError> {
-        Ok(())
+    fn submit_verified(
+        &self,
+        payload: &downloader::SubmitPayload,
+        _options: &downloader::SubmitOptions,
+    ) -> Result<downloader::ClientSubmitResult, DownloaderError> {
+        Ok(downloader::ClientSubmitResult::Added {
+            already_owned: false,
+            info_hash: payload.info_hash().to_string(),
+        })
     }
 
     fn completed_files(
@@ -189,7 +196,7 @@ fn make_state(root: &Path, downloader: Arc<dyn Downloader>) -> ApiState {
     ApiState::new(
         Store::open(root.join("data")).unwrap(),
         "management-secret".into(),
-        ProfileSet::load(None).unwrap(),
+        RegistrySnapshot::builtin().unwrap(),
         Arc::new(NoFetch),
         downloader,
     )

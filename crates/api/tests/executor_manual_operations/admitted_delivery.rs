@@ -10,7 +10,11 @@ struct CloseAfterAdmission {
     hold_confirmation: bool,
 }
 impl downloader::Downloader for CloseAfterAdmission {
-    fn add(&self, torrent: &domain::Torrent) -> Result<(), downloader::DownloaderError> {
+    fn submit_verified(
+        &self,
+        payload: &downloader::SubmitPayload,
+        _options: &downloader::SubmitOptions,
+    ) -> Result<downloader::ClientSubmitResult, downloader::DownloaderError> {
         let handle = self.store.get().unwrap();
         handle
             .writers()
@@ -22,9 +26,7 @@ impl downloader::Downloader for CloseAfterAdmission {
                 .list_all_pending_routed()
                 .unwrap()
                 .iter()
-                .any(|(_, _, pending)| {
-                    pending.torrent.enclosure == torrent.enclosure && pending.submitted_at.is_none()
-                }),
+                .any(|(_, _, pending)| pending.submitted_at.is_none()),
             Ordering::SeqCst,
         );
         let gate = self.gate.get().unwrap().clone();
@@ -43,7 +45,10 @@ impl downloader::Downloader for CloseAfterAdmission {
         });
         ready_rx.recv_timeout(Duration::from_secs(2)).unwrap();
         self.added.store(true, Ordering::SeqCst);
-        Ok(())
+        Ok(downloader::ClientSubmitResult::Added {
+            already_owned: false,
+            info_hash: payload.info_hash().to_string(),
+        })
     }
     fn completed_files(
         &self,
@@ -135,13 +140,20 @@ struct PausedAdd {
     release: parking_lot::Mutex<std::sync::mpsc::Receiver<()>>,
 }
 impl downloader::Downloader for PausedAdd {
-    fn add(&self, _: &domain::Torrent) -> Result<(), downloader::DownloaderError> {
+    fn submit_verified(
+        &self,
+        payload: &downloader::SubmitPayload,
+        _options: &downloader::SubmitOptions,
+    ) -> Result<downloader::ClientSubmitResult, downloader::DownloaderError> {
         self.entered.notify_one();
         self.release
             .lock()
             .recv_timeout(Duration::from_secs(5))
             .unwrap();
-        Ok(())
+        Ok(downloader::ClientSubmitResult::Added {
+            already_owned: false,
+            info_hash: payload.info_hash().to_string(),
+        })
     }
     fn completed_files(
         &self,

@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use api::{ApiState, Store};
-use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
+use indexer::{FetchRequest, Fetcher, IndexerError, RegistrySnapshot};
 
 struct NoFetch;
 impl Fetcher for NoFetch {
@@ -28,7 +28,7 @@ async fn independently_created_queue_reopens_through_api_and_retains_inflight_jo
     let state = ApiState::new(
         Store::open(&data).unwrap(),
         "secret".into(),
-        ProfileSet::load(None).unwrap(),
+        RegistrySnapshot::builtin().unwrap(),
         Arc::new(NoFetch),
         Arc::new(downloader::MemoryDownloader::new(tmp.path().join("stage"))),
     )

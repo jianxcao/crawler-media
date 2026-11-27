@@ -31,10 +31,17 @@ struct GatedRollbackDownloader {
 }
 
 impl Downloader for GatedRollbackDownloader {
-    fn add(&self, _: &domain::Torrent) -> Result<(), DownloaderError> {
+    fn submit_verified(
+        &self,
+        payload: &downloader::SubmitPayload,
+        _options: &downloader::SubmitOptions,
+    ) -> Result<downloader::ClientSubmitResult, DownloaderError> {
         self.add_gate.block();
         self.added.fetch_add(1, Ordering::SeqCst);
-        Ok(())
+        Ok(downloader::ClientSubmitResult::Added {
+            already_owned: false,
+            info_hash: payload.info_hash().to_string(),
+        })
     }
     fn completed_files(&self, _: &domain::Torrent) -> Result<Vec<PathBuf>, DownloaderError> {
         Ok(vec![])
@@ -93,6 +100,8 @@ fn race_fixture(
             downloader_id: None,
             enabled: true,
             maintenance_via: domain::MaintenanceVia::Http,
+            browser_search: false,
+            timezone: "UTC".into(),
         })
         .unwrap();
     *shared_state.lock() = Some(fixture.state.clone());
@@ -226,13 +235,20 @@ struct ConfigurableGatedDownloader {
 }
 
 impl Downloader for ConfigurableGatedDownloader {
-    fn add(&self, _: &domain::Torrent) -> Result<(), DownloaderError> {
+    fn submit_verified(
+        &self,
+        payload: &downloader::SubmitPayload,
+        _options: &downloader::SubmitOptions,
+    ) -> Result<downloader::ClientSubmitResult, DownloaderError> {
         self.add_gate.block();
         self.added.fetch_add(1, Ordering::SeqCst);
         if self.fail_add.load(Ordering::SeqCst) {
             Err(DownloaderError::Message("injected add failure".into()))
         } else {
-            Ok(())
+            Ok(downloader::ClientSubmitResult::Added {
+                already_owned: false,
+                info_hash: payload.info_hash().to_string(),
+            })
         }
     }
     fn completed_files(&self, _: &domain::Torrent) -> Result<Vec<PathBuf>, DownloaderError> {
@@ -269,6 +285,8 @@ fn configurable_race_fixture(
             downloader_id: None,
             enabled: true,
             maintenance_via: domain::MaintenanceVia::Http,
+            browser_search: false,
+            timezone: "UTC".into(),
         })
         .unwrap();
     (fixture, add_gate, fail, added)

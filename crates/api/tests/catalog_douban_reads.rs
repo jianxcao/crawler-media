@@ -7,7 +7,7 @@ use axum::{
 };
 use domain::{Media, MediaKind};
 use downloader::MemoryDownloader;
-use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
+use indexer::{FetchRequest, Fetcher, IndexerError, RegistrySnapshot};
 use media::{CatalogHit, DoubanSubject, TmdbError};
 use serde_json::{Value, json};
 use std::{
@@ -91,7 +91,7 @@ fn fixture_with_source(source: Arc<dyn Catalog>) -> (tempfile::TempDir, axum::Ro
     let state = ApiState::new(
         Store::open(dir.path().join("data")).unwrap(),
         TOKEN.into(),
-        ProfileSet::load(None).unwrap(),
+        RegistrySnapshot::builtin().unwrap(),
         Arc::new(Offline),
         Arc::new(MemoryDownloader::new(dir.path().join("stage"))),
     )
@@ -193,7 +193,7 @@ fn douban_local_alias_keeps_tmdb_detail_fastpath() {
     let state = ApiState::new(
         store,
         TOKEN.into(),
-        ProfileSet::load(None).unwrap(),
+        RegistrySnapshot::builtin().unwrap(),
         Arc::new(Offline),
         Arc::new(MemoryDownloader::new(dir.path().join("stage"))),
     )

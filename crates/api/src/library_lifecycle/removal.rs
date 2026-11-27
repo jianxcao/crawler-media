@@ -29,6 +29,7 @@ pub(super) async fn drain(state: &ApiState, id: &str) -> Result<(), String> {
     );
     let work = state.library_work.clone();
     let library_for_cancel = library.clone();
+    state.plugins.in_flight().cancel_library(&library);
     tokio::task::spawn_blocking(move || work.cancel(&library_for_cancel))
         .await
         .map_err(|e| e.to_string())?;

@@ -26,26 +26,21 @@ async fn existing_same_infohash_task_is_claimed_and_imported() {
         source: "manual".into(),
     });
 
-    h.run_subscribe(id).await;
-    assert_eq!(
-        h.qb.add_count(),
-        0,
-        "no duplicate add (qB would answer Fails.)"
-    );
-    assert_eq!(h.qb.add_tags.lock().len(), 1, "claimed via addTags");
+    let (status, body) = h.run_subscribe_raw(id).await;
+    assert_eq!(status, axum::http::StatusCode::BAD_GATEWAY, "{body}");
+    assert!(body.to_string().contains("existing_foreign"), "{body}");
+    assert_eq!(h.qb.add_count(), 0, "no duplicate add");
+    assert_eq!(h.qb.add_tags.lock().len(), 0, "never addTags foreign task");
     let task = h.qb.tasks.lock()[0].clone();
-    assert!(task.tags.iter().any(|t| t == "mine"), "user tags kept");
-    let enclosure = h.pending(id)[0].1.torrent.enclosure.clone();
-    assert!(
-        task.tags
-            .iter()
-            .any(|t| t == &downloader::ownership_tag(&enclosure))
-    );
-    assert_eq!(h.pending_state(id, "active"), 1);
-
-    let video = probed_video(2160, "hevc", false);
-    h.qb.complete(0, MATRIX_TITLE, &[(&format!("{MATRIX_TITLE}.mkv"), &video)]);
-    h.transfer(id).await.unwrap();
-    assert_eq!(h.library_files().len(), 1, "claimed task imported");
-    assert_eq!(h.pending_state(id, "imported"), 1);
+    assert_eq!(task.tags, vec!["mine".to_string()], "user tags untouched");
+    assert_eq!(h.pending_state(id, "active"), 0);
+    let own = h
+        .state
+        .store()
+        .find_download_ownership_by_hash(domain::DownloaderId::from_uuid(uuid::Uuid::nil()), &hash)
+        .unwrap();
+    assert!(own.iter().any(
+        |r| r.ownership_state == store::DownloadOwnershipState::Foreign
+            && r.provenance_kind == store::DownloadProvenanceKind::ExistingForeign
+    ));
 }

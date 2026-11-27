@@ -12,7 +12,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use domain::{Media, MediaId, MediaKind, UserRole};
 use downloader::MemoryDownloader;
-use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
+use indexer::{FetchRequest, Fetcher, IndexerError, RegistrySnapshot};
 use tower::ServiceExt;
 
 #[path = "executor_library_admin/artwork_writes.rs"]
@@ -46,7 +46,7 @@ impl Fixture {
         let state = ApiState::new(
             Store::open(dir.path().join("data")).unwrap(),
             "admin-secret".into(),
-            ProfileSet::load(None).unwrap(),
+            RegistrySnapshot::builtin().unwrap(),
             Arc::new(NoFetch),
             Arc::new(MemoryDownloader::new(dir.path().join("stage"))),
         )

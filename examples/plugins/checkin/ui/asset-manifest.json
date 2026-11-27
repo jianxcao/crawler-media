@@ -1,0 +1,101 @@
+{
+  "version": 1,
+  "files": [
+    {
+      "path": "ui/assets/App-CUaDwJ8G.js",
+      "sha256": "072c9bf0818c5ad21b69403accd8a0372a00adb790fba57fc2f4aedfa9faddf0",
+      "size": 458,
+      "content_type": "application/javascript"
+    },
+    {
+      "path": "ui/assets/Config-DTlRZYVs.js",
+      "sha256": "a7785bc001881abc422d998525e4042289867c011870fbf94dd8b943ec42efda",
+      "size": 2277,
+      "content_type": "application/javascript"
+    },
+    {
+      "path": "ui/assets/Dashboard-BOqA5GQO.js",
+      "sha256": "620aba542c23415c1851b409863a269953105560b1bf135df56a3c235c4ea12d",
+      "size": 1043,
+      "content_type": "application/javascript"
+    },
+    {
+      "path": "ui/assets/Page-q_VO5c1T.js",
+      "sha256": "3542cfe18057f8e0c58685e75d9a6fe1d1a0a10b06546e92917fffa66171bf4b",
+      "size": 6709,
+      "content_type": "application/javascript"
+    },
+    {
+      "path": "ui/assets/_virtual_mf-localSharedImportMap___mfe_internal__cmBuiltinCheckin__mf_owner__1-o9Py2o_p.js",
+      "sha256": "521f85fbfae284d38c4b229345761091fe29fed60130f1f5c1ea29a75d34771f",
+      "size": 1117,
+      "content_type": "application/javascript"
+    },
+    {
+      "path": "ui/assets/_virtual_mf___mfe_internal__cmBuiltinCheckin__mf_owner__256206906051000__loadShare__react__loadShare__-Dc3wKQzp.js",
+      "sha256": "cee7c7fead757eb1b84b6babc8d1713d605001337395a19834225709ce6718b5",
+      "size": 5616,
+      "content_type": "application/javascript"
+    },
+    {
+      "path": "ui/assets/helpers-DT2aVXT4.js",
+      "sha256": "83b35a5a2d60c9633ed150ce7d11b987f475a81549576cb16d1bdd7ab6d3121a",
+      "size": 72,
+      "content_type": "application/javascript"
+    },
+    {
+      "path": "ui/assets/hostInit-FRIYM1Vb.js",
+      "sha256": "8b409c3f12204e9b2354bbcbb0f764310efdf5fcbb4442b99d77b792b154f3c1",
+      "size": 5661,
+      "content_type": "application/javascript"
+    },
+    {
+      "path": "ui/assets/index-6bkLL06S.js",
+      "sha256": "de9afcba9affaa4d148d011e443558d546e62c659d836184dd13193ee2398139",
+      "size": 64799,
+      "content_type": "application/javascript"
+    },
+    {
+      "path": "ui/assets/index-C_7llY3b.js",
+      "sha256": "ab01949c16113fe9ce90c6bd5cea9a730a406beb4e14326057236e898ffdd4b5",
+      "size": 583,
+      "content_type": "application/javascript"
+    },
+    {
+      "path": "ui/assets/pendingShares-wy6pt3w1.js",
+      "sha256": "8b10c160554b3ecfb1b6afa03ad09ea108b2864fe15aa7d9b383d35b79281183",
+      "size": 1570,
+      "content_type": "application/javascript"
+    },
+    {
+      "path": "ui/assets/remoteEntry.js",
+      "sha256": "90d1cebea92f52173aba5e8f9643200c878a412793341e0c186831e19f77eb61",
+      "size": 23723,
+      "content_type": "application/javascript"
+    },
+    {
+      "path": "ui/assets/shared-BA--q00L.js",
+      "sha256": "da242385cd06cae592f53d181dce9d63016ae38b50c4dc00ca1653f4c44b4ab5",
+      "size": 945,
+      "content_type": "application/javascript"
+    },
+    {
+      "path": "ui/assets/style.css",
+      "sha256": "afae2f65e0291655ce042a9e25e4840816f7d1f9aa8efd00c3c3de6866f6b6fd",
+      "size": 390,
+      "content_type": "text/css"
+    },
+    {
+      "path": "ui/assets/virtual-entry-A67rSWAu.js",
+      "sha256": "3b1f46c9764ca4b8f741cebeee5c07a0bbd4db4260ed352a47ddce052f6e5f80",
+      "size": 1284,
+      "content_type": "application/javascript"
+    },
+    {
+      "path": "ui/assets/vite-preload-helper-PPVm8Dsz.js",
+      "sha256": "0bcb72f8ec0d95f592f3a84b3554b9ef5a5325ff5416a9114d6913e03c1c9eb4",
+      "size": 1232,
+      "content_type": "application/javascript"
+    }
+  ]
+}

@@ -6,7 +6,7 @@ use domain::{
     Torrent, UserId,
 };
 use downloader::{Downloader, DownloaderError};
-use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
+use indexer::{FetchRequest, Fetcher, IndexerError, RegistrySnapshot};
 use media::CatalogHit;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -38,8 +38,15 @@ impl api::catalog::Catalog for Offline {
 }
 struct CompletedFile(PathBuf);
 impl Downloader for CompletedFile {
-    fn add(&self, _: &Torrent) -> Result<(), DownloaderError> {
-        Ok(())
+    fn submit_verified(
+        &self,
+        payload: &downloader::SubmitPayload,
+        _options: &downloader::SubmitOptions,
+    ) -> Result<downloader::ClientSubmitResult, DownloaderError> {
+        Ok(downloader::ClientSubmitResult::Added {
+            already_owned: false,
+            info_hash: payload.info_hash().to_string(),
+        })
     }
     fn remove(&self, _: &Torrent, _: bool) -> Result<(), DownloaderError> {
         Ok(())
@@ -150,7 +157,7 @@ impl Fixture {
         let state = ApiState::new(
             store,
             "removal-subscribe-secret".into(),
-            ProfileSet::load(None).unwrap(),
+            RegistrySnapshot::builtin().unwrap(),
             Arc::new(Offline),
             Arc::new(CompletedFile(source.clone())),
         )

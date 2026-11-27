@@ -5,7 +5,7 @@ use std::sync::Arc;
 use api::{ApiState, DownloaderEnv, DynamicDownloader, Store, router};
 use axum::http::StatusCode;
 use downloader::MemoryDownloader;
-use indexer::ProfileSet;
+use indexer::RegistrySnapshot;
 use parking_lot::Mutex;
 use serde_json::json;
 use tower::ServiceExt;
@@ -29,7 +29,7 @@ async fn manual_submit_applies_selected_save_path() {
             "POST",
             "/api/v1/downloaders/submit",
             Some("management-secret"),
-            json!({"title":"Dune.2021.1080p", "download_url":"magnet:?xt=urn:btih:dune",
+            json!({"title":"Dune.2021.1080p", "download_url":"magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567",
             "save_path":"/downloads/movies"}),
         ))
         .await
@@ -77,7 +77,7 @@ async fn auto_route_save_path_is_translated_into_downloader_namespace() {
             "POST",
             "/api/v1/downloaders/submit",
             Some("management-secret"),
-            json!({"title":"Dune.2021.1080p", "download_url":"magnet:?xt=urn:btih:dune",
+            json!({"title":"Dune.2021.1080p", "download_url":"magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567",
             "auto_route":true, "save_path":"/host/qb/movies/Dune (2021)"}),
         ))
         .await
@@ -194,10 +194,12 @@ async fn mteam_manual_delivery_resolves_signed_url_but_keeps_stable_pending_iden
         "{}",
         json_body(response).await
     );
-    assert_eq!(
-        downloader.added()[0].enclosure,
-        "https://api.m-team.cc/api/rss/dlv2?sign=signed-token"
-    );
+    assert_eq!(downloader.submitted().len(), 1);
+    assert!(matches!(
+        downloader.submitted()[0].payload,
+        downloader::SubmitPayload::TorrentBytes { .. }
+    ));
+    assert_eq!(downloader.added()[0].enclosure, stable_url);
     let pending = Store::open(tmp.path().join("data"))
         .unwrap()
         .list_all_pending_routed()
@@ -334,7 +336,7 @@ async fn changing_default_does_not_move_an_existing_pending_task() {
         ApiState::new_arc(
             store.clone(),
             "management-secret".into(),
-            ProfileSet::load(None).unwrap(),
+            RegistrySnapshot::builtin().unwrap(),
             fetcher,
             dynamic,
         )

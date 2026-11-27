@@ -7,7 +7,7 @@ use api::{ApiState, Store};
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use downloader::MemoryDownloader;
-use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
+use indexer::{FetchRequest, Fetcher, IndexerError, RegistrySnapshot};
 use tower::ServiceExt;
 use tracing::field::{Field, Visit};
 use tracing::{Event, Subscriber};
@@ -95,7 +95,7 @@ async fn timeout_and_late_fill_completion_have_correlated_redacted_phases() {
     let state = ApiState::new(
         store,
         "phase-test".into(),
-        ProfileSet::load(None).unwrap(),
+        RegistrySnapshot::builtin().unwrap(),
         Arc::new(Offline),
         Arc::new(MemoryDownloader::new(dir.path().join("stage"))),
     )
@@ -198,7 +198,7 @@ async fn shared_gate_timeout(events: &Events) {
     let state = ApiState::new(
         store,
         "shared-phase-test".into(),
-        ProfileSet::load(None).unwrap(),
+        RegistrySnapshot::builtin().unwrap(),
         Arc::new(Offline),
         Arc::new(MemoryDownloader::new(dir.path().join("stage"))),
     )

@@ -179,7 +179,7 @@ fn failed_poster_download_does_not_frame_a_vanished_video() {
     let state = ApiState::new(
         crate::Store::open(tmp.path().join("data")).unwrap(),
         "test-token".into(),
-        indexer::ProfileSet::load(None).unwrap(),
+        indexer::RegistrySnapshot::builtin().unwrap(),
         Arc::new(EmptyFetcher),
         Arc::new(downloader::MemoryDownloader::new(tmp.path().join("stage"))),
     )
@@ -234,7 +234,7 @@ fn test_state(tmp: &std::path::Path) -> ApiState {
     ApiState::new(
         crate::Store::open(tmp.join("data")).unwrap(),
         "test-token".into(),
-        indexer::ProfileSet::load(None).unwrap(),
+        indexer::RegistrySnapshot::builtin().unwrap(),
         Arc::new(EmptyFetcher),
         Arc::new(downloader::MemoryDownloader::new(tmp.join("stage"))),
     )

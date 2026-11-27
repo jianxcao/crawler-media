@@ -17,7 +17,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use domain::UserRole;
 use downloader::MemoryDownloader;
-use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
+use indexer::{FetchRequest, Fetcher, IndexerError, RegistrySnapshot};
 use tower::ServiceExt;
 
 struct NoFetch;
@@ -43,7 +43,7 @@ fn state_with_admin(root: &std::path::Path) -> (ApiState, String) {
     let state = ApiState::new(
         Store::open(root.join("data")).unwrap(),
         "executor-secret".into(),
-        ProfileSet::load(None).unwrap(),
+        RegistrySnapshot::builtin().unwrap(),
         Arc::new(NoFetch),
         Arc::new(MemoryDownloader::new(root.join("stage"))),
     )

@@ -13,7 +13,7 @@ use api::probe_manager::policy::{ProbeRequestOrigin, ProbeRequestResult};
 use axum::http::StatusCode;
 use domain::{Confidence, LedgerId, Media, MediaId, MediaKind, QualitySource, UnitKey};
 use downloader::MemoryDownloader;
-use indexer::ProfileSet;
+use indexer::RegistrySnapshot;
 use parking_lot::Mutex;
 use serde_json::{Value, json};
 use store::test_support::{FixtureFile, publish_fixture_file};
@@ -126,7 +126,7 @@ fn paused_production_state(root: &Path) -> api::ApiState {
         .unwrap();
         api::ApiState::new_production_with_admin_bootstrap_writable(
             store,
-            ProfileSet::load(None).unwrap(),
+            RegistrySnapshot::builtin().unwrap(),
             Arc::new(common::Fixtures {
                 requests: Mutex::new(Vec::new()),
                 bodies: HashMap::new(),

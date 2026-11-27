@@ -7,7 +7,10 @@ pub(crate) mod finish_search;
 use finish_search::finish_search;
 mod search;
 pub use search::{page_is_full_and_irrelevant, search_keywords_for};
-pub(crate) use search::{report_site_failures, search_torrents_for_subscribe};
+pub(crate) use search::{
+    report_site_failures, search_torrents_for_subscribe,
+    search_torrents_for_subscribe_with_snapshot,
+};
 pub(crate) mod transfer;
 pub use transfer::transfer_one;
 
@@ -47,7 +50,16 @@ fn rss_torrents_for_sites(
     state: &ApiState,
     sites: &[domain::Site],
 ) -> (Vec<domain::Torrent>, bool, Vec<String>) {
-    let outcome = state.indexer.rss(sites);
+    let snapshot = state.indexer.snapshot();
+    rss_torrents_for_sites_with_snapshot(state, &snapshot, sites)
+}
+
+fn rss_torrents_for_sites_with_snapshot(
+    state: &ApiState,
+    snapshot: &indexer::RegistrySnapshot,
+    sites: &[domain::Site],
+) -> (Vec<domain::Torrent>, bool, Vec<String>) {
+    let outcome = state.indexer.rss_with_snapshot(snapshot, sites);
     let mut failures = Vec::new();
     let succeeded = report_site_failures(&outcome, sites, "rss", &mut failures);
     (outcome.torrents, succeeded, failures)
@@ -83,6 +95,9 @@ impl Runner for StateRunner {
                 crate::http::browser_settings::reconcile_obscura(&self.state);
                 Ok(())
             }
+            JobKind::PluginTask => crate::plugins::run_task_job(&self.state, job),
+            JobKind::PluginCommand => crate::plugins::run_command_job(&self.state, job),
+            JobKind::PluginReconcile => crate::plugins::run_reconcile_job(&self.state, job),
         }
     }
 }
@@ -148,12 +163,19 @@ fn search(
             // FetchMode::Both = RSS + 关键词搜索都要：按 enclosure 去重合并，
             // 不能只走关键词搜索（旧行为让「两者」实际只有搜索）。
             (_, FetchMode::Both) => {
+                let snapshot = state.indexer.snapshot();
                 let (mut merged, keywords, search_succeeded, mut failures) =
-                    search_torrents_for_subscribe(&state, &sites, &media, &subscribe.coverage);
+                    search_torrents_for_subscribe_with_snapshot(
+                        state,
+                        &snapshot,
+                        &sites,
+                        &media,
+                        &subscribe.coverage,
+                    );
                 let mut seen: std::collections::HashSet<String> =
                     merged.iter().map(|t| t.enclosure.clone()).collect();
                 let (rss_torrents, rss_succeeded, rss_failures) =
-                    rss_torrents_for_sites(state, &sites);
+                    rss_torrents_for_sites_with_snapshot(state, &snapshot, &sites);
                 failures.extend(rss_failures);
                 for torrent in rss_torrents {
                     if seen.insert(torrent.enclosure.clone()) {
@@ -485,6 +507,8 @@ mod tests {
             downloader_id: None,
             enabled: true,
             maintenance_via: domain::MaintenanceVia::Http,
+            browser_search: false,
+            timezone: "UTC".into(),
         }
     }
 
@@ -492,11 +516,15 @@ mod tests {
     fn all_site_failures_mark_a_search_round_failed_but_partial_failure_does_not() {
         let sites = [site(), site()];
         let outcome = indexer::SearchOutcome {
+            generation: 1,
             torrents: Vec::new(),
             failures: sites
                 .iter()
                 .map(|site| indexer::SiteFailure {
                     site_id: site.id,
+                    provider_id: Some(site.profile_id.clone()),
+                    generation: 1,
+                    kind: indexer::SiteFailureKind::Fetch,
                     error: "offline".into(),
                 })
                 .collect(),
@@ -512,9 +540,13 @@ mod tests {
         assert_eq!(failures[0], "site: offline");
 
         let partial = indexer::SearchOutcome {
+            generation: 1,
             torrents: Vec::new(),
             failures: vec![indexer::SiteFailure {
                 site_id: sites[0].id,
+                provider_id: Some(sites[0].profile_id.clone()),
+                generation: 1,
+                kind: indexer::SiteFailureKind::Fetch,
                 error: "offline".into(),
             }],
         };

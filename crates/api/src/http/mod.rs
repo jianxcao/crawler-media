@@ -46,6 +46,7 @@ pub(crate) mod playback_device_target;
 pub(crate) mod playback_logs;
 pub(crate) mod playback_stats;
 pub(crate) mod playback_views;
+pub(crate) mod plugins;
 pub(crate) mod probe_settings;
 pub(crate) mod proxy_settings;
 pub(crate) mod reidentify;
@@ -134,9 +135,11 @@ pub fn router_with_slow_after(state: ApiState, slow_after: std::time::Duration) 
     let public = public_routes();
     let member = routes::member_routes(&state);
     let admin = routes::admin_routes(&state);
+    let plugin_assets = routes::plugin_asset_routes(&state);
 
     let protected = member
         .merge(admin)
+        .merge(plugin_assets)
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
             auth::authenticate,
