@@ -38,6 +38,9 @@ const MyPage = lazy(() => import("@/app/(app)/my/page"));
 const SearchPage = lazy(() => import("@/app/(app)/search/page"));
 const SettingsIndexPage = lazy(() => import("@/app/(app)/settings/page"));
 const SettingsSectionPage = lazy(() => import("@/app/(app)/settings/[section]/page"));
+const PluginDetailPage = lazy(() => import("@/app/(app)/settings/plugins/[pluginId]/page"));
+const PluginAppRoutePage = lazy(() => import("@/app/(app)/plugin-apps/[pluginId]/[surfaceId]/page"));
+const PluginDashboardPage = lazy(() => import("@/app/(app)/dashboard/page"));
 const SubscriptionsPageRoute = lazy(() => import("@/app/(app)/subscriptions/page"));
 const SubscriptionDetailPage = lazy(() => import("@/app/(app)/subscriptions/[id]/page"));
 const TasksRedirectPage = lazy(() => import("@/app/(app)/tasks/page"));
@@ -85,6 +88,9 @@ createRoot(document.getElementById("root")!).render(
             <Route path="search" element={<SearchPage />} />
             <Route path="settings" element={<SettingsIndexPage />} />
             <Route path="settings/:section" element={<SettingsSectionPage />} />
+            <Route path="settings/plugins/:pluginId" element={<PluginDetailPage />} />
+            <Route path="plugin-apps/:pluginId/:surfaceId" element={<PluginAppRoutePage />} />
+            <Route path="dashboard" element={<PluginDashboardPage />} />
             <Route path="subscriptions" element={<SubscriptionsPageRoute />} />
             <Route path="subscriptions/:id" element={<SubscriptionDetailPage />} />
             <Route path="tasks" element={<TasksRedirectPage />} />

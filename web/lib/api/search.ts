@@ -351,6 +351,43 @@ export interface SearchStreamDone {
   total: number;
   elapsed_ms: number;
   sites: SiteSearchStatus[];
+  /** 经 search.after / filter.after 钩子过滤、去重与重排后的最终命中列表。 */
+  items?: TorrentHit[];
+}
+
+function hitStreamKey(hit: TorrentHit): string {
+  return `${hit.site_id}/${hit.id ?? hit.enclosure}`;
+}
+
+/** 用单站重试 `done.items` 替换该站点此前的暂存命中。 */
+export function reconcileRetriedSiteItems(
+  prev: TorrentHit[],
+  siteId: string,
+  finalItems: TorrentHit[],
+): TorrentHit[] {
+  return [...prev.filter((h) => h.site_id !== siteId), ...finalItems];
+}
+
+/** 用分页加载 `done.items` 替换本页暂存命中并保留此前各页去重结果。 */
+export function reconcilePagedStreamItems(
+  prev: TorrentHit[],
+  pageBatchKeys: ReadonlySet<string>,
+  finalItems: TorrentHit[],
+): { items: TorrentHit[]; added: number } {
+  const prior = prev.filter((h) => !pageBatchKeys.has(hitStreamKey(h)));
+  const seenPrior = new Set(prior.map(hitStreamKey));
+  const reconciled: TorrentHit[] = [];
+  for (const h of finalItems) {
+    const key = hitStreamKey(h);
+    if (!seenPrior.has(key)) {
+      seenPrior.add(key);
+      reconciled.push(h);
+    }
+  }
+  return {
+    items: reconciled.length > 0 ? [...prior, ...reconciled] : prior,
+    added: reconciled.length,
+  };
 }
 
 /** 流式搜索事件的可辨识联合，事件序列：start → site_start×N → (site_result|site_error)×N → done。 */

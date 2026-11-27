@@ -1,7 +1,8 @@
 "use client";
 
 import { ArtworkImage } from "@/components/artwork-image";
-import type { ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
+import { Link } from "react-router-dom";
 
 import {
   ActivityIcon,
@@ -11,10 +12,12 @@ import {
   FolderSyncIcon,
   LibraryIcon,
   PanelLeftIcon,
+  PlugIcon,
   TvIcon,
 } from "@/components/icons";
 import { JobCenter } from "@/components/job-center";
 import { UserMenu } from "@/components/user-menu";
+import { fetchPluginUiNavigation, type UiNavigationItemView } from "@/lib/api/plugins";
 import { useBackdrop } from "@/lib/backdrop";
 import { sidebarGlass } from "@/lib/glass";
 import { applyNavOrder } from "@/lib/sidebar-nav";
@@ -103,7 +106,30 @@ export function Sidebar({
   // 基底为 LiquidGlassCard 同款材质；设置页拖动滑杆时经预览草稿实时生效。
   const { prefs } = useUiPrefs();
   const glass = sidebarGlass(prefs.sidebar, prefs.theme);
-  const { canSearch } = usePermissions();
+  const { session } = useSession();
+  const { canSearch, isAdmin } = usePermissions();
+  const [pluginNavItems, setPluginNavItems] = useState<UiNavigationItemView[]>([]);
+
+  useEffect(() => {
+    if (!isAdmin) {
+      setPluginNavItems([]);
+      return;
+    }
+    const ac = new AbortController();
+    fetchPluginUiNavigation(ac.signal)
+      .then((items) => {
+        if (!ac.signal.aborted) {
+          setPluginNavItems(items.filter((i) => i.subject_user_id === session.id));
+        }
+      })
+      .catch(() => {
+        if (!ac.signal.aborted) setPluginNavItems([]);
+      });
+    return () => ac.abort();
+  }, [isAdmin, session.id]);
+
+  const pluginApps = pluginNavItems.filter((i) => i.kind === "app");
+  const hasPluginDashboards = pluginNavItems.some((i) => i.kind === "dashboard");
   // 个人排序：prefs 已含设置页的未保存草稿，因此在设置页拖动时这里即时跟随
   const visibleNavItems = useVisibleNavItems();
   const navItems = applyNavOrder(visibleNavItems, prefs.nav.order);
@@ -189,6 +215,40 @@ export function Sidebar({
               </button>
             );
           })}
+
+          {isAdmin && (pluginApps.length > 0 || hasPluginDashboards) && (
+            <div className="pt-3">
+              {!collapsed && <p className="group-label mb-1 px-3">插件应用</p>}
+              {hasPluginDashboards && (
+                <Link
+                  to="/dashboard"
+                  data-active={activeNav === "dashboard"}
+                  title={collapsed ? "插件看板" : undefined}
+                  className={`glass-row nav-item py-2 max-md:py-2.5 ${collapsed ? "justify-center px-0" : "px-3"}`}
+                >
+                  <ActivityIcon className="size-[18px] shrink-0 max-md:size-[22px]" />
+                  {!collapsed && <span className="flex-1 text-ui font-medium">插件看板</span>}
+                </Link>
+              )}
+              {pluginApps.map((appItem) => {
+                const appNavId = `plugin-app:${appItem.plugin_id}:${appItem.surface_id}`;
+                return (
+                  <Link
+                    key={appNavId}
+                    to={appItem.location}
+                    data-active={activeNav === appNavId}
+                    title={collapsed ? appItem.title : undefined}
+                    className={`glass-row nav-item py-2 max-md:py-2.5 ${collapsed ? "justify-center px-0" : "px-3"}`}
+                  >
+                    <PlugIcon className="size-[18px] shrink-0 max-md:size-[22px]" />
+                    {!collapsed && (
+                      <span className="flex-1 truncate text-ui font-medium">{appItem.title}</span>
+                    )}
+                  </Link>
+                );
+              })}
+            </div>
+          )}
         </div>
 
       </nav>

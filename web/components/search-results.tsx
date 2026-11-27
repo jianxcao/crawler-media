@@ -4,24 +4,17 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 
 import {
-  EmptyHint,
-  SearchProgressBar,
-  type SiteProgress,
-  SiteStatusSummary,
-  SkeletonList,
-  SnapshotBadge,
+  EmptyHint, SearchProgressBar, type SiteProgress, SiteStatusSummary, SkeletonList, SnapshotBadge,
 } from "@/components/search/site-status-summary";
-import {
-  DownloadTargetPrefContext,
-  GrabContext,
-  useDownloadTargetPrefs,
-} from "@/components/search/torrent-contexts";
+import { DownloadTargetPrefContext, GrabContext, useDownloadTargetPrefs } from "@/components/search/torrent-contexts";
 import { AppliedChips, FilterToolbar } from "@/components/search/torrent-filter-toolbar";
 import { GroupedResults } from "@/components/search/torrent-grouped-results";
 import { PosterResults } from "@/components/search/torrent-poster-grid";
 import { TorrentRow } from "@/components/search/torrent-row";
 import {
   getTorrentSearchHistoryResults,
+  reconcilePagedStreamItems,
+  reconcileRetriedSiteItems,
   streamSearchTorrents,
   type SiteSearchStatus,
   type TorrentHit,
@@ -110,6 +103,8 @@ export function SearchResults({ query, onResearch, grabForSubscriptionId }: Sear
 
   const [fatalError, setFatalError] = useState<string | null>(null);
   const [items, setItems] = useState<TorrentHit[]>([]);
+  const itemsRef = useRef(items);
+  itemsRef.current = items;
   const [siteProgress, setSiteProgress] = useState<SiteProgress[]>([]);
   const [totalElapsedMs, setTotalElapsedMs] = useState<number | null>(null);
   const [snapshotAt, setSnapshotAt] = useState<string | null>(null);
@@ -210,6 +205,7 @@ export function SearchResults({ query, onResearch, grabForSubscriptionId }: Sear
             break;
           }
           case "done":
+            if (Array.isArray(event.data.items)) setItems(event.data.items);
             setTotalElapsedMs(event.data.elapsed_ms);
             setPhase("done");
             break;
@@ -227,12 +223,7 @@ export function SearchResults({ query, onResearch, grabForSubscriptionId }: Sear
   const retrySite = (siteId: string) => {
     setItems((prev) => prev.filter((h) => h.site_id !== siteId));
     setSiteProgress((prev) =>
-      patchSiteProgress(prev, siteId, {
-        phase: "searching",
-        count: 0,
-        error: null,
-        elapsed_ms: null,
-      }),
+      patchSiteProgress(prev, siteId, { phase: "searching", count: 0, error: null, elapsed_ms: null }),
     );
     const controller = new AbortController();
     auxAbortsRef.current.add(controller);
@@ -243,22 +234,16 @@ export function SearchResults({ query, onResearch, grabForSubscriptionId }: Sear
           const d = event.data;
           setItems((prev) => [...prev, ...d.items]);
           setSiteProgress((prev) =>
-            patchSiteProgress(prev, d.site_id, {
-              phase: "ok",
-              count: d.count,
-              error: null,
-              elapsed_ms: d.elapsed_ms,
-            }),
+            patchSiteProgress(prev, d.site_id, { phase: "ok", count: d.count, error: null, elapsed_ms: d.elapsed_ms }),
           );
         } else if (event.type === "site_error") {
           const d = event.data;
           setSiteProgress((prev) =>
-            patchSiteProgress(prev, d.site_id, {
-              phase: "error",
-              error: d.error,
-              elapsed_ms: d.elapsed_ms,
-            }),
+            patchSiteProgress(prev, d.site_id, { phase: "error", error: d.error, elapsed_ms: d.elapsed_ms }),
           );
+        } else if (event.type === "done" && Array.isArray(event.data.items)) {
+          const finalItems = event.data.items;
+          setItems((prev) => reconcileRetriedSiteItems(prev, siteId, finalItems));
         }
       },
       { signal: controller.signal },
@@ -279,21 +264,37 @@ export function SearchResults({ query, onResearch, grabForSubscriptionId }: Sear
   const loadMore = () => {
     if (loadingMore || exhausted) return;
     const next = page + 1;
+    const priorItems = itemsRef.current;
+    const priorKeys = new Set(priorItems.map((h) => `${h.site_id}/${torrentIdOf(h)}`));
     setLoadingMore(true);
     const controller = new AbortController();
     auxAbortsRef.current.add(controller);
     let added = 0;
+    const pageBatchKeys = new Set<string>();
     streamSearchTorrents(
       { keyword: query.keyword, scope: query.scope, page: next },
       (event) => {
-        if (event.type !== "site_result") return;
-        const d = event.data;
-        setItems((prev) => {
-          const seen = new Set(prev.map((h) => `${h.site_id}/${torrentIdOf(h)}`));
-          const fresh = d.items.filter((h) => !seen.has(`${h.site_id}/${torrentIdOf(h)}`));
+        if (event.type === "site_result") {
+          const fresh = event.data.items.filter((h) => {
+            const key = `${h.site_id}/${torrentIdOf(h)}`;
+            if (priorKeys.has(key) || pageBatchKeys.has(key)) return false;
+            pageBatchKeys.add(key);
+            return true;
+          });
           added += fresh.length;
-          return fresh.length > 0 ? [...prev, ...fresh] : prev;
-        });
+          if (fresh.length > 0) {
+            setItems((prev) => {
+              const seen = new Set(prev.map((h) => `${h.site_id}/${torrentIdOf(h)}`));
+              const extra = fresh.filter((h) => !seen.has(`${h.site_id}/${torrentIdOf(h)}`));
+              return extra.length > 0 ? [...prev, ...extra] : prev;
+            });
+          }
+        } else if (event.type === "done" && Array.isArray(event.data.items)) {
+          const finalItems = event.data.items;
+          const batchSnapshot = new Set(pageBatchKeys);
+          added = reconcilePagedStreamItems(priorItems, new Set(), finalItems).added;
+          setItems((prev) => reconcilePagedStreamItems(prev, batchSnapshot, finalItems).items);
+        }
       },
       { signal: controller.signal },
     )

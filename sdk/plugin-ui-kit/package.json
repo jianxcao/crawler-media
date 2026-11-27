@@ -1,0 +1,22 @@
+{
+  "name": "@crawler-media/plugin-ui-kit",
+  "version": "1.0.0",
+  "description": "Themed UI primitive kit aligned with crawler-media host design tokens.",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./src/index.tsx",
+      "default": "./src/index.tsx"
+    },
+    "./style.css": "./src/style.css"
+  },
+  "peerDependencies": {
+    "react": "19.3.0",
+    "react-dom": "19.3.0"
+  },
+  "devDependencies": {
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "typescript": "5.9.3"
+  }
+}

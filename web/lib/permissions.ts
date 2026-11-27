@@ -43,12 +43,17 @@ export function roleLabel(session: SessionView): string {
  */
 export function accessiblePathFor(session: SessionView, requestedPath: string): string {
   if (session.role === "member") {
-    // Agent 入口（首页输入台 / 直达页 / 会话页）一律挡在成员之外：界面上已经
-    // 不给入口，手输 URL 也不该看到一个后端全 403 的空壳页
+    // Agent 入口与管理员插件工作区一律挡在成员之外：后端也会返回 403
     if (
       requestedPath === "/" ||
       requestedPath === "/new" ||
-      requestedPath.startsWith("/sessions/")
+      requestedPath.startsWith("/sessions/") ||
+      requestedPath === "/settings/plugins" ||
+      requestedPath.startsWith("/settings/plugins/") ||
+      requestedPath === "/plugin-apps" ||
+      requestedPath.startsWith("/plugin-apps/") ||
+      requestedPath === "/dashboard" ||
+      requestedPath.startsWith("/dashboard/")
     ) {
       return "/library";
     }

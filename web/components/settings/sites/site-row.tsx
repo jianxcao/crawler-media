@@ -6,10 +6,6 @@ import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 
 import { useConfirm, useToast } from "@/components/feedback";
 import { ChevronDownIcon, MoreIcon } from "@/components/icons";
-import {
-  BoostReadout,
-  BoostSettingsModal,
-} from "@/components/settings/sites/boost-settings-modal";
 import { AUTH_TYPE_LABEL, SiteForm } from "@/components/settings/sites/site-form";
 import {
   type CatalogItem,
@@ -17,13 +13,10 @@ import {
   deleteSite,
   reverifySite,
   setSiteEnabled,
-  setSiteRatioBoost,
   type Site,
-  type SiteBoostStats,
   updateSite,
 } from "@/lib/api/sites";
 import { useDownloadTasks } from "@/lib/download-tasks";
-import { formatBytes } from "@/lib/format";
 
 const STATUS_META = {
   enabled: { label: "已接入", color: "var(--ok)" },
@@ -35,7 +28,6 @@ const STATUS_META = {
 interface SiteRowProps {
   item: CatalogItem;
   site: Site;
-  boost?: SiteBoostStats;
   expanded: boolean;
   onToggle: () => void;
   /** 确保展开（不切换）：菜单里的「编辑授权」需要先展开详情再亮出表单 */
@@ -48,7 +40,6 @@ interface SiteRowProps {
 export function SiteRow({
   item,
   site,
-  boost,
   expanded,
   onToggle,
   onOpen,
@@ -60,13 +51,11 @@ export function SiteRow({
   const toast = useToast();
   const [busy, setBusy] = useState(false);
   const [editingAuth, setEditingAuth] = useState(false);
-  const [boostModal, setBoostModal] = useState<"enable" | "adjust" | null>(null);
   const [actionStatus, setActionStatus] = useState<{
     tone: "ok" | "danger";
     text: string;
   } | null>(null);
   const meta = STATUS_META[site.enabled ? "enabled" : "disabled"];
-  const boosting = boost?.boost.enabled === true;
 
   async function guard(fn: () => Promise<void>) {
     setBusy(true);
@@ -96,20 +85,6 @@ export function SiteRow({
     }
   }
 
-  async function disableBoost() {
-    const ok = await confirm({
-      title: `关闭「${site.name}」的自动刷分享率？`,
-      bullets: [
-        "停止抢该站新发布的免费种子",
-        "已在做种的刷流任务全部保留，不删除任何数据",
-        "站点索引同步回到正常自适应节奏",
-        "重新开启时会再次确认预算与保留期",
-      ],
-      confirmLabel: "关闭刷流",
-    });
-    if (!ok) return;
-    await guard(async () => onChanged(await setSiteRatioBoost(site.id, false)));
-  }
 
   return (
     <div>
@@ -158,12 +133,6 @@ export function SiteRow({
           )}
         </div>
 
-        {boosting && (
-          <div className="order-3 basis-full sm:order-none sm:basis-auto">
-            <BoostReadout boost={boost} />
-          </div>
-        )}
-
         <div className="flex shrink-0 items-center gap-0.5">
           <span className="flex size-7 items-center justify-center rounded-full text-[var(--text-faint)] transition-colors group-hover:bg-white/[0.08] group-hover:text-[var(--text-muted)]">
             <ChevronDownIcon
@@ -173,14 +142,10 @@ export function SiteRow({
           <SiteActionsMenu
             site={site}
             busy={busy}
-            boosting={boosting}
             supportsCheckIn={item.supports_check_in ?? item.profile_id !== "mteam"}
             onSetEnabled={(enabled) =>
               void guard(async () => onChanged(await setSiteEnabled(site.id, enabled)))
             }
-            onEnableBoost={() => setBoostModal("enable")}
-            onDisableBoost={() => void disableBoost()}
-            onBoostSettings={() => setBoostModal("adjust")}
             onEditAuth={() => {
               onOpen();
               setEditingAuth(true);
@@ -210,21 +175,10 @@ export function SiteRow({
         </div>
       </div>
 
-      <BoostSettingsModal
-        open={boostModal !== null}
-        mode={boostModal ?? "adjust"}
-        siteName={site.name}
-        site={site}
-        boost={boost}
-        onClose={() => setBoostModal(null)}
-        onChanged={onChanged}
-      />
-
       {expanded && (
         <SiteDetail
           item={item}
           site={site}
-          boost={boost}
           busy={busy}
           guard={guard}
           onChanged={onChanged}
@@ -236,12 +190,11 @@ export function SiteRow({
   );
 }
 
-/* —— 展开详情：P2 信息与刷流设置 —— */
+/* —— 展开详情 —— */
 
 interface SiteDetailProps {
   item: CatalogItem;
   site: Site;
-  boost?: SiteBoostStats;
   busy: boolean;
   guard: (fn: () => Promise<void>) => Promise<void>;
   onChanged: (site: Site) => void;
@@ -252,7 +205,6 @@ interface SiteDetailProps {
 function SiteDetail({
   item,
   site,
-  boost,
   busy,
   guard,
   onChanged,
@@ -261,21 +213,6 @@ function SiteDetail({
 }: SiteDetailProps) {
   return (
     <div className="divide-y divide-white/[0.05] border-t border-white/[0.06] bg-white/[0.02] px-4 py-3 sm:px-5">
-      {boost?.boost.enabled && (
-        <DetailSection label="刷流">
-          <StatGrid>
-            <DetailStat
-              label="存储预算"
-              value={formatBytes(boost.boost.budget_bytes ?? 0)}
-            />
-            <DetailStat
-              label="汰换保留期"
-              value={(boost.boost.hold_days ?? 0) > 0 ? `${boost.boost.hold_days} 天` : "不保护"}
-            />
-          </StatGrid>
-        </DetailSection>
-      )}
-
       <DetailSection label="授权">
         {editingAuth ? (
           <SiteForm
@@ -365,34 +302,11 @@ function DetailSection({ label, children }: { label: string; children: React.Rea
   );
 }
 
-function StatGrid({ children }: { children: React.ReactNode }) {
-  return (
-    <div className="grid grid-cols-2 gap-x-5 gap-y-3 sm:grid-cols-3 lg:grid-cols-4">
-      {children}
-    </div>
-  );
-}
-
-function DetailStat({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="min-w-0">
-      <p className="truncate text-micro text-[var(--text-faint)]">{label}</p>
-      <p className="mt-0.5 truncate text-ui font-semibold tabular-nums text-[var(--text)] max-sm:text-sub">
-        {value}
-      </p>
-    </div>
-  );
-}
-
 interface SiteActionsMenuProps {
   site: Site;
   busy: boolean;
-  boosting: boolean;
   supportsCheckIn: boolean;
   onSetEnabled: (enabled: boolean) => void;
-  onEnableBoost: () => void;
-  onDisableBoost: () => void;
-  onBoostSettings: () => void;
   onEditAuth: () => void;
   onCheckIn: () => void;
   onReverify: () => void;
@@ -402,12 +316,8 @@ interface SiteActionsMenuProps {
 function SiteActionsMenu({
   site,
   busy,
-  boosting,
   supportsCheckIn,
   onSetEnabled,
-  onEnableBoost,
-  onDisableBoost,
-  onBoostSettings,
   onEditAuth,
   onCheckIn,
   onReverify,
@@ -445,18 +355,6 @@ function SiteActionsMenu({
           >
             {site.enabled ? "停用站点" : "启用站点"}
           </DropdownMenu.Item>
-          <DropdownMenu.Item
-            onSelect={boosting ? onDisableBoost : onEnableBoost}
-            disabled={busy}
-            className={itemClass}
-          >
-            {boosting ? "关闭刷流…" : "开启刷流…"}
-          </DropdownMenu.Item>
-          {boosting && (
-            <DropdownMenu.Item onSelect={onBoostSettings} disabled={busy} className={itemClass}>
-              刷流设置…
-            </DropdownMenu.Item>
-          )}
           <DropdownMenu.Item onSelect={onEditAuth} disabled={busy} className={itemClass}>
             编辑授权
           </DropdownMenu.Item>

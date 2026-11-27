@@ -9,6 +9,7 @@ export type SettingsSectionId =
   | "scrape"
   | "sites"
   | "downloaders"
+  | "plugins"
   | "logs";
 
 /** 设置页的分区（进入设置后替换左侧菜单）。 */
@@ -67,6 +68,7 @@ export const settingsSectionGroups: SettingsSectionGroup[] = [
   {
     label: "系统",
     items: [
+      { id: "plugins", label: "插件", description: "插件管理、权限授予、UI 信任与任务运维" },
       { id: "logs", label: "系统日志", description: "查看实时运行日志、下载调度与错误排查" },
     ],
   },

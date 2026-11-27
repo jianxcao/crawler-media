@@ -48,10 +48,11 @@ test("legacy fake mock modules in web/lib are removed", () => {
 
 test("settings-sections provides pure metadata and role-filtered groups", async () => {
   const mod = await import("../lib/settings-sections.ts");
-  assert.equal(mod.settingsSections.length, 10);
+  assert.equal(mod.settingsSections.length, 11);
   const ids = mod.settingsSections.map((s) => s.id);
   assert.ok(ids.includes("overview"));
   assert.ok(ids.includes("appearance"));
+  assert.ok(ids.includes("plugins"));
 
   const adminIds = mod.settingsSectionGroupsFor("admin").flatMap((g) => g.items.map((i) => i.id));
   assert.ok(adminIds.includes("overview"));

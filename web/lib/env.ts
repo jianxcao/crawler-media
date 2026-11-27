@@ -1,5 +1,5 @@
 function readPublicEnv(key: string, fallback: string): string {
-  const value = import.meta.env[key]?.trim();
+  const value = import.meta.env?.[key]?.trim();
   return value ? value : fallback;
 }
 

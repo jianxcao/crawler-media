@@ -457,6 +457,17 @@ function navIdFromPath(pathname: string): string {
   if (pathname.startsWith("/collections")) return "collections";
   if (pathname.startsWith("/discover/movie")) return "explore-movies";
   if (pathname.startsWith("/discover/tv")) return "explore-tv";
+  if (pathname === "/dashboard" || pathname.startsWith("/dashboard/")) return "dashboard";
+  if (pathname.startsWith("/plugin-apps/")) {
+    const [, , pid, sid] = pathname.split("/");
+    if (pid && sid) {
+      try {
+        return `plugin-app:${decodeURIComponent(pid)}:${decodeURIComponent(sid)}`;
+      } catch {
+        return "";
+      }
+    }
+  }
   return "";
 }
 

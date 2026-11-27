@@ -6,6 +6,7 @@ import {
   DownloadIcon,
   PaletteIcon,
   PhotoIcon,
+  PlugIcon,
   ServerIcon,
   ShieldIcon,
   TerminalIcon,
@@ -27,5 +28,6 @@ export const SETTINGS_SECTION_ICON: Record<SettingsSectionId, IconComponent> = {
   scrape: WandIcon,
   sites: ServerIcon,
   downloaders: DownloadIcon,
+  plugins: PlugIcon,
   logs: TerminalIcon,
 };

@@ -822,7 +822,6 @@ test("ConfirmDialog danger button, DeleteDialog spinners, paper dark-media-surfa
 
   for (const rel of [
     "components/site-config-section.tsx",
-    "components/settings/sites/boost-settings-modal.tsx",
     "components/downloader-config-section.tsx",
     "components/settings/downloaders/downloader-limits-modal.tsx",
     "components/settings/downloaders/downloader-row.tsx",

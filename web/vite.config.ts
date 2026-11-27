@@ -1,5 +1,6 @@
 import { defineConfig, type UserConfig } from "vite";
 import react from "@vitejs/plugin-react";
+import { federation } from "@module-federation/vite";
 import path from "node:path";
 
 /**
@@ -15,7 +16,37 @@ export default defineConfig((): UserConfig => {
   const backendTarget = process.env.VITE_BACKEND_TARGET || "http://127.0.0.1:18765";
 
   return {
-    plugins: [react()],
+    plugins: [
+      react(),
+      federation({
+        name: "crawler_media_host",
+        dts: false,
+        manifest: false,
+        remotes: {},
+        shared: {
+          react: {
+            singleton: true,
+            requiredVersion: "19.3.0",
+          },
+          "react-dom": {
+            singleton: true,
+            requiredVersion: "19.3.0",
+          },
+          "react/jsx-runtime": {
+            singleton: true,
+            requiredVersion: "19.3.0",
+          },
+          "@crawler-media/plugin-ui-sdk": {
+            singleton: true,
+            requiredVersion: "1.0.0",
+          },
+          "@crawler-media/plugin-ui-kit": {
+            singleton: true,
+            requiredVersion: "1.0.0",
+          },
+        },
+      }),
+    ],
     resolve: {
       alias: {
         "@": path.resolve(__dirname, "."),

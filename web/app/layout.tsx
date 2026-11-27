@@ -8,8 +8,9 @@ import { Outlet } from "react-router-dom";
 import { RouteFallback } from "@/components/route-fallback";
 import { ViewportKeyboard } from "@/components/viewport-keyboard";
 
-// 先引入液态玻璃组件自带的样式,再引入本项目的全局深色主题(后者可覆盖前者)。
+// 先引入液态玻璃组件和插件 UI Kit 样式,再引入本项目的全局深色主题(后者可覆盖前者)。
 import "@/vendor/liquid-glass/styles.css";
+import "@crawler-media/plugin-ui-kit/style.css";
 import "./globals.css";
 
 export default function RootLayout() {

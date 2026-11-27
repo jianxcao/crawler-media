@@ -21,6 +21,7 @@ export interface SessionCapabilities {
 
 /** 当前登录会话。 */
 export interface SessionView {
+  id: string;
   username: string;
   nickname: string;
   avatar_url: string | null;
@@ -36,20 +37,59 @@ export interface UserView {
 }
 
 const TOKEN_KEY = "mc_token";
+export const AUTH_SESSION_CHANNEL = "cm_auth_session";
+export const AUTH_EPOCH_STORAGE_KEY = "cm_auth_epoch";
+
+export interface SessionBoundaryEvent {
+  kind: "login" | "logout";
+  userId?: string;
+}
+
+export function notifySessionBoundaryChange(event: SessionBoundaryEvent): void {
+  const payload: SessionBoundaryEvent =
+    event.kind === "login" && event.userId
+      ? { kind: "login", userId: event.userId }
+      : { kind: "logout" };
+  if (typeof BroadcastChannel !== "undefined") {
+    try {
+      const channel = new BroadcastChannel(AUTH_SESSION_CHANNEL);
+      channel.postMessage(payload);
+      channel.close();
+    } catch {
+      /* Ignore closed or unsupported BroadcastChannel */
+    }
+  }
+  if (typeof window !== "undefined") {
+    try {
+      window.localStorage.setItem(
+        AUTH_EPOCH_STORAGE_KEY,
+        JSON.stringify({ ...payload, ts: Date.now(), nonce: Math.random() }),
+      );
+    } catch {
+      /* Privacy mode may forbid localStorage writes */
+    }
+  }
+}
 
 function persistToken(token: string | null): void {
   if (typeof window === "undefined") return;
-  if (token) {
-    window.localStorage.setItem(TOKEN_KEY, token);
-  } else {
-    window.localStorage.removeItem(TOKEN_KEY);
+  try {
+    if (token) {
+      window.localStorage.setItem(TOKEN_KEY, token);
+    } else {
+      window.localStorage.removeItem(TOKEN_KEY);
+    }
+  } catch {
+    /* Privacy mode may forbid localStorage writes */
   }
 }
 
 /** 把自有 API 的 /auth/login 响应（{token, user}）组装成 SessionView。 */
 function sessionFromLogin(data: { token: string; user: UserView }): SessionView {
   persistToken(data.token);
+  notifySessionBoundaryChange({ kind: "login", userId: data.user.id });
   return {
+    id: data.user.id,
     username: data.user.login,
     nickname: data.user.login,
     avatar_url: null,
@@ -64,6 +104,7 @@ function sessionFromLogin(data: { token: string; user: UserView }): SessionView 
 
 function sessionFromUser(user: UserView): SessionView {
   return {
+    id: user.id,
     username: user.login,
     nickname: user.login,
     avatar_url: null,
@@ -96,6 +137,7 @@ export async function logout(): Promise<null> {
     await unwrap(request<ApiEnvelope<null>>("/auth/logout", { method: "POST" }));
   } finally {
     persistToken(null);
+    notifySessionBoundaryChange({ kind: "logout" });
   }
   return null;
 }

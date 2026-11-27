@@ -36,13 +36,6 @@ export interface Site {
   maintenance_via: "http" | "browser";
 }
 
-/** 刷流配置（PATCH /sites/{id}/boost 的可选字段，settings KV 持久化）。 */
-export interface BoostConfig {
-  enabled?: boolean;
-  budget_bytes?: number | null;
-  hold_days?: number | null;
-}
-
 /** 目录项：一个可用的 Indexer profile 及其支持授权方式。 */
 export interface CatalogItem {
   profile_id: string;
@@ -72,13 +65,6 @@ export interface VerifyResult {
   ok: boolean;
   error?: string | null;
   torrent_count?: number | null;
-}
-
-/** 刷流运行统计（GET /sites/boost-stats：每个已配置站点一行）。 */
-export interface SiteBoostStats {
-  site_id: string;
-  site_name: string;
-  boost: BoostConfig;
 }
 
 // ---------------------------------------------------------------------------
@@ -159,36 +145,6 @@ export async function checkInSite(siteId: string): Promise<Site> {
   }
   return getSite(siteId);
 }
-
-/** 设置自动刷分享率：开关 + 存储预算 + 汰换保留期（省略的字段不修改）。
- *  刷流配置走 PATCH /sites/{id}/boost，完成后回读站点视图。 */
-export async function setSiteRatioBoost(
-  siteId: string,
-  enabled: boolean,
-  budgetBytes?: number,
-  holdDays?: number,
-): Promise<Site> {
-  await unwrap(
-    request<ApiEnvelope<{ site_id: string; boost: BoostConfig }>>(`/sites/${siteId}/boost`, {
-      method: "PATCH",
-      body: JSON.stringify({
-        enabled,
-        budget_bytes: budgetBytes ?? null,
-        hold_days: holdDays ?? null,
-      }),
-    }),
-  );
-  return getSite(siteId);
-}
-
-/** 各站点的刷流运行统计，按 site_id 索引（从未刷流且未开启的站点没有条目）。 */
-export async function listSiteBoostStats(
-  init?: RequestInit,
-): Promise<Record<string, SiteBoostStats>> {
-  const rows = await unwrap(request<ApiEnvelope<SiteBoostStats[]>>("/sites/boost-stats", init));
-  return Object.fromEntries(rows.map((row) => [row.site_id, row]));
-}
-
 /** 删除站点配置。 */
 export async function deleteSite(siteId: string): Promise<{ site_id: string }> {
   await unwrap(

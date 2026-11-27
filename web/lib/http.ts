@@ -82,6 +82,15 @@ export function redirectToLoginOn401(status: number): void {
     if (path !== "/login" && path !== "/setup" && !path.startsWith("/s/")) {
       const next = encodeURIComponent(path + window.location.search);
       window.localStorage.removeItem("mc_token");
+      if (typeof BroadcastChannel !== "undefined") {
+        try {
+          const bc = new BroadcastChannel("cm_auth_session");
+          bc.postMessage({ kind: "logout" });
+          bc.close();
+        } catch {
+          /* ignore */
+        }
+      }
       clearBackdropCache();
       clearUiPrefsCache();
       window.location.href = `/login?next=${next}`;

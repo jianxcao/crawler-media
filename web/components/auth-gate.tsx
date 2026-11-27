@@ -7,7 +7,7 @@ import { useLocation, useNavigate } from "react-router-dom";
 import { getSession, type SessionView } from "@/lib/api/auth";
 import { publicEnv } from "@/lib/env";
 import { HttpError } from "@/lib/http";
-import { SessionProvider } from "@/lib/session";
+import { SessionProvider, watchSessionIdentity } from "@/lib/session";
 import { accessiblePathFor } from "@/lib/permissions";
 import { retryStartupTimeout } from "@/lib/startup-retry.mjs";
 
@@ -50,12 +50,42 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
   const [session, setSession] = useState<SessionView | null>(cachedSession);
   const [failure, setFailure] = useState<StartupFailure | null>(null);
   const [retryKey, setRetryKey] = useState(0);
+  const [loginEpoch, setLoginEpoch] = useState<string>(() =>
+    cachedSession ? `${cachedSession.id}:${Date.now()}` : "",
+  );
+
+  const forceReloadOnMismatch = useCallback((reason: string) => {
+    cachedSession = null;
+    setLoginEpoch("");
+    setSession(null);
+    if (typeof window !== "undefined") {
+      if (reason === "session-invalid") {
+        const next = encodeURIComponent(window.location.pathname + window.location.search);
+        window.location.href = `/login?next=${next}`;
+      } else {
+        window.location.reload();
+      }
+    }
+  }, []);
 
   /** 改昵称等处更新会话时，缓存要一起跟上，否则下次跨 layout 会闪回旧数据 */
   const updateSession = useCallback((next: SessionView) => {
+    if (cachedSession && (cachedSession.id !== next.id || cachedSession.role !== next.role)) {
+      forceReloadOnMismatch("session-swap");
+      return;
+    }
     cachedSession = next;
     setSession(next);
-  }, []);
+  }, [forceReloadOnMismatch]);
+
+  useEffect(() => {
+    if (!session) return;
+    return watchSessionIdentity({
+      currentSession: { id: session.id, role: session.role },
+      checkSession: () => getSession(),
+      onIdentityMismatch: forceReloadOnMismatch,
+    });
+  }, [session, forceReloadOnMismatch]);
 
   useEffect(() => {
     let cancelled = false;
@@ -72,6 +102,10 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
           (error) => !cancelled && error instanceof HttpError && error.status === 0,
         );
         if (cancelled) return;
+        if (cachedSession && (cachedSession.id !== view.id || cachedSession.role !== view.role)) {
+          forceReloadOnMismatch("session-swap");
+          return;
+        }
         cachedSession = view;
         const allowedPath = accessiblePathFor(view, pathname);
         if (allowedPath !== pathname) {
@@ -79,6 +113,7 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
           return;
         }
         setSession(view);
+        setLoginEpoch((prev) => (prev.startsWith(`${view.id}:`) ? prev : `${view.id}:${Date.now()}`));
       } catch (error) {
         if (cancelled) return;
         // 401 已由 http.ts 发起整页跳转；此处继续保持启动态，避免跳转前闪出错误卡。
@@ -94,7 +129,7 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
       cancelled = true;
       controller.abort();
     };
-  }, [pathname, retryKey, navigate]);
+  }, [pathname, retryKey, navigate, forceReloadOnMismatch]);
 
   if (!session) {
     return (
@@ -109,7 +144,11 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
   if (accessiblePathFor(session, pathname) !== pathname) {
     return <StartupStatus failure={null} onRetry={() => setRetryKey((value) => value + 1)} />;
   }
-  return <SessionProvider value={{ session, setSession: updateSession }}>{children}</SessionProvider>;
+  return (
+    <SessionProvider value={{ session, setSession: updateSession, loginEpoch }}>
+      {children}
+    </SessionProvider>
+  );
 }
 
 /** 把启动异常收敛成部署用户能理解的中文信息；后端主动返回的业务消息原样保留。 */

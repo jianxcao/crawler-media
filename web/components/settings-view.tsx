@@ -13,6 +13,7 @@ import { ScrapeSettingsSection } from "@/components/scrape-settings-section";
 import { SiteConfigSection, SitesSectionSubtitle } from "@/components/site-config-section";
 import { SubscriptionSettingsSection } from "@/components/subscription-settings-section";
 import { SystemLogsSection } from "@/components/system-logs-section";
+import { PluginManagerView } from "@/components/plugins/PluginManagerView";
 import { GlassPanel } from "@/components/glass-panel";
 import { ArrowLeftIcon } from "@/components/icons";
 import { useBackdrop } from "@/lib/backdrop";
@@ -140,6 +141,7 @@ export function SettingsPanel({ active }: SettingsPanelProps) {
         className={`mx-auto w-full px-6 pb-20 pt-12 max-md:px-4 max-md:pb-12 max-md:pt-6 ${
           section.id === "sites" ||
           section.id === "downloaders" ||
+          section.id === "plugins" ||
           section.id === "logs" ||
           section.id === "overview"
             ? "max-w-6xl xl:max-w-7xl"
@@ -190,6 +192,8 @@ export function SettingsPanel({ active }: SettingsPanelProps) {
           <DownloaderConfigSection />
         ) : section.id === "members" ? (
           <MembersSection />
+        ) : section.id === "plugins" ? (
+          <PluginManagerView />
         ) : section.id === "logs" ? (
           <SystemLogsSection />
         ) : null}

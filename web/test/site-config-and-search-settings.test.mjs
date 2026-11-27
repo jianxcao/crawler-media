@@ -492,12 +492,6 @@ test("SiteRow avoids duplicate 已停用 badge and surfaces toast + inline feedb
         MoreIcon: () => React.createElement("span", null, "..."),
       };
     }
-    if (spec === "@/components/settings/sites/boost-settings-modal") {
-      return {
-        BoostReadout: () => null,
-        BoostSettingsModal: () => null,
-      };
-    }
     if (spec === "@/components/settings/sites/site-form") {
       return {
         AUTH_TYPE_LABEL: { cookie: "Cookie", apikey: "API Key", credential: "账密", none: "无" },
@@ -510,7 +504,6 @@ test("SiteRow avoids duplicate 已停用 badge and surfaces toast + inline feedb
         deleteSite: async () => ({ site_id: "site-hda" }),
         reverifySite: async (id) => checkInImpl(id),
         setSiteEnabled: async (_id, enabled) => ({ ...(await checkInImpl(_id)), enabled }),
-        setSiteRatioBoost: async (id) => checkInImpl(id),
         updateSite: async (id) => checkInImpl(id),
       };
     }

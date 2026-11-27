@@ -10,13 +10,10 @@ import { QueueCongestionTip, SiteRow } from "@/components/settings/sites/site-ro
 import {
   type CatalogItem,
   listConfiguredSites,
-  listSiteBoostStats,
   listSiteCatalog,
   type Site,
-  type SiteBoostStats,
 } from "@/lib/api/sites";
 import { useTabParam } from "@/lib/use-tab-param";
-import { useVisiblePolling } from "@/lib/use-visible-polling";
 
 const TABS = [
   { id: "sites", label: "站点接入" },
@@ -69,7 +66,6 @@ export function SiteConfigSection() {
   );
   const [catalog, setCatalog] = useState<CatalogItem[]>([]);
   const [configured, setConfigured] = useState<Site[]>([]);
-  const [boostStats, setBoostStats] = useState<Record<string, SiteBoostStats>>({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
@@ -90,14 +86,12 @@ export function SiteConfigSection() {
   const load = useCallback(async () => {
     setError(null);
     try {
-      const [cat, cfg, boost] = await Promise.all([
+      const [cat, cfg] = await Promise.all([
         listSiteCatalog(),
         listConfiguredSites(),
-        listSiteBoostStats(),
       ]);
       setCatalog(cat);
       setConfigured(cfg);
-      setBoostStats(boost);
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -109,18 +103,6 @@ export function SiteConfigSection() {
     void load();
   }, [load]);
 
-  const anyBoosting = Object.values(boostStats).some((b) => b.boost.enabled === true);
-  useVisiblePolling(
-    () => {
-      void listSiteBoostStats()
-        .then(setBoostStats)
-        .catch(() => {
-          /* 轮询失败静默重试，不打断页面 */
-        });
-    },
-    anyBoosting ? 30000 : null,
-  );
-
   const upsertConfigured = useCallback((next: Site) => {
     setConfigured((prev) => {
       const idx = prev.findIndex((s) => s.id === next.id);
@@ -129,7 +111,6 @@ export function SiteConfigSection() {
       copy[idx] = next;
       return copy;
     });
-    void listSiteBoostStats().then(setBoostStats).catch(() => undefined);
   }, []);
 
   const ordered = useMemo(
@@ -232,7 +213,6 @@ export function SiteConfigSection() {
                   key={site.id}
                   item={catalogMap.get(site.profile_id) ?? fallbackItem(site.profile_id)}
                   site={site}
-                  boost={boostStats[site.id]}
                   expanded={expandedSite === site.id}
                   onToggle={() =>
                     setExpandedSite((cur) => (cur === site.id ? null : site.id))
