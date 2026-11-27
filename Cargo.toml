@@ -14,12 +14,14 @@ members = [
     "crates/release",
     "crates/hooks",
     "crates/plugin-api",
+    "crates/plugin-package",
     "crates/jobs",
     "crates/api",
     "crates/playback",
     "crates/marker",
     "crates/media-server",
     "crates/cover-generator",
+    "tools/plugin",
 ]
 
 [workspace.package]
@@ -29,6 +31,8 @@ license = "MIT"
 
 [workspace.dependencies]
 plugin-api = { path = "crates/plugin-api" }
+plugin-package = { path = "crates/plugin-package" }
+plugin-cli = { path = "tools/plugin" }
 wasmtime = { version = "=50.0.1", default-features = false, features = ["component-model", "cranelift", "runtime", "std", "wat"] }
 wasm-encoder = "=0.261.0"
 wasmparser = "=0.261.0"

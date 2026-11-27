@@ -1,0 +1,13 @@
+[package]
+name = "crawler-policy-fixture"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen = { version = "=0.63.0", default-features = false, features = ["macros", "realloc"] }
+crawler-plugin-sdk = { path = "../crawler-plugin-sdk" }
+dlmalloc = { version = "=0.2.13", features = ["global"] }

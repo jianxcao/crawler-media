@@ -1,0 +1,16 @@
+[workspace]
+resolver = "3"
+members = [
+  "crawler-plugin-sdk",
+  "policy-fixture",
+  "task-fixture",
+  "endpoint-fixture",
+  "indexer-fixture",
+  "maintenance-fixture",
+]
+
+[profile.release]
+panic = "abort"
+opt-level = "s"
+strip = true
+lto = true

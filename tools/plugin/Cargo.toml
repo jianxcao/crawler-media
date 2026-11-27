@@ -1,0 +1,22 @@
+[package]
+name = "plugin-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+plugin-api.workspace = true
+plugin-package.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml = "0.9"
+sha2.workspace = true
+thiserror.workspace = true
+ureq.workspace = true
+wasmparser.workspace = true
+
+[dev-dependencies]
+blake2 = "0.10"
+base64.workspace = true
+ring = "0.17"
+tempfile.workspace = true
