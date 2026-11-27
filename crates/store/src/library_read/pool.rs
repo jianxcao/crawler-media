@@ -168,6 +168,9 @@ impl ReaderPool {
     #[doc(hidden)]
     pub fn set_capacity(&self, size: NonZeroUsize) -> Result<(), StoreError> {
         let mut state = self.inner.state.lock().unwrap_or_else(|p| p.into_inner());
+        if self.inner.cap.load(Ordering::Acquire) == size.get() {
+            return Ok(());
+        }
         if state.total != state.idle.len() || !state.waiters.is_empty() {
             return Err(StoreError::Protected(
                 "cannot resize an active reader pool".into(),

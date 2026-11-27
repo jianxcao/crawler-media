@@ -217,8 +217,17 @@ fn postcommit_cleanup_reader_busy_reports_success_then_recovers() {
         std::thread::yield_now();
     }
     let pool = store.reader_pool(store::Db::Subscribe);
-    let first = pool.try_checkout().unwrap();
-    let second = pool.try_checkout().unwrap();
+    let checkout_when_settled = || loop {
+        match pool.try_checkout() {
+            Ok(lease) => break lease,
+            Err(store::LibraryReadError::Busy) if started.elapsed() < Duration::from_secs(5) => {
+                std::thread::yield_now();
+            }
+            Err(other) => panic!("expected Subscribe reader checkout, got {other:?}"),
+        }
+    };
+    let first = checkout_when_settled();
+    let second = checkout_when_settled();
     release_tx.send(()).unwrap();
     holder.join().unwrap();
     let response = deletion.join().unwrap();

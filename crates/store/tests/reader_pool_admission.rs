@@ -215,3 +215,31 @@ fn shared_fifo_rejects_a_fifth_waiter_and_recovers_after_cancellation() {
     assert_eq!(pool.waiting(), 0);
     assert_eq!(pool.available(), 1);
 }
+
+#[test]
+fn set_capacity_is_idempotent_at_same_size_while_active_and_rejects_different_size() {
+    let dir = tempfile::tempdir_in("/tmp").unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    let pool = pool(&store);
+    let held = pool.try_checkout().unwrap();
+
+    let cap1 = NonZeroUsize::new(1).unwrap();
+    let cap2 = NonZeroUsize::new(2).unwrap();
+    assert!(
+        pool.set_capacity(cap1).is_ok(),
+        "idempotent same-size set_capacity must succeed while active"
+    );
+    assert!(
+        matches!(
+            pool.set_capacity(cap2),
+            Err(store::StoreError::Protected(_))
+        ),
+        "changing capacity while a lease is held must still be rejected"
+    );
+
+    drop(held);
+    assert!(
+        pool.set_capacity(cap2).is_ok(),
+        "resizing once idle must succeed"
+    );
+}
