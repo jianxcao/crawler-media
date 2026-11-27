@@ -13,7 +13,6 @@ use ureq::unversioned::transport::{Connector as _, RustlsConnector};
 
 use crate::management::ApiState;
 
-const CHECK_IN_UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 const MAX_CHECK_IN_BODY_BYTES: u64 = 5 * 1024 * 1024;
 
 pub fn run(state: &ApiState) -> Result<(), String> {
@@ -70,7 +69,7 @@ pub(crate) fn site_target_policy_from_parts(
 ) -> TargetPolicy {
     let mut policy = override_policy
         .cloned()
-        .unwrap_or_else(TargetPolicy::production);
+        .unwrap_or_else(|| TargetPolicy::production().with_benchmark_fake_ip_domains(true));
     if let Some(self_addr) = self_listen {
         policy = policy.with_blocked_self(self_addr);
     }
@@ -226,7 +225,10 @@ pub(crate) fn perform_api_check_in(
         let mut req_builder = ureq::http::Request::builder()
             .method(method)
             .uri(uri)
-            .header("User-Agent", CHECK_IN_UA)
+            .header(
+                "User-Agent",
+                crate::http_fetcher::effective_site_user_agent(),
+            )
             .header("Accept", "application/json");
         if is_post {
             req_builder = req_builder.header("Content-Type", "application/json");
@@ -629,7 +631,10 @@ fn attendance_request(
         let mut req_builder = ureq::http::Request::builder()
             .method(method)
             .uri(uri)
-            .header("User-Agent", CHECK_IN_UA);
+            .header(
+                "User-Agent",
+                crate::http_fetcher::effective_site_user_agent(),
+            );
         if is_mutation {
             req_builder = req_builder.header("Content-Type", "application/x-www-form-urlencoded");
         }

@@ -211,3 +211,122 @@ fn attendance_http_post_302_to_get_500_returns_unknown_outcome() {
         "POST -> 302 -> GET 500 must return UnknownOutcome, got {err:?}"
     );
 }
+
+#[test]
+fn store_policies_enable_benchmark_fake_ip_and_sync_browser_user_agent() {
+    use std::net::{IpAddr, Ipv4Addr};
+    use std::sync::Arc;
+
+    use indexer::{FetchMethod, FetchRequest, Fetcher as _};
+
+    let dir = tempfile::tempdir_in("/tmp").unwrap();
+    let store = Arc::new(store::Store::open(dir.path().join("data")).unwrap());
+
+    let site = domain::Site {
+        id: domain::SiteId::new(),
+        name: "HDArea".into(),
+        url: "https://hdarea.club".into(),
+        profile_id: "hdarea".into(),
+        cookie: None,
+        api_key: None,
+        rss_url: None,
+        proxy: None,
+        rate_limit_per_minute: None,
+        cdp_url: None,
+        downloader_id: None,
+        enabled: true,
+        maintenance_via: domain::MaintenanceVia::Http,
+        browser_search: false,
+        timezone: "Asia/Shanghai".into(),
+    };
+
+    let checkin_policy = super::site_target_policy_from_parts(None, None, &site, None);
+    let fetcher = crate::http_fetcher::HttpFetcher::with_store(store.clone());
+    let fetcher_policy = fetcher.policy_for_request("https://hdarea.club/torrents.php");
+
+    let domain_target = net_guard::normalize_url("https://hdarea.club/torrents.php", true).unwrap();
+    let fake_sock = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(198, 18, 0, 32)), 443);
+    let lan_sock = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 50, 2)), 443);
+    let literal_target =
+        net_guard::normalize_url("https://198.18.0.32/torrents.php", true).unwrap();
+
+    for pol in [&checkin_policy, &fetcher_policy] {
+        assert!(pol.validate_socket_addr(&domain_target, fake_sock).is_ok());
+        assert!(pol.validate_socket_addr(&domain_target, lan_sock).is_err());
+        assert!(
+            pol.validate_socket_addr(&literal_target, fake_sock)
+                .is_err()
+        );
+    }
+
+    // Custom browser UA set in settings propagates to HttpFetcher & AttendanceHttp requests.
+    let custom_ua = "Mozilla/5.0 (X11; Linux x86_64) Chrome/146.0.0.0 TestUA";
+    store
+        .put_setting(crate::settings_keys::GLOBAL_USER_AGENT, custom_ua)
+        .unwrap();
+    crate::user_agent::sync_user_agent(&store);
+    assert_eq!(crate::http_fetcher::effective_site_user_agent(), custom_ua);
+
+    let (addr_f, srv_f) = {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let h = std::thread::spawn(move || {
+            let mut captured = Vec::new();
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut buf = [0u8; 4096];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                captured.push(String::from_utf8_lossy(&buf[..n]).into_owned());
+                let _ = stream.write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
+                );
+                let _ = stream.flush();
+            }
+            captured
+        });
+        (addr, h)
+    };
+
+    let test_fetcher = crate::http_fetcher::HttpFetcher::with_policy(
+        net_guard::TargetPolicy::production().with_test_loopback_socket(addr_f),
+    );
+    let body = test_fetcher
+        .fetch(&FetchRequest {
+            key: "ua-test".into(),
+            url: format!("http://{addr_f}/index.php"),
+            method: FetchMethod::Get,
+            body: None,
+            cookie: None,
+            api_key: None,
+            proxy: None,
+            cdp_url: None,
+        })
+        .unwrap();
+    assert_eq!(body, "ok");
+
+    let att_resp = loopback_http(addr_f)
+        .get(&format!("http://{addr_f}/attendance.php"), None, None)
+        .unwrap();
+    assert!(att_resp.ends_with("ok"));
+
+    let reqs = srv_f.join().unwrap();
+    for raw_req in &reqs {
+        assert!(
+            raw_req.contains(custom_ua),
+            "expected User-Agent `{custom_ua}` in request headers, got: {raw_req}"
+        );
+    }
+
+    // Restore process-wide ACTIVE_USER_AGENT cleanly so sibling unit tests are unaffected.
+    store
+        .put_setting(
+            crate::settings_keys::GLOBAL_USER_AGENT,
+            crate::user_agent::DEFAULT_USER_AGENT,
+        )
+        .unwrap();
+    crate::user_agent::sync_user_agent(&store);
+    assert_ne!(
+        crate::http_fetcher::effective_site_user_agent(),
+        crate::user_agent::DEFAULT_USER_AGENT
+    );
+}

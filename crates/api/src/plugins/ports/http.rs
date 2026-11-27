@@ -270,7 +270,7 @@ fn base_policy(ctx: &ActiveInvocation) -> TargetPolicy {
         .deps
         .plugin_http_policy_override
         .clone()
-        .unwrap_or_else(TargetPolicy::production);
+        .unwrap_or_else(|| TargetPolicy::production().with_benchmark_fake_ip_domains(true));
     if let Some(self_addr) = ctx.deps.self_listen {
         policy = policy.with_blocked_self(self_addr);
     }

@@ -14,8 +14,8 @@ pub use connector::{
 pub use credentials::CredentialSlot;
 pub use error::NetGuardError;
 pub use ip::{
-    canonicalize_ip, has_unspecified_or_zero_ip, is_cloud_metadata_host, is_cloud_metadata_ip,
-    is_global_unicast,
+    canonicalize_ip, has_unspecified_or_zero_ip, is_benchmark_fake_ip, is_cloud_metadata_host,
+    is_cloud_metadata_ip, is_global_unicast,
 };
 pub use policy::{
     NetGuardLimits, OriginScope, PrivateEndpointException, TargetPolicy, path_matches_prefix,

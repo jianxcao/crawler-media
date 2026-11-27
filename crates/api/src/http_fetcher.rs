@@ -7,6 +7,16 @@ use net_guard::{CredentialSlot, GuardedMethod, GuardedRequest, NetGuardClient, T
 
 const USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
+pub(crate) fn effective_site_user_agent() -> String {
+    let active = crate::user_agent::active_user_agent();
+    let trimmed = active.trim();
+    if trimmed.is_empty() || trimmed == crate::user_agent::DEFAULT_USER_AGENT {
+        USER_AGENT.to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
 #[derive(Clone, Default)]
 pub struct HttpFetcher {
     client: NetGuardClient,
@@ -52,7 +62,7 @@ impl HttpFetcher {
     pub fn with_store(store: Arc<store::Store>) -> Self {
         Self {
             client: NetGuardClient::new(),
-            policy: TargetPolicy::production(),
+            policy: TargetPolicy::production().with_benchmark_fake_ip_domains(true),
             store: Some(store),
         }
     }
@@ -60,12 +70,14 @@ impl HttpFetcher {
     pub fn with_store_and_self_listen(store: Arc<store::Store>, self_addr: SocketAddr) -> Self {
         Self {
             client: NetGuardClient::new(),
-            policy: TargetPolicy::production().with_blocked_self(self_addr),
+            policy: TargetPolicy::production()
+                .with_blocked_self(self_addr)
+                .with_benchmark_fake_ip_domains(true),
             store: Some(store),
         }
     }
 
-    fn policy_for_request(&self, url: &str) -> TargetPolicy {
+    pub(crate) fn policy_for_request(&self, url: &str) -> TargetPolicy {
         let mut policy = self.policy.clone();
         let Some(store) = &self.store else {
             return policy;
@@ -144,7 +156,7 @@ impl Fetcher for HttpFetcher {
             .as_deref()
             .is_some_and(|key| !key.trim().is_empty());
         let policy = self.policy_for_request(&request.url);
-        let mut headers = vec![("User-Agent".to_string(), USER_AGENT.to_string())];
+        let mut headers = vec![("User-Agent".to_string(), effective_site_user_agent())];
         let (method, body) = match request.method {
             FetchMethod::Get => (GuardedMethod::Get, None),
             FetchMethod::PostJson => {

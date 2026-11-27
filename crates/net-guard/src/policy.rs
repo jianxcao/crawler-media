@@ -63,6 +63,7 @@ pub struct TargetPolicy {
     pub allowed_origins: Option<Vec<OriginScope>>,
     pub private_exceptions: Vec<PrivateEndpointException>,
     pub blocked_self: Vec<SocketAddr>,
+    pub allow_benchmark_fake_ip_domains: bool,
     test_loopback_sockets: Vec<SocketAddr>,
 }
 
@@ -91,6 +92,11 @@ impl TargetPolicy {
 
     pub fn with_blocked_self(mut self, addr: SocketAddr) -> Self {
         self.blocked_self.push(addr);
+        self
+    }
+
+    pub fn with_benchmark_fake_ip_domains(mut self, allow: bool) -> Self {
+        self.allow_benchmark_fake_ip_domains = allow;
         self
     }
 
@@ -305,6 +311,12 @@ impl TargetPolicy {
             )));
         }
         if is_global_unicast(addr.ip()) {
+            return Ok(());
+        }
+        if self.allow_benchmark_fake_ip_domains
+            && target.host_is_ip.is_none()
+            && crate::ip::is_benchmark_fake_ip(addr.ip())
+        {
             return Ok(());
         }
         if self.test_loopback_sockets.contains(&addr) {

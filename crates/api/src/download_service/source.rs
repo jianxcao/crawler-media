@@ -237,7 +237,7 @@ pub(super) fn torrent_fetch_policy(state: &ApiState) -> net_guard::TargetPolicy 
     if let Some(policy) = state.plugin_http_policy_override.clone() {
         return downloader::with_torrent_limits(policy);
     }
-    let mut policy = downloader::torrent_target_policy();
+    let mut policy = downloader::torrent_target_policy().with_benchmark_fake_ip_domains(true);
     if let Some(self_addr) = state.self_listen {
         policy = policy.with_blocked_self(self_addr);
     }
@@ -333,6 +333,16 @@ fn attach_site_transport(src: &mut TorrentSource, site: &domain::Site) {
         }
         if http_src.creds.is_none() {
             http_src.creds = build_site_creds(site, &site.url, None, None, true);
+        }
+        if !http_src
+            .headers
+            .iter()
+            .any(|(k, _)| k.eq_ignore_ascii_case("user-agent"))
+        {
+            http_src.headers.push((
+                "User-Agent".to_string(),
+                crate::http_fetcher::effective_site_user_agent(),
+            ));
         }
     }
 }

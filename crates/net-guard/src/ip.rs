@@ -254,3 +254,8 @@ pub fn is_global_unicast(ip: IpAddr) -> bool {
         IpAddr::V6(v6) => is_global_unicast_v6(v6),
     }
 }
+
+/// RFC 2544 benchmarking range (`198.18.0.0/15`), commonly assigned by router Fake-IP DNS proxies.
+pub fn is_benchmark_fake_ip(ip: IpAddr) -> bool {
+    matches!(ip, IpAddr::V4(v4) if v4.octets()[0] == 198 && (v4.octets()[1] & 0xfe) == 18)
+}

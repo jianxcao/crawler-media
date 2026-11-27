@@ -463,3 +463,77 @@ fn private_exception_scopes_private_hostname_allowance_to_matching_host_and_port
         .unwrap();
     assert_eq!(ips, vec![IpAddr::V4(Ipv4Addr::LOCALHOST)]);
 }
+
+#[test]
+fn benchmark_fake_ip_domains_opt_in_allows_domain_resolution_but_blocks_ip_literals_and_private_ranges()
+ {
+    let prod = TargetPolicy::production();
+    let domain_target = normalize_url("https://hdarea.club/torrents.php", true).unwrap();
+    let fake_ip_1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(198, 18, 0, 32)), 443);
+    let fake_ip_2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(198, 19, 255, 254)), 443);
+    assert!(
+        matches!(
+            prod.validate_socket_addr(&domain_target, fake_ip_1),
+            Err(NetGuardError::BlockedAddress(_))
+        ),
+        "default production policy must block 198.18.0.0/15"
+    );
+
+    let self_fake_ip = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(198, 18, 0, 32)), 18765);
+    let fake_ip_policy = TargetPolicy::production()
+        .with_benchmark_fake_ip_domains(true)
+        .with_blocked_self(self_fake_ip);
+
+    assert!(
+        fake_ip_policy
+            .validate_socket_addr(&domain_target, fake_ip_1)
+            .is_ok(),
+        "domain resolved to 198.18.0.32:443 must be permitted when opted in"
+    );
+    assert!(
+        fake_ip_policy
+            .validate_socket_addr(&domain_target, fake_ip_2)
+            .is_ok(),
+        "domain resolved to 198.19.255.254:443 must be permitted when opted in"
+    );
+
+    // Literal IP URLs in 198.18.0.0/15 must still be rejected.
+    let ip_literal_target = normalize_url("https://198.18.0.32/torrents.php", true).unwrap();
+    assert!(matches!(
+        fake_ip_policy.validate_socket_addr(&ip_literal_target, fake_ip_1),
+        Err(NetGuardError::BlockedAddress(_))
+    ));
+
+    // IPv4-mapped IPv6 addresses must NOT bypass via benchmark fake-IP allowance.
+    let v6_mapped = SocketAddr::new("::ffff:198.18.0.32".parse().unwrap(), 443);
+    assert!(matches!(
+        fake_ip_policy.validate_socket_addr(&domain_target, v6_mapped),
+        Err(NetGuardError::BlockedAddress(_))
+    ));
+
+    // Private hostnames and non-fake-ip private/metadata ranges remain blocked.
+    for private_url in ["http://localhost/", "http://nas.local/"] {
+        assert!(matches!(
+            fake_ip_policy.normalize_url(private_url),
+            Err(NetGuardError::BlockedAddress(_))
+        ));
+    }
+    for blocked_ip in [
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 443),
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 50, 2)), 443),
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(100, 64, 0, 1)), 443),
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(169, 254, 169, 254)), 80),
+    ] {
+        assert!(matches!(
+            fake_ip_policy.validate_socket_addr(&domain_target, blocked_ip),
+            Err(NetGuardError::BlockedAddress(_))
+        ));
+    }
+
+    // blocked_self overrides even fake-IP allowance.
+    let self_domain = normalize_url("http://hdarea.club:18765/", true).unwrap();
+    assert!(matches!(
+        fake_ip_policy.validate_socket_addr(&self_domain, self_fake_ip),
+        Err(NetGuardError::BlockedAddress(_))
+    ));
+}
