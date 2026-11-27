@@ -2,6 +2,7 @@
 id: audiences
 framework: nexusphp
 render: false
+login_success_css: ".site-userbar__name[data-uploader-actions*='logout.php'], a[href*='logout.php'], a[data-url*='logout.php'], #logout-confirm"
 search:
   path: /torrents.php
   query_param: search

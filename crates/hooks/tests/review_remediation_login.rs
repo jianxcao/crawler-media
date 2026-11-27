@@ -321,3 +321,31 @@ fn confirmed_success_and_already_checked_in_are_both_valid_outcomes() {
         );
     }
 }
+
+#[test]
+fn audiences_profile_authenticates_serialized_userbar_logout_action() {
+    let snap = indexer::RegistrySnapshot::builtin().unwrap();
+    let profile = snap.profile("audiences").unwrap();
+    let policy = hooks::NexusPhpPolicy::new(profile.login_success_css.clone());
+    let bus = HookPipeline::new();
+
+    let authed_html = r#"<html><body><span class="torrent-uploader-wrap site-userbar__name" data-uploader-actions="[{&quot;label&quot;:&quot;退出&quot;,&quot;href&quot;:&quot;logout.php&quot;}]">user</span></body></html>"#;
+    let store = credentials(Some("uid=valid"));
+    let id = store.0.lock().unwrap().id;
+    assert!(
+        LoginPlugin::http(&bus, &store, &Reply(authed_html))
+            .with_policy(&policy)
+            .login(id)
+            .is_ok(),
+        "expected audiences serialized userbar logout action to authenticate"
+    );
+
+    let guest_html = "<html><div>Guest</div></html>";
+    assert!(
+        LoginPlugin::http(&bus, &store, &Reply(guest_html))
+            .with_policy(&policy)
+            .login(id)
+            .is_err(),
+        "expected guest html to fail authentication"
+    );
+}
