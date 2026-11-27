@@ -15,6 +15,7 @@
 | [部署](deploy.md) | 运行环境、数据目录、环境变量与服务启动 |
 | [自有 API](api-contracts/self.md)、[Jellyfin API](api-contracts/jellyfin.md)、[探测设置](api-contracts/probe-settings.md) | 鉴权、用户数据、播放协议与后台探测速率控制 |
 | [领域导航](agents/domain.md) | 各领域实现与测试入口 |
+| [插件方案](plugins/README.md) | 宿主实现、插件编写/WIT、CDP 搜索与签到、刷流、[React 模块联邦 UI/SDK](plugins/frontend.md)、管理 API 及实施计划；功能交付以实施状态为准 |
 
 完整路由见 [HTTP router](../crates/api/src/http/mod.rs)、[路由表](../crates/api/src/http/routes/mod.rs) 和 `web/lib/api/*`。
 
@@ -50,3 +51,4 @@
 | [0010 Password](adr/0010-password-hashing.md) | Argon2id 密码存储与登录验证 |
 | [0011 Probe retry](adr/0011-probe-stage-retry.md) | 持久阶段/退避，不以NFO代替Probe成功 |
 | [0012 Library removal](adr/0012-library-removal.md) | 删库即取消该库工作；清除无其他库引用的孤儿 Media；磁盘字节保留 |
+| [0013 Plugin runtime](adr/0013-wasm-plugin-runtime.md) | WASM Component、全流程 Hook、受控 CDP、签到/刷流插件与联邦 UI（Phase 1 已实施，见 `docs/plugins/implementation-status.md`） |

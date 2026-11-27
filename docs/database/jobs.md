@@ -4,19 +4,21 @@
 
 Jobs crate 的 [schema.sql](../../crates/jobs/src/schema.sql) 是唯一 DDL；[schema.rs](../../crates/jobs/src/schema.rs)拥有身份、只读预检、对象定义验证与原子初始化；独立 Queue 和 API 都使用 [Queue::open](../../crates/jobs/src/queue.rs)。Store 不定义 Jobs 布局，也不依赖 Jobs 生产代码。
 
-共 **6 张业务表、39 字段、11 个显式命名索引、6 触发器、3 个 CHECK、0 外键**。身份为 `application_id=1129139252 / user_version=1`。仅真正空的 0/0 文件在一个 IMMEDIATE 事务创建全部表、索引、触发器、初始计数单例与两个身份头；故障整体回滚。文件重开只校验，身份不匹配、缺失或错误对象均拒绝且不修复。对象定义和非 sqlite 内部对象全集直接与唯一 DDL 的隔离内存执行结果比较，额外索引也拒绝；不维护第二份表/索引清单。
+共 **8 张业务表、50 字段、11 个显式命名索引、6 触发器、9 个 CHECK、0 外键**。身份为 `application_id=1129139252 / user_version=1`。仅真正空的 0/0 文件在一个 IMMEDIATE 事务创建全部表、索引、触发器、初始计数单例与两个身份头；故障整体回滚。文件重开只校验，身份不匹配、缺失或错误对象均拒绝且不修复。对象定义和非 sqlite 内部对象全集直接与唯一 DDL 的隔离内存执行结果比较，额外索引也拒绝；不维护第二份表/索引清单。
 
 Queue 连接明确设置 WAL、busy_timeout、FK 和 synchronous=FULL，并与 Store 四个库共用同一套连接调优（`cache_size=-16384`、`temp_store=MEMORY`、`journal_size_limit=67108864`、`mmap_size=268435456`，打开时 `PRAGMA optimize=0x10002`、关闭时 `PRAGMA optimize`）；建库路径同样在切 WAL 之前设 `auto_vacuum=INCREMENTAL`，因此维护任务可以对该库跑 `PRAGMA incremental_vacuum`。Jobs 是持久执行事实，拒绝时提示先备份；启动不会删除队列。初始化各阶段故障、独立 Queue→ApiState 重开及损坏布局零写拒绝属于必要回归，验证方法见[性能测试方法](../testing/storage-performance.md)。
 
 Queue 持有 jobs.db 唯一 writer，由独立 Queue 锁保护；API 查询通过 [jobs_readers.rs](../../crates/api/src/jobs_readers.rs) 的容量 2 严格只读 `store::ReaderPool` 和 `jobs::QueueRead` 执行，不获取 Queue writer 锁。
 
-本库没有声明外键。下表 NOT NULL 指显式声明：`job_defs.id`、`jobs.id` 与 `retention_cursors.def_id` 的 `TEXT PRIMARY KEY` 没有另写 NOT NULL，不能误报成显式非空。主键自动索引不计入命名索引。Job 状态枚举、payload JSON、enabled 的 0/1 都是业务约定，不是 DDL CHECK。
+本库没有声明外键。下表 NOT NULL 指显式声明：`job_defs.id`、`jobs.id`、`retention_cursors.def_id`、`subscribe_lifecycle_fences.subscribe_id` 与 `plugin_task_fences.binding_id` 的 `TEXT PRIMARY KEY` 没有另写 NOT NULL，不能误报成显式非空。主键自动索引不计入命名索引。Job 状态枚举、payload JSON、enabled 的 0/1 都是业务约定，不是 DDL CHECK。
 
 ## 表目录
 
 - [job_change_state](#job_change_state) — 3 个字段
 - [job_defs](#job_defs) — 9 个字段
 - [jobs](#jobs) — 14 个字段
+- [plugin_operation_receipts](#plugin_operation_receipts) — 6 个字段
+- [plugin_task_fences](#plugin_task_fences) — 5 个字段
 - [retention_cursors](#retention_cursors) — 5 个字段
 - [subscribe_config_receipts](#subscribe_config_receipts) — 3 个字段
 - [subscribe_lifecycle_fences](#subscribe_lifecycle_fences) — 5 个字段
@@ -263,4 +265,59 @@ CREATE TABLE subscribe_config_receipts (
 
 ```sql
 CREATE TABLE subscribe_lifecycle_fences(subscribe_id TEXT PRIMARY KEY,epoch INTEGER NOT NULL,generation TEXT NOT NULL,revision INTEGER NOT NULL,closed INTEGER NOT NULL CHECK(closed IN (0,1)));
+```
+
+## plugin_operation_receipts
+
+插件命令与对账操作在 `jobs.db` 的持久幂等投影回执；即使对应终态 `jobs` 记录已被普通历史清理删除，回执仍长期保留以防止跨库重放重复入队。
+
+主要实现：[crates/jobs/src/plugin_operations.rs](../../crates/jobs/src/plugin_operations.rs)。
+
+| 字段 | SQLite 类型 | 主键顺位 | 显式 NOT NULL | DEFAULT | 含义 |
+|---|---|---:|---|---|---|
+| `operation_id` | `TEXT` | 1 | 是 | 无 | 对应 `app.db.plugin_operations.operation_id` 的操作 UUID。 |
+| `kind` | `TEXT` | 2 | 是 | 无 | 投影的 JobKind：仅 `plugin_command` 或 `plugin_reconcile`。 |
+| `sequence` | `INTEGER` | 3 | 是 | 无 | 同操作多阶段投影序号（`>= 0`）。 |
+| `job_id` | `TEXT` | — | 是 | 无 | 首次投影创建并关联的 `jobs.id`（不因历史保留清理而失效）。 |
+| `generation` | `INTEGER` | — | 否 | 无 | 投影绑定时的插件执行代次（`>= 0` 或 NULL）。 |
+| `request_key` | `TEXT` | — | 是 | 无 | 不可变投影身份校验键，重放时与原记录比较防止篡改。 |
+
+**生产表定义**
+
+```sql
+CREATE TABLE plugin_operation_receipts (
+    operation_id TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK(kind IN ('plugin_command','plugin_reconcile')),
+    sequence INTEGER NOT NULL CHECK(sequence >= 0),
+    job_id TEXT NOT NULL,
+    generation INTEGER CHECK(generation IS NULL OR generation >= 0),
+    request_key TEXT NOT NULL,
+    PRIMARY KEY(operation_id, kind, sequence)
+);
+```
+
+## plugin_task_fences
+
+插件任务绑定在 `jobs.db` 的单调代次/版本投影围栏，阻止乱序、过期修订或关闭后的历史投影复活任务定义；普通 `delete_def` 清空 `def_id` 引用并将 `closed` 置为 `1`，不清除围栏记录。
+
+主要实现：[crates/jobs/src/plugin_tasks.rs](../../crates/jobs/src/plugin_tasks.rs)。
+
+| 字段 | SQLite 类型 | 主键顺位 | 显式 NOT NULL | DEFAULT | 含义 |
+|---|---|---:|---|---|---|
+| `binding_id` | `TEXT` | 1 | 否 | 无 | 对应 `app.db.plugin_task_bindings.binding_id` 的绑定 UUID。 |
+| `generation` | `INTEGER` | — | 是 | 无 | 已应用的单调插件代次（`>= 0`）。 |
+| `definition_revision` | `INTEGER` | — | 是 | 无 | 已应用的单调任务定义修订号（`> 0`）。 |
+| `closed` | `INTEGER` | — | 是 | 无 | 当前代次是否已关闭（0/1 CHECK）。 |
+| `def_id` | `TEXT` | — | 否 | 无 | 当前关联的 `job_defs.id`，定义被删除时置空。 |
+
+**生产表定义**
+
+```sql
+CREATE TABLE plugin_task_fences (
+    binding_id TEXT PRIMARY KEY,
+    generation INTEGER NOT NULL CHECK(generation >= 0),
+    definition_revision INTEGER NOT NULL CHECK(definition_revision > 0),
+    closed INTEGER NOT NULL CHECK(closed IN (0, 1)),
+    def_id TEXT
+);
 ```

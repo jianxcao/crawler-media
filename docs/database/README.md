@@ -13,13 +13,13 @@
 
 | 文件 | application_id / user_version | 表数 | 字段数 | 职责 | 可按缓存清空 |
 |---|---|---:|---:|---|---|
-| [app.db](app.md) | 1129139248 / 1 | 9 | 48 | User/凭证、Site、Downloader、Filter、设置、搜索快照、实例锁 | 否 |
-| [library.db](library.md) | 1129139249 / 8 | 66 | 686 | Media/采用元数据、Library/根、文件/覆盖/摘要、Collection、Playback、Transfer/Scrape 配置、持久工作 | 否 |
-| [subscribe.db](subscribe.md) | 1129139250 / 2 | 10 | 68 | Subscribe策略、覆盖/搜索事实、在途记录 | 否 |
+| [app.db](app.md) | 1129139248 / 1 | 28 | 222 | User/凭证、Site、Downloader、Filter、设置、搜索快照、实例锁、Plugin 元数据/信任密钥/UI信任/权限/操作/维护回执与事件 outbox | 否 |
+| [library.db](library.md) | 1129139249 / 8 | 69 | 725 | Media/采用元数据、Library/根、文件/覆盖/摘要、Collection、Playback、Transfer/Scrape 配置、持久工作与事件 outbox | 否 |
+| [subscribe.db](subscribe.md) | 1129139250 / 2 | 18 | 202 | Subscribe策略、覆盖/搜索事实、下载操作/所有权、Boost预留/事实、延迟候选与事件 outbox | 否 |
 | [cache.db](cache.md) | 1129139251 / 1 | 6 | 30 | 五个 Metadata source 与 fanart 的原始响应 | 是，受控清理 |
-| [jobs.db](jobs.md) | 1129139252 / 1（Jobs自有预检） | 6 | 39 | Job定义/执行/重试、更新计数、保留游标 | 否 |
+| [jobs.db](jobs.md) | 1129139252 / 1（Jobs自有预检） | 8 | 50 | Job定义/执行/重试、更新计数、保留游标、Plugin 操作回执与任务围栏 | 否 |
 
-合计97张业务表、871字段（按 `PRAGMA table_info` 统计；另含 `library_files.parent_dir_key` 1个 `VIRTUAL` 生成列），含Library的FTS5虚拟表，不计4张影子表、隐藏列及 sqlite_sequence。Store四库147个命名索引、50组FK、146个CHECK、0触发器；Jobs另11个命名索引、0 FK、3个CHECK、6触发器。SQLite自动索引不计入命名索引；跨文件没有FK或原子提交。
+合计129张业务表、1,229字段（按 `PRAGMA table_info` 统计；另含 `library_files.parent_dir_key` 1个 `VIRTUAL` 生成列），含Library的FTS5虚拟表，不计4张影子表、隐藏列及 sqlite_sequence。Store四库198个命名索引、67组FK、397个CHECK、0触发器；Jobs另11个命名索引、0 FK、9个CHECK、6触发器。SQLite自动索引不计入命名索引；跨文件没有FK或原子提交。
 
 `probe_job_units` 使用 `analysis_context_json`、`analysis_claim_token`、`analysis_refresh_json` 持久化 Analysis 上下文、领取身份与刷新需求。`probe_analysis_season` 对排队 Analysis 上下文中的 Media/season 建部分表达式索引，窗口16逐页派发；`season_model_lookup` 包含 policy/model 排序键。持久上下文、wanted-reference 与 keyset 游标承担采集交接、独立后续 Job 及重启恢复。
 

@@ -17,7 +17,7 @@ A configured PT tracker the system is allowed to search. Runtime credentials (co
 _Avoid_: tracker (except when quoting BT protocol), 爬虫配置
 
 **Indexer**:
-The parsing/search adapter for one **Site**: a framework (NexusPHP HTML or API) plus a per-site YAML overlay for selectors, categories, and RSS. Fetching a search/RSS page always uses HTTP; a profile `render` flag is ignored. Built-in profiles ship with the app; a user overlay directory can replace a profile without a rebuild. An **Indexer** does not own login credentials. M-Team is a first-class API exception behind the same **Torrent** output; other API sites follow that pattern. Search across enabled **Sites** is concurrent; one **Site** failing does not fail the others.
+The parsing/search adapter for one **Site**: a framework (NexusPHP HTML or API) plus a per-site YAML overlay for selectors, categories, and RSS, or an installed `indexer-plugin` provider. Built-in YAML profiles always fetch search/RSS over HTTP (a profile `render` flag is ignored); an `indexer-plugin` may use **Browser** search only when the instance, **Site** (`browser_search`), and plugin grants all opt in. Built-in profiles ship with the app; a user overlay directory or plugin package can add or replace a profile without a rebuild. An **Indexer** does not own login credentials. M-Team and HDArea are first-class API exceptions behind the same **Torrent** output; other API sites follow that pattern. Search across enabled **Sites** is concurrent; one **Site** failing does not fail the others.
 _Avoid_: spider, crawler, scraper (as the configured object)
 
 **Torrent**:
@@ -77,7 +77,7 @@ A named extension point on a workflow step (choose **Torrent**, add to **Downloa
 _Avoid_: middleware, interceptor, callback
 
 **Plugin**:
-An optional first-party (later also user-supplied) extension that registers **Hooks**. Login and **Check-in** ship as **Plugins** that drive a **Browser**. Core Indexer / Downloader / Media / Library search-and-file code is compiled-in modules, not **Plugins**. A third-party loader is still later; first-party **Plugins** compile against the same Hook + **Browser** APIs that loader will use.
+An optional first-party or user-installed extension (`builtin.*` or signed/dev `.cmplugin` WASM Component packages, ADR-0013) that registers **Hooks**, scheduled tasks, **Site** maintenance/**Indexer** providers, custom HTTP endpoints, or trusted React Module Federation UI surfaces. **Check-in** (`builtin.checkin`) and seeding boost (`builtin.boost`) ship as first-party **Plugins**. Core **Downloader** / **Media** / **Library** ledger and playback modules remain host services, not replaceable by **Plugins**.
 _Avoid_: 插件市场 (a distribution surface, not the concept)
 
 **User**:
@@ -97,7 +97,7 @@ Serving **Library** files to clients. External apps (Infuse, Fileball, and simil
 _Avoid_: 媒体服务器 (too broad), 转码服务 (a later, separate capability)
 
 **Browser**:
-A CDP session used only to drive login / **Check-in** for **Sites** that opt in (`maintenance_via = browser`); search and RSS always use HTTP and never a **Browser**. One instance-level switch decides whether CDP is used at all: off means login / **Check-in** use HTTP, and no browser process is probed, downloaded, or started. When on, the endpoint (`http` discovery URLs only) resolves explicit **Site** `cdp_url` → instance `cdp.url` → a managed Obscura daemon; a failure before navigation falls back to HTTP with a warning, a failure after navigation is reported without retrying over HTTP. Each session runs in its own isolated browser context (created and disposed per session), so cookies never leak between Sites or accounts and no cookie is ever deleted from other contexts; endpoints without browser-context support are marked incompatible. Cookies are injected host-only and read back only for the Site URL. Same registrable-domain sessions are serialized to avoid cookie races. The Site proxy is not used. New Sites default to HTTP maintenance. The managed daemon starts only when no instance endpoint is set and at least one enabled **Site** opts into the **Browser** without its own endpoint; it binds loopback on a random port. The default image ships neither Chromium nor Obscura; by default only a preinstalled, hash-verified release archive is used, and downloading requires an explicit admin choice. Saving an endpoint config is not proof of a usable browser. This is an automation channel, not a Windows remote desktop.
+A CDP session used to drive login / **Check-in** for **Sites** that opt in (`maintenance_via = browser`), or `indexer-plugin` search when instance CDP, **Site** `browser_search`, and plugin `browser:search` grants all opt in (built-in YAML search and RSS always use HTTP and never a **Browser**). One instance-level switch decides whether CDP is used at all: off means login / **Check-in** use HTTP, and no browser process is probed, downloaded, or started. When on, the endpoint (`http` discovery URLs only) resolves explicit **Site** `cdp_url` → instance `cdp.url` → a managed Obscura daemon; a maintenance failure before navigation falls back to HTTP with a warning, a failure after navigation is reported without retrying over HTTP. Each session runs in its own isolated browser context (created and disposed per session), so cookies never leak between Sites or accounts and no cookie is ever deleted from other contexts; endpoints without browser-context support are marked incompatible. Cookies are injected host-only and read back only for the Site URL. Same registrable-domain sessions are serialized to avoid cookie races. The Site proxy is not used. New Sites default to HTTP maintenance and `browser_search = false`. The managed daemon starts only when no instance endpoint is set and at least one enabled **Site** opts into the **Browser** without its own endpoint; it binds loopback on a random port. The default image ships neither Chromium nor Obscura; by default only a preinstalled, hash-verified release archive is used, and downloading requires an explicit admin choice. Saving an endpoint config is not proof of a usable browser. This is an automation channel, not a Windows remote desktop.
 _Avoid_: RDP, 无头模块, Playwright (implementation)
 
 **Check-in**:
@@ -113,7 +113,7 @@ _Avoid_: scheduler (the loop, not the record), APScheduler, cron (the schedule s
 - A **Subscribe** is owned by one **User** and targets exactly one **Media**
 - A **Subscribe** has a **Fetch mode** and a **Filter**
 - A **Media** has one internal id and optional aliases from **Metadata sources**
-- A **Site** is searched through its **Indexer** over HTTP
+- A **Site** is searched through its **Indexer** (HTTP by default; **Browser** only for opted-in `indexer-plugin` **Sites**)
 - Search and RSS both produce **Torrents**
 - A **Filter** admits and scores a **Torrent** (via its **Release**) for a **Subscribe**
 - A **Downloader** receives a **Torrent** and later yields files that are **Transferred** into the **Library**
@@ -121,7 +121,7 @@ _Avoid_: scheduler (the loop, not the record), APScheduler, cron (the schedule s
 - **Scrape** writes **NFO** and artwork beside **Library** files
 - **Playback** reads the **Library** ledger; it does not own files
 - Login and **Check-in** are **Plugins** that may use **Browser**; they write back **Site** credentials
-- A **Plugin** participates only through **Hooks**; first-party modules and first-party **Plugins** share that bus
+- A **Plugin** extends the host only through typed **Hooks**, scheduled tasks, **Site** maintenance/**Indexer** providers, custom HTTP endpoints, and opt-in federated UI surfaces
 - **Sites**, **Downloaders**, and the **Library** are instance-global, not per-**User**
 - A **Job** is the runnable unit for search, **Transfer**, **Scrape**, and **Check-in**; a **Subscribe** is policy, not a thread
 - Creating a **Subscribe** inserts its search **Job** definition; **Transfer** is instance-wide, not per-**Subscribe**

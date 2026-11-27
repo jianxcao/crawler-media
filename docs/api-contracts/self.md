@@ -34,9 +34,9 @@
 
 ### Site
 
-`{id, name, url, profile_id, cookie: null, api_key: null, rss_url?, proxy?, rate_limit_per_minute?, cdp_url?, downloader_id?, enabled, maintenance_via: "http"|"browser", auth_type: "apikey"|"cookie"|"none"}`
+`{id, name, url, profile_id, cookie: null, api_key: null, rss_url?, proxy?, rate_limit_per_minute?, cdp_url?, downloader_id?, enabled, maintenance_via: "http"|"browser", browser_search, timezone?, auth_type: "apikey"|"cookie"|"none"}`
 
-`cookie` 与 `api_key` 在列表、详情及新建/更新回显中始终为 `null`（从不明文回显）；非管理员读取时 `url` 置空串、`rss_url`/`proxy`/`cdp_url` 置 `null`（`rate_limit_per_minute` 与 `downloader_id` 保留原值）。站点上传激励状态由 `/sites/boost-stats` 与 `PATCH /sites/{id}/boost` 独立暴露。
+`cookie` 与 `api_key` 在列表、详情及新建/更新回显中始终为 `null`（从不明文回显）；非管理员读取时 `url` 置空串、`rss_url`/`proxy`/`cdp_url` 置 `null`（`rate_limit_per_minute` 与 `downloader_id` 保留原值）。站点上传激励与做种刷流状态由第一方 `builtin.boost` 插件端点独立暴露（见 `docs/plugins/`）。
 
 ### MediaView
 
@@ -81,7 +81,7 @@ HTTP 路径是 `/rule-sets`；表名仍是 `filters`。这是有意的 API 别�
 
 响应 DTO：`{id, name, kind: "qbittorrent"|"transmission", url, username?, auth_type: "password"|"apikey", has_api_key, has_password, category?, path_maps: [{from, to}], is_default, enabled, status: "disabled"|"active"|"failed"|"pending", last_error?}`。
 
-`password` 与 `api_key` 仅为 `POST /downloaders`（成功返回 201）与 `PATCH /downloaders/{id}` 的只写输入字段，响应 JSON 永不输出这两个键；响应中的 `auth_type` 由服务端根据 qBittorrent 实例当前是否存有非空 `api_key` 派生。`transmission` 仅支持 `auth_type: "password"`（传 `apikey` 返回 400 `downloader.invalid`，切换为非 qBittorrent 时清除已存 `api_key`）。`POST` 选择 `auth_type: "apikey"` 时忽略 `username` 与 `password`；`PATCH` 在单个 `app.db` `IMMEDIATE` 事务（`Store::mutate_downloader`）中原子执行读改写：省略凭据保留原值，传空串清空对应凭据，切为 `auth_type: "password"` 时同步清除 `api_key`，切为 `"apikey"` 时清除 `password`（及未显式传入的 `username`），连接、鉴权、分类或路径映射变化时同事务重置验证状态与 `last_error`。
+`password` 与 `api_key` 仅为 `POST /downloaders`（成功返回 201）与 `PATCH /downloaders/{id}` 的只写输入字段，响应 JSON 永不输出这两个键；非管理员读取 `GET /downloaders` 与 `GET /downloaders/{id}` 时，`url` 置空串，`username` 与 `last_error` 置 `null`，`has_api_key` 与 `has_password` 置 `false`。响应中的 `auth_type` 由服务端根据 qBittorrent 实例当前是否存有非空 `api_key` 派生。`transmission` 仅支持 `auth_type: "password"`（传 `apikey` 返回 400 `downloader.invalid`，切换为非 qBittorrent 时清除已存 `api_key`）。`POST` 选择 `auth_type: "apikey"` 时忽略 `username` 与 `password`；`PATCH` 在单个 `app.db` `IMMEDIATE` 事务（`Store::mutate_downloader`）中原子执行读改写：省略凭据保留原值，传空串清空对应凭据，切为 `auth_type: "password"` 时同步清除 `api_key`，切为 `"apikey"` 时清除 `password`（及未显式传入的 `username`），连接、鉴权、分类或路径映射变化时同事务重置验证状态与 `last_error`。
 
 ### Library
 

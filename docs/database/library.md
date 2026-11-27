@@ -6,7 +6,7 @@
 
 唯一生产 DDL 的文件身份为 `application_id=1129139249`、`user_version=8`。本库保存权威事实，不可按缓存清空。
 
-结构为 **66张业务表（含1张FTS5虚拟表）、686字段、125个显式命名索引、45组FK、137个CHECK、0生产触发器**，不计SQLite自动索引、FTS5的4张内部影子表及虚拟表隐藏列；686字段按 `PRAGMA table_info` 统计（另含 `library_files.parent_dir_key` 1个 `VIRTUAL` 生成列，非隐藏声明列共687）。影子表另有10字段，物理表总数为70、物理 `table_info` 字段696（含虚拟生成列为697）。字段以[生产DDL](../../crates/store/src/schema/v1/library.sql)为准，复核方法见[数据库总览](README.md#结构复核方法)。
+结构为 **69张业务表（含1张FTS5虚拟表）、725字段、134个显式命名索引、46组FK、181个CHECK、0生产触发器**，不计SQLite自动索引、FTS5的4张内部影子表及虚拟表隐藏列；725字段按 `PRAGMA table_info` 统计（另含 `library_files.parent_dir_key` 1个 `VIRTUAL` 生成列，非隐藏声明列共726）。影子表另有10字段，物理表总数为73、物理 `table_info` 字段735（含虚拟生成列为736）。字段以[生产DDL](../../crates/store/src/schema/v1/library.sql)为准，复核方法见[数据库总览](README.md#结构复核方法)。
 
 Subscribe retention 是孤儿 Media 保留权威；创建、释放、补偿和合并通过 generation fence 及持久阶段跨库恢复，Collection 删除及 orphan 候选按窗口处理。关闭的 fence 和终态记录可能累积。`collections.created_at` 和 `collection_items.added_at` 为 INTEGER 毫秒；集合 cursor 按 `(sort_order, added_at, media_id)` 排序并严格使用数值时间。`items_roster_stats` / `files_roster_stats` 覆盖索引减少回表，精确聚合仍随目标库大小线性增长。
 
@@ -99,6 +99,12 @@ Subscribe retention 是孤儿 Media 保留权威；创建、释放、补偿和�
 - [protocol_entity_overlap_rebuild](#protocol_entity_overlap_rebuild) — 5 字段；协议实体投影/重建状态。
 
 - [user_library_continue_units](#user_library_continue_units) — 7 字段；协议实体投影/重建状态。
+
+- [plugin_event_entity_sequences](#plugin_event_entity_sequences) — 3 字段；实体单调事件序列号表。
+
+- [plugin_event_outbox](#plugin_event_outbox) — 18 字段；Library 域事件事务性 outbox（如 `transfer.completed`）。
+
+- [plugin_event_deliveries](#plugin_event_deliveries) — 18 字段；每插件投递状态、租约、重试与 dead-letter 回执。
 
 ## chapter_frame_tasks
 
@@ -2410,4 +2416,153 @@ CREATE INDEX subscribe_retention_media ON subscribe_retention(media_id,subscribe
 
 ```sql
 CREATE TABLE subscribe_retention_fences(subscribe_id TEXT NOT NULL,generation TEXT NOT NULL,state TEXT NOT NULL CHECK(state IN ('open','closed')),PRIMARY KEY(subscribe_id,generation));
+```
+
+## plugin_event_entity_sequences
+
+按 `(entity_type, entity_id)` 持久化单调递增序列号（`WITHOUT ROWID`），确保即使已投递的 `plugin_event_outbox` 记录被清理，后续事件序列号也不会回退。
+
+| 字段 | SQLite 类型 | 主键顺位 | 显式 NOT NULL | DEFAULT | 含义 |
+|---|---|---:|---|---|---|
+| `entity_type` | `TEXT` | 1 | 是 | 无 | 实体类型，CHECK 非空。 |
+| `entity_id` | `TEXT` | 2 | 是 | 无 | 实体标识，CHECK 非空。 |
+| `last_sequence` | `INTEGER` | — | 是 | 无 | 最新已分配单调序列号，CHECK `> 0`。 |
+
+**生产表定义**
+
+```sql
+CREATE TABLE plugin_event_entity_sequences(
+  entity_type TEXT NOT NULL CHECK(length(entity_type)>0),
+  entity_id TEXT NOT NULL CHECK(length(entity_id)>0),
+  last_sequence INTEGER NOT NULL CHECK(last_sequence>0),
+  PRIMARY KEY(entity_type,entity_id)
+) WITHOUT ROWID;
+```
+
+## plugin_event_outbox
+
+`library.db` 事务性插件事件 outbox；与所属域事实（如 `transfer.completed`、`library.*`）在同一写事务内写入，所有时间字段统一为 Unix **毫秒**（`>= 0`）。
+
+| 字段 | SQLite 类型 | 主键顺位 | 显式 NOT NULL | DEFAULT | 含义 |
+|---|---|---:|---|---|---|
+| `event_id` | `TEXT` | 1 | 是 | 无 | 稳定事件 ID（用于插件幂等去重），CHECK 非空。 |
+| `schema_version` | `INTEGER` | — | 是 | `1` | 事件结构版本号，CHECK `> 0`。 |
+| `event_domain` | `TEXT` | — | 是 | 无 | 事件域（如 `transfer`、`library`），CHECK 非空。 |
+| `event_kind` | `TEXT` | — | 是 | 无 | 事件类型（如 `transfer.completed`），CHECK 非空。 |
+| `entity_type` | `TEXT` | — | 是 | 无 | 顺序作用域实体类型，CHECK 非空。 |
+| `entity_id` | `TEXT` | — | 是 | 无 | 顺序作用域实体 ID，CHECK 非空。 |
+| `entity_sequence` | `INTEGER` | — | 是 | 无 | 实体内单调序列号，CHECK `> 0`，与 `(entity_type, entity_id)` 联合唯一。 |
+| `entity_revision` | `INTEGER` | — | 是 | `1` | 实体修订号，CHECK `>= 0`。 |
+| `cause_id` | `TEXT` | — | 是 | 无 | 因果链追踪 ID，CHECK 非空。 |
+| `subject` | `TEXT` | — | 是 | `'system'` | 触发主体标识，CHECK 非空。 |
+| `site_id` | `TEXT` | — | 否 | 无 | 关联 Site ID（逻辑引用），非空串 CHECK。 |
+| `subscribe_id` | `TEXT` | — | 否 | 无 | 关联 Subscribe ID（逻辑引用），非空串 CHECK。 |
+| `library_id` | `TEXT` | — | 否 | 无 | 关联 Library ID（逻辑引用），非空串 CHECK。 |
+| `handles_json` | `TEXT` | — | 是 | `'[]'` | JSON 数组字符串，CHECK `json_valid` 且为 `'array'`。 |
+| `payload_json` | `TEXT` | — | 是 | 无 | JSON 对象字符串，CHECK `json_valid` 且为 `'object'`。 |
+| `occurred_at` | `INTEGER` | — | 是 | 无 | 事件发生时间，Unix 毫秒（`>= 0`）。 |
+| `fanout_state` | `TEXT` | — | 是 | `'pending'` | 扇出状态，CHECK `pending` / `seeded`。 |
+| `created_at` | `INTEGER` | — | 是 | 无 | 入队时间，Unix 毫秒（`>= 0`）。 |
+
+**生产表定义**
+
+```sql
+CREATE TABLE plugin_event_outbox(
+  event_id TEXT PRIMARY KEY NOT NULL CHECK(length(event_id)>0),
+  schema_version INTEGER NOT NULL DEFAULT 1 CHECK(schema_version>0),
+  event_domain TEXT NOT NULL CHECK(length(event_domain)>0),
+  event_kind TEXT NOT NULL CHECK(length(event_kind)>0),
+  entity_type TEXT NOT NULL CHECK(length(entity_type)>0),
+  entity_id TEXT NOT NULL CHECK(length(entity_id)>0),
+  entity_sequence INTEGER NOT NULL CHECK(entity_sequence>0),
+  entity_revision INTEGER NOT NULL DEFAULT 1 CHECK(entity_revision>=0),
+  cause_id TEXT NOT NULL CHECK(length(cause_id)>0),
+  subject TEXT NOT NULL DEFAULT 'system' CHECK(length(subject)>0),
+  site_id TEXT CHECK(site_id IS NULL OR length(site_id)>0),
+  subscribe_id TEXT CHECK(subscribe_id IS NULL OR length(subscribe_id)>0),
+  library_id TEXT CHECK(library_id IS NULL OR length(library_id)>0),
+  handles_json TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(handles_json) AND json_type(handles_json)='array'),
+  payload_json TEXT NOT NULL CHECK(json_valid(payload_json) AND json_type(payload_json)='object'),
+  occurred_at INTEGER NOT NULL CHECK(occurred_at>=0),
+  fanout_state TEXT NOT NULL DEFAULT 'pending' CHECK(fanout_state IN ('pending','seeded')),
+  created_at INTEGER NOT NULL CHECK(created_at>=0),
+  UNIQUE(entity_type,entity_id,entity_sequence)
+);
+```
+
+**显式命名索引**
+
+```sql
+CREATE INDEX plugin_event_outbox_pending_fanout_idx ON plugin_event_outbox(created_at,event_id) WHERE fanout_state='pending';
+CREATE INDEX plugin_event_outbox_created_idx ON plugin_event_outbox(created_at,event_id);
+CREATE INDEX plugin_event_outbox_domain_created_idx ON plugin_event_outbox(event_domain,event_kind,created_at,event_id);
+CREATE INDEX plugin_event_outbox_entity_created_idx ON plugin_event_outbox(entity_type,entity_id,created_at,event_id);
+```
+
+## plugin_event_deliveries
+
+每插件投递状态、租约、重试与 dead-letter 回执表。主键 `(event_id, plugin_id)` 兼作外键 `event_id -> plugin_event_outbox(event_id) ON DELETE CASCADE` 的前缀索引（满足 `cleanup_index_work` 外键前缀索引检查）；对 `app.db.plugins` 不设跨库外键。时间字段统一为 Unix **毫秒**（`>= 0`）。
+
+| 字段 | SQLite 类型 | 主键顺位 | 显式 NOT NULL | DEFAULT | 含义 |
+|---|---|---:|---|---|---|
+| `event_id` | `TEXT` | 1 | 是 | 无 | 外键引用 `plugin_event_outbox(event_id) ON DELETE CASCADE`。 |
+| `plugin_id` | `TEXT` | 2 | 是 | 无 | 目标订阅插件 ID，CHECK 非空。 |
+| `entity_type` | `TEXT` | — | 是 | 无 | 冗余实体类型（用于实体内保序索引），CHECK 非空。 |
+| `entity_id` | `TEXT` | — | 是 | 无 | 冗余实体 ID（用于实体内保序索引），CHECK 非空。 |
+| `entity_sequence` | `INTEGER` | — | 是 | 无 | 冗余单调序列号，CHECK `> 0`。 |
+| `status` | `TEXT` | — | 是 | `'pending'` | CHECK：`pending` / `delivering` / `delivered` / `dead_letter`。 |
+| `attempt_count` | `INTEGER` | — | 是 | `0` | 已认领尝试次数（认领进入 `delivering` 时 `+1`），CHECK `>= 0`。 |
+| `next_attempt_at` | `INTEGER` | — | 是 | 无 | 下次可投递时间，Unix 毫秒（`>= 0`）。 |
+| `claimed_at` | `INTEGER` | — | 否 | 无 | 租约认领时间（Unix 毫秒），仅 `delivering` 非空。 |
+| `lease_until` | `INTEGER` | — | 否 | 无 | 租约过期时间（Unix 毫秒，`>= claimed_at`），仅 `delivering` 非空。 |
+| `claim_nonce` | `TEXT` | — | 否 | 无 | 本次认领 CAS nonce，仅 `delivering` 非空。 |
+| `last_error` | `TEXT` | — | 否 | 无 | 脱敏失败摘要（`<= 256` 字符），`dead_letter` 必非空。 |
+| `component_state_json` | `TEXT` | — | 是 | `'{}'` | 组件级投递检查点 JSON 对象，CHECK `json_valid` 且为 `'object'`。 |
+| `delivered_at` | `INTEGER` | — | 否 | 无 | 投递完成时间（Unix 毫秒），仅 `delivered` 非空。 |
+| `dead_lettered_at` | `INTEGER` | — | 否 | 无 | 进入死信时间（Unix 毫秒），仅 `dead_letter` 非空。 |
+| `revision` | `INTEGER` | — | 是 | `1` | CAS 修订号，CHECK `> 0`。 |
+| `created_at` | `INTEGER` | — | 是 | 无 | 播种创建时间，Unix 毫秒（`>= 0`）。 |
+| `updated_at` | `INTEGER` | — | 是 | 无 | 最近状态更新时间，Unix 毫秒（`>= 0`）。 |
+
+**生产表定义**
+
+```sql
+CREATE TABLE plugin_event_deliveries(
+  event_id TEXT NOT NULL REFERENCES plugin_event_outbox(event_id) ON DELETE CASCADE,
+  plugin_id TEXT NOT NULL CHECK(length(plugin_id)>0),
+  entity_type TEXT NOT NULL CHECK(length(entity_type)>0),
+  entity_id TEXT NOT NULL CHECK(length(entity_id)>0),
+  entity_sequence INTEGER NOT NULL CHECK(entity_sequence>0),
+  status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','delivering','delivered','dead_letter')),
+  attempt_count INTEGER NOT NULL DEFAULT 0 CHECK(attempt_count>=0),
+  next_attempt_at INTEGER NOT NULL CHECK(next_attempt_at>=0),
+  claimed_at INTEGER CHECK(claimed_at IS NULL OR claimed_at>=0),
+  lease_until INTEGER CHECK(lease_until IS NULL OR lease_until>=0),
+  claim_nonce TEXT CHECK(claim_nonce IS NULL OR length(claim_nonce)>0),
+  last_error TEXT,
+  component_state_json TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(component_state_json) AND json_type(component_state_json)='object'),
+  delivered_at INTEGER CHECK(delivered_at IS NULL OR delivered_at>=0),
+  dead_lettered_at INTEGER CHECK(dead_lettered_at IS NULL OR dead_lettered_at>=0),
+  revision INTEGER NOT NULL DEFAULT 1 CHECK(revision>0),
+  created_at INTEGER NOT NULL CHECK(created_at>=0),
+  updated_at INTEGER NOT NULL CHECK(updated_at>=0),
+  PRIMARY KEY(event_id,plugin_id),
+  CHECK((status='delivering')=(claimed_at IS NOT NULL)),
+  CHECK((status='delivering')=(lease_until IS NOT NULL)),
+  CHECK((status='delivering')=(claim_nonce IS NOT NULL)),
+  CHECK(status!='delivering' OR (attempt_count>0 AND lease_until>=claimed_at)),
+  CHECK((status='delivered')=(delivered_at IS NOT NULL)),
+  CHECK((status='dead_letter')=(dead_lettered_at IS NOT NULL)),
+  CHECK(status!='dead_letter' OR (last_error IS NOT NULL AND length(last_error)>0))
+);
+```
+
+**显式命名索引**
+
+```sql
+CREATE INDEX plugin_event_deliveries_due_idx ON plugin_event_deliveries(next_attempt_at,event_id,plugin_id) WHERE status='pending';
+CREATE INDEX plugin_event_deliveries_lease_idx ON plugin_event_deliveries(lease_until,event_id,plugin_id) WHERE status='delivering';
+CREATE INDEX plugin_event_deliveries_entity_order_idx ON plugin_event_deliveries(plugin_id,entity_type,entity_id,entity_sequence) WHERE status IN ('pending','delivering');
+CREATE INDEX plugin_event_deliveries_dead_letter_idx ON plugin_event_deliveries(dead_lettered_at DESC,event_id,plugin_id) WHERE status='dead_letter';
+CREATE INDEX plugin_event_deliveries_plugin_status_idx ON plugin_event_deliveries(plugin_id,status,updated_at DESC,event_id);
 ```

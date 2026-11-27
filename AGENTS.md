@@ -16,14 +16,16 @@ crawler-media：自托管媒体抓取/订阅/入库/播放服务。Rust workspac
 | `downloader` | qBittorrent 等下载器适配 |
 | `library` | Library 账本、扫描、文件 → Media 识别（ADR-0001） |
 | `subscribe` / `filter` / `release` | 订阅轮次、过滤原子、Release 解析 |
-| `hooks` | 进程内 Hook 总线与编译期第一方插件（ADR-0002，非插件运行时） |
+| `hooks` | 进程内 Hook 总线、策略预算与错误脱敏（ADR-0002 / ADR-0013） |
+| `net-guard` | 插件与种子拉取的 SSRF / IP 绑定 / 重定向凭据剥离网络守卫 |
+| `plugin-api` / `plugin-package` / `plugin-host` | WIT 插件 ABI、`.cmplugin` 包校验与签名、Wasmtime Component 沙箱运行时（ADR-0013；开发者 CLI 在独立包 `tools/plugin`） |
 | `jobs` | 任务队列（ADR-0009） |
 | `marker` | 媒体信息/标记读取；`marker::media_read` 远程读闸门 |
 | `playback` / `media-server` | 播放会话；Jellyfin/Emby 兼容协议层（ADR-0005） |
 | `cover-generator` | 库封面生成 |
 | `api` | axum HTTP 服务，组装以上所有 crate |
 
-依赖方向以各 crate 的 `Cargo.toml` 为准；禁止其他 crate 依赖 `api`。`domain` 是无 IO 的基础类型层；`store` 使用 `domain`、`downloader`、`library`、`marker`、`media`，`library` 使用 `domain`、`release`、`marker`，`subscribe` 组装 `domain`、`downloader`、`filter`、`hooks`、`library`、`release`；不能把现有依赖图简化为只依赖 `domain`/`store`。
+依赖方向以各 crate 的 `Cargo.toml` 为准；禁止其他 crate 依赖 `api`。`domain` 是无 IO 的基础类型层；`store` 使用 `domain`、`downloader`、`library`、`marker`、`media`，`library` 使用 `domain`、`release`、`marker`，`subscribe` 组装 `domain`、`downloader`、`filter`、`hooks`、`library`、`plugin-api`、`release`；不能把现有依赖图简化为只依赖 `domain`/`store`。
 
 ### 前端（`web/`）
 Vite + React + TS，pnpm。`web/src/main.tsx` 入口，`web/app/` 路由页面，`web/components/` 组件，`web/lib/` 逻辑，`web/lib/api/*` API 客户端，`web/test/` 测试（`node --test`）。dev server :3334，`vite.config.ts` 把 `/api`（及兼容保留的 `/posters`）代理到后端 :18765，并启用 Host 校验（局域网域名经 `CM_DEV_ALLOWED_HOSTS` 放行）—— 前端始终同源调用 `/api/v1`（含公开图片路径），不要写死后端地址。
