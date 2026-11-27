@@ -63,6 +63,16 @@ mod playback_event_watch_time;
 mod playback_scope;
 #[path = "playback_view_pages.rs"]
 mod playback_view_pages;
+#[path = "plugin_confirmed_effects.rs"]
+mod plugin_confirmed_effects;
+#[path = "plugin_quota.rs"]
+mod plugin_quota;
+#[path = "plugin_scoped_results.rs"]
+mod plugin_scoped_results;
+#[path = "plugin_staged_install.rs"]
+mod plugin_staged_install;
+#[path = "plugin_trust_keys.rs"]
+mod plugin_trust_keys;
 #[path = "probe_counter_transitions.rs"]
 mod probe_counter_transitions;
 #[path = "probe_publication.rs"]

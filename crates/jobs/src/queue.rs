@@ -354,6 +354,28 @@ impl Queue {
         Ok(())
     }
 
+    pub fn set_queued_job_payload(&self, id: JobId, payload: &str) -> Result<(), JobError> {
+        let tx = rusqlite::Transaction::new_unchecked(
+            &self.conn,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
+        if let Some(job) = store::get_job(&tx, id)?
+            && job.status == JobStatus::Queued
+        {
+            crate::JobIdentity {
+                kind: job.kind,
+                scope: job.scope,
+            }
+            .validate_payload(payload)?;
+            tx.execute(
+                "UPDATE jobs SET payload = ?2 WHERE id = ?1 AND status = 'queued'",
+                rusqlite::params![id.to_string(), payload],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     /// 一轮调度：持锁恢复/排期/认领 → **释放锁**执行 runner → 再持锁落库。
     ///
     /// Review L6: 旧实现在持有 Queue 锁时调用 runner，runner 只要再碰一次队列

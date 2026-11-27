@@ -107,6 +107,17 @@ impl crate::LibraryConnection<'_> {
         expected: &FileVersion,
         now_ms: i64,
     ) -> Result<(), StoreError> {
+        self.finish_transfer_with_outbox(scope, coverage, expected, now_ms, None)
+    }
+
+    pub fn finish_transfer_with_outbox(
+        &self,
+        scope: &WriteScope,
+        coverage: &FileCoverage,
+        expected: &FileVersion,
+        now_ms: i64,
+        outbox: Option<&crate::plugin_events::EmitOutboxEventInput>,
+    ) -> Result<(), StoreError> {
         let tx = crate::write_tx(self.library)?;
         crate::pending_file_deletions::ensure_path_not_pending_deletion(
             &tx,
@@ -150,6 +161,9 @@ impl crate::LibraryConnection<'_> {
         sync_coverage(&tx, &coverage.file, &coverage.units)?;
         super::super::publish::enqueue_probe(&tx, coverage.file.file_id, now_ms)?;
         reduce_library_media(&tx, scope.library_id, coverage.file.media_id)?;
+        if let Some(ev) = outbox {
+            crate::plugin_events::emit_outbox_event_in_tx(&tx, ev)?;
+        }
 
         tx.commit()?;
         Ok(())

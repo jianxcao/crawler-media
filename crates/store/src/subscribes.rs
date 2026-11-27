@@ -127,10 +127,37 @@ impl Store {
         subscribe_id: SubscribeId,
         enclosure: &str,
         submitted_at: i64,
+        downloader_id: Option<DownloaderId>,
+        info_hash: Option<&str>,
     ) -> Result<(), StoreError> {
         self.with_subscribe_write(|db| {
-            db.confirm_pending_submission(subscribe_id, enclosure, submitted_at)
+            db.confirm_pending_submission(
+                subscribe_id,
+                enclosure,
+                submitted_at,
+                downloader_id,
+                info_hash,
+            )
         })
+    }
+
+    pub fn set_pending_downloader(
+        &self,
+        subscribe_id: SubscribeId,
+        enclosure: &str,
+        downloader_id: DownloaderId,
+    ) -> Result<(), StoreError> {
+        self.with_subscribe_write(|db| {
+            db.set_pending_downloader(subscribe_id, enclosure, downloader_id)
+        })
+    }
+
+    pub fn delete_unconfirmed_pending(
+        &self,
+        subscribe_id: SubscribeId,
+        enclosure: &str,
+    ) -> Result<(), StoreError> {
+        self.with_subscribe_write(|db| db.delete_unconfirmed_pending(subscribe_id, enclosure))
     }
 
     /// Mark wash-cut arrivals vetoed by their probed quality (H2).
@@ -355,8 +382,7 @@ impl Store {
     pub fn update_subscribe(&self, subscribe: &Subscribe) -> Result<(), StoreError> {
         self.with_writer(crate::Db::Subscribe, |conn| {
             let tx = crate::write_tx(conn)?;
-            let db = crate::SubscribeConnection { subscribe: &tx };
-            db.update_subscribe(subscribe)?;
+            crate::SubscribeConnection { subscribe: &tx }.update_subscribe(subscribe)?;
             tx.commit()?;
             Ok(())
         })

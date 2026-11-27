@@ -288,6 +288,8 @@ struct BatchState {
     /// Media whose card row is missing, decided once per batch. An unchanged file still
     /// repairs a missing card: the card is derived, not a fact the caller published.
     card_present: HashMap<MediaId, bool>,
+    /// Media already checked writable in this `write_tx` batch.
+    writable_media: std::collections::HashSet<MediaId>,
 }
 
 impl BatchState {
@@ -309,7 +311,10 @@ impl BatchState {
         // A root-relative path is resolved once here; every key is absolute.
         let absolutized = super::root_ownership::ensure_root_owns_path(tx, file)?;
         let file = absolutized.as_ref().unwrap_or(file);
-        ensure_media_writable(tx, file.media_id)?;
+        if !self.writable_media.contains(&file.media_id) {
+            ensure_media_writable(tx, file.media_id)?;
+            self.writable_media.insert(file.media_id);
+        }
         let file_id = file.file_id.to_string();
         let before = read_file_summary_facts(tx, &file_id)?;
         let before_units = read_file_units(tx, &file_id)?;

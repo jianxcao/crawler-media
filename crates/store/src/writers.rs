@@ -335,6 +335,13 @@ impl Store {
         Arc::clone(&self.writers)
     }
 
+    pub fn wait_for_app_write_idle(&self, timeout: Duration) -> Result<(), StoreError> {
+        let _ = self
+            .writers
+            .wait_for_even_app_seq(std::time::Instant::now() + timeout)?;
+        Ok(())
+    }
+
     pub(crate) fn with_app<T>(
         &self,
         work: impl FnOnce(&App<'_>) -> Result<T, StoreError>,

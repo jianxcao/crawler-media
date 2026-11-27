@@ -4,6 +4,8 @@ mod kinds;
 pub use change_state::JobChangeState;
 pub use identity::{JobIdentity, JobScope};
 mod media_refs;
+mod plugin_operations;
+mod plugin_tasks;
 mod queue;
 mod queue_read;
 mod read;
@@ -16,6 +18,10 @@ mod subscribe_config;
 mod types;
 
 pub use kinds::{JobKind, Schedule};
+pub use plugin_operations::{
+    NewPluginOperationJob, PluginOperationProjection, PluginOperationReceipt,
+};
+pub use plugin_tasks::{PluginTaskFence, PluginTaskProjection, PluginTaskSpec};
 pub use queue::{NewDef, Queue, Runner, TickReport};
 pub use queue_read::QueueRead;
 pub use read::JobChildren;

@@ -63,6 +63,16 @@ mod playback_event_tracks;
 mod playback_retention;
 #[path = "playback_storage_v1.rs"]
 mod playback_storage_v1;
+#[path = "plugin_commands.rs"]
+mod plugin_commands;
+#[path = "plugin_operations.rs"]
+mod plugin_operations;
+#[path = "plugin_records.rs"]
+mod plugin_records;
+#[path = "plugin_slice_a_r9.rs"]
+mod plugin_slice_a_r9;
+#[path = "plugin_tasks.rs"]
+mod plugin_tasks;
 #[path = "probe_backpressure_upgrade.rs"]
 mod probe_backpressure_upgrade;
 #[path = "probe_dispatch_windows.rs"]
@@ -93,6 +103,8 @@ mod scanned_media_identity;
 mod search_page_work;
 #[path = "seed_defaults_atomicity.rs"]
 mod seed_defaults_atomicity;
+#[path = "site_maintenance_receipts.rs"]
+mod site_maintenance_receipts;
 #[path = "storage_invariants.rs"]
 mod storage_invariants;
 #[path = "studio_hydration_and_brands.rs"]

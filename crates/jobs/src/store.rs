@@ -247,6 +247,11 @@ pub fn delete_def(conn: &Connection, identity: crate::JobIdentity) -> Result<usi
             "DELETE FROM subscribe_config_receipts WHERE subscribe_id=?1",
             [id.to_string()],
         )?;
+    } else if let crate::JobScope::PluginTask(id) = identity.scope {
+        conn.execute(
+            "UPDATE plugin_task_fences SET def_id = NULL, closed = 1 WHERE binding_id = ?1",
+            [id.to_string()],
+        )?;
     }
     if let Some(tx) = tx {
         tx.commit()?;
@@ -352,7 +357,7 @@ pub fn set_def_payload_by_id(
 }
 
 /// 按 JSON 结构比较两段 payload；任一侧不是合法 JSON 时退化为逐字比较。
-fn same_payload(current: &str, expected: &str) -> bool {
+pub(crate) fn same_payload(current: &str, expected: &str) -> bool {
     match (
         serde_json::from_str::<serde_json::Value>(current),
         serde_json::from_str::<serde_json::Value>(expected),

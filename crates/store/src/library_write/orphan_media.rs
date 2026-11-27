@@ -22,7 +22,7 @@ use crate::StoreError;
 /// Ordinary Media can receive metadata before files exist; a historical merge
 /// target needs either a business reference or an alias to accept new facts.
 pub(crate) const IDENTITY_ONLY_PREDICATE: &str =
-    "CASE WHEN EXISTS(SELECT 1 FROM media r WHERE r.survivor_id=m.media_id)
+    "CASE WHEN EXISTS(SELECT 1 FROM media r WHERE r.survivor_id=m.media_id AND r.survivor_id IS NOT NULL)
      THEN NOT EXISTS(SELECT 1 FROM library_files WHERE media_id=m.media_id)
       AND NOT EXISTS(SELECT 1 FROM collection_items WHERE media_id=m.media_id)
       AND NOT EXISTS(SELECT 1 FROM subscribe_retention WHERE media_id=m.media_id)
@@ -94,7 +94,7 @@ pub(crate) fn purge_orphan_media_in_tx(
             )?;
         }
         let merge_identity: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM media WHERE survivor_id=?1)
+            "SELECT EXISTS(SELECT 1 FROM media WHERE survivor_id=?1 AND survivor_id IS NOT NULL)
                  OR EXISTS(SELECT 1 FROM media WHERE media_id=?1 AND identity_state='retired')",
             [&id],
             |row| row.get(0),

@@ -1,6 +1,8 @@
 //! Store operation and layout errors.
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
+    #[error(transparent)]
+    Plugin(#[from] crate::plugins::PluginError),
     #[error("writer lock order violation: held {held:?}, requested {requested:?}")]
     LockOrder {
         held: Vec<crate::WriterRank>,

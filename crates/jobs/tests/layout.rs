@@ -47,6 +47,8 @@ fn current_queue_missing_required_objects_is_rejected_instead_of_repaired() {
         "INDEX jobs_last_def_idx",
         "TRIGGER trg_jobs_change_ins",
         "TABLE retention_cursors",
+        "TABLE plugin_operation_receipts",
+        "TABLE plugin_task_fences",
     ] {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("jobs.db");

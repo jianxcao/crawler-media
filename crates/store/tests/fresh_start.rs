@@ -23,8 +23,12 @@ fn empty_data_directory_initializes_the_current_schema() {
         downloader_id: None,
         enabled: true,
         maintenance_via: domain::MaintenanceVia::Http,
+        browser_search: false,
+        timezone: "UTC".into(),
     };
     store.insert_site(&site).unwrap();
     let loaded = store.get_site(site.id).unwrap().unwrap();
     assert_eq!(loaded.maintenance_via, domain::MaintenanceVia::Http);
+    assert!(!loaded.browser_search);
+    assert_eq!(loaded.timezone, "UTC");
 }

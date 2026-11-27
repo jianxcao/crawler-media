@@ -81,3 +81,52 @@ fn matching_names_and_headers_do_not_accept_changed_table_or_index_definitions()
         }
     }
 }
+
+#[test]
+fn prior_sites_layout_is_rejected_without_rewriting() {
+    let dir = tempfile::tempdir().unwrap();
+    drop(Store::open(dir.path()).unwrap());
+    let conn = Connection::open(dir.path().join("app.db")).unwrap();
+    let sql: String = conn
+        .query_row(
+            "SELECT sql FROM sqlite_schema WHERE name='sites'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let old = sql.replace(
+        ",revision INTEGER NOT NULL CHECK(revision > 0),credential_epoch TEXT NOT NULL",
+        "",
+    );
+    assert_ne!(old, sql);
+    conn.execute_batch("PRAGMA writable_schema=ON").unwrap();
+    conn.execute("UPDATE sqlite_schema SET sql=?1 WHERE name='sites'", [&old])
+        .unwrap();
+    conn.execute_batch("PRAGMA writable_schema=OFF").unwrap();
+    drop(conn);
+    let before = hashes(dir.path());
+    assert!(Store::open(dir.path()).is_err());
+    assert_eq!(hashes(dir.path()), before);
+}
+
+#[test]
+fn pre_plugin_and_extra_plugin_layouts_are_refused_without_adoption() {
+    for old in [true, false] {
+        let dir = tempfile::tempdir().unwrap();
+        drop(Store::open(dir.path()).unwrap());
+        let conn = Connection::open(dir.path().join("app.db")).unwrap();
+        if old {
+            let names=conn.prepare("SELECT name FROM sqlite_schema WHERE type='table' AND (name='plugins' OR name LIKE 'plugin_%')").unwrap().query_map([],|r|r.get::<_,String>(0)).unwrap().collect::<Result<Vec<_>,_>>().unwrap();
+            for name in names {
+                conn.execute_batch(&format!("DROP TABLE {name}")).unwrap();
+            }
+        } else {
+            conn.execute_batch("CREATE TABLE plugin_extra(value BLOB)")
+                .unwrap();
+        }
+        drop(conn);
+        let before = hashes(dir.path());
+        assert!(Store::open(dir.path()).is_err());
+        assert_eq!(hashes(dir.path()), before);
+    }
+}

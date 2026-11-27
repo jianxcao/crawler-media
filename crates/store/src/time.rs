@@ -57,7 +57,7 @@ pub fn rfc3339_from_secs(secs: i64) -> String {
 }
 
 /// Checked wall-clock timestamp in Unix milliseconds.
-pub(crate) fn unix_now_ms() -> Result<i64, crate::StoreError> {
+pub fn unix_now_ms() -> Result<i64, crate::StoreError> {
     let elapsed = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(|error| {

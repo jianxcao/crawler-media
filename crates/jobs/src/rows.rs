@@ -8,15 +8,37 @@ use crate::types::{Job, JobDef, JobStatus};
 pub const JOB_COLS: &str = "id, def_id, kind, payload, status, attempt, run_after, \
      started_at, finished_at, error, progress, concurrency_key, timeout_secs, scope_key";
 
+fn validate_plugin_row(
+    kind: JobKind,
+    scope: crate::JobScope,
+    payload: &str,
+    col_idx: usize,
+) -> rusqlite::Result<()> {
+    if kind.is_plugin()
+        || matches!(
+            scope,
+            crate::JobScope::PluginTask(_) | crate::JobScope::PluginOperation(_)
+        )
+    {
+        crate::JobIdentity { kind, scope }
+            .validate_payload(payload)
+            .map_err(|e| col_err(col_idx, e.to_string()))?;
+    }
+    Ok(())
+}
+
 pub fn map_job(row: &rusqlite::Row<'_>) -> rusqlite::Result<Job> {
     let kind = JobKind::from_str(&row.get::<_, String>(2)?).map_err(|e| col_err(2, e))?;
+    let scope = parse_id(row, 13, crate::JobScope::from_str)?;
+    let payload: String = row.get(3)?;
+    validate_plugin_row(kind, scope, &payload, 3)?;
     let status = JobStatus::from_str(&row.get::<_, String>(4)?).map_err(|e| col_err(4, e))?;
     Ok(Job {
         id: parse_id(row, 0, JobId::from_str)?,
         def_id: optional_id(row, 1, JobDefId::from_str)?,
         kind,
-        scope: parse_id(row, 13, crate::JobScope::from_str)?,
-        payload: row.get(3)?,
+        scope,
+        payload,
         status,
         attempt: row.get::<_, i64>(5)? as u32,
         run_after: row.get(6)?,
@@ -31,6 +53,9 @@ pub fn map_job(row: &rusqlite::Row<'_>) -> rusqlite::Result<Job> {
 
 pub fn map_def(row: &rusqlite::Row<'_>) -> rusqlite::Result<JobDef> {
     let kind = JobKind::from_str(&row.get::<_, String>(1)?).map_err(|e| col_err(1, e))?;
+    let scope = parse_id(row, 8, crate::JobScope::from_str)?;
+    let payload: String = row.get(5)?;
+    validate_plugin_row(kind, scope, &payload, 5)?;
     let schedule = match row.get::<_, Option<String>>(4)? {
         Some(raw) => Some(Schedule::parse(&raw).map_err(|e| col_err(4, e))?),
         None => None,
@@ -38,11 +63,11 @@ pub fn map_def(row: &rusqlite::Row<'_>) -> rusqlite::Result<JobDef> {
     Ok(JobDef {
         id: parse_id(row, 0, JobDefId::from_str)?,
         kind,
-        scope: parse_id(row, 8, crate::JobScope::from_str)?,
+        scope,
         name: row.get(2)?,
         enabled: row.get::<_, i64>(3)? != 0,
         schedule,
-        payload: row.get(5)?,
+        payload,
         timeout_secs: row.get::<_, Option<i64>>(6)?.map(|v| v as u32),
         concurrency_key: row.get(7)?,
     })

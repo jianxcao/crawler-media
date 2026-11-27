@@ -18,12 +18,31 @@ impl crate::LibraryConnection<'_> {
         now_ms: i64,
         validate: impl FnOnce(&Connection) -> Result<(), StoreError>,
     ) -> Result<PublishReport, StoreError> {
-        self.publish_files_counted(
+        self.publish_files_counted_with_outbox(
             scope,
             files,
             now_ms,
             validate,
             &mut PublicationCounters::default(),
+            &[],
+        )
+    }
+
+    pub(in crate::library_write) fn publish_files_with_validation_and_outbox(
+        &self,
+        scope: &WriteScope,
+        files: &[FilePublication<'_>],
+        now_ms: i64,
+        validate: impl FnOnce(&Connection) -> Result<(), StoreError>,
+        outbox: &[crate::plugin_events::EmitOutboxEventInput],
+    ) -> Result<PublishReport, StoreError> {
+        self.publish_files_counted_with_outbox(
+            scope,
+            files,
+            now_ms,
+            validate,
+            &mut PublicationCounters::default(),
+            outbox,
         )
     }
 
@@ -37,19 +56,27 @@ impl crate::LibraryConnection<'_> {
     ) -> Result<(PublishReport, PublishStats), StoreError> {
         let mut counters = PublicationCounters::default();
         let written_before = self.library.total_changes();
-        let report = self.publish_files_counted(scope, files, now_ms, |_| Ok(()), &mut counters)?;
+        let report = self.publish_files_counted_with_outbox(
+            scope,
+            files,
+            now_ms,
+            |_| Ok(()),
+            &mut counters,
+            &[],
+        )?;
         let mut stats = counters.into_stats();
         stats.written_rows = self.library.total_changes() - written_before;
         Ok((report, stats))
     }
 
-    pub(super) fn publish_files_counted(
+    pub(super) fn publish_files_counted_with_outbox(
         &self,
         scope: &WriteScope,
         files: &[FilePublication<'_>],
         now_ms: i64,
         validate: impl FnOnce(&Connection) -> Result<(), StoreError>,
         counters: &mut PublicationCounters,
+        outbox: &[crate::plugin_events::EmitOutboxEventInput],
     ) -> Result<PublishReport, StoreError> {
         if files.is_empty() {
             return Ok(PublishReport::default());
@@ -75,6 +102,9 @@ impl crate::LibraryConnection<'_> {
             counters,
         )?;
         self.ensure_chapter_frames_for_updates(&state.frame_updates)?;
+        for ev in outbox {
+            crate::plugin_events::emit_outbox_event_in_tx(&tx, ev)?;
+        }
         tx.commit()?;
         Ok(state.report)
     }

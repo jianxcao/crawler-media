@@ -1,5 +1,5 @@
 use domain::{DownloaderId, MaintenanceVia, Site, SiteId};
-use store::{DownloaderRow, Store};
+use store::{DownloaderRow, ManualCredentialWrite, Store};
 
 fn site() -> Site {
     Site {
@@ -16,6 +16,8 @@ fn site() -> Site {
         downloader_id: None,
         enabled: true,
         maintenance_via: MaintenanceVia::Http,
+        browser_search: false,
+        timezone: "UTC".into(),
     }
 }
 fn downloader() -> DownloaderRow {
@@ -35,22 +37,190 @@ fn downloader() -> DownloaderRow {
 }
 
 #[test]
+fn stale_site_maintenance_rejects_aba() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Store::open(tmp.path()).unwrap();
+    let original = site();
+    store.insert_site(&original).unwrap();
+    let observed = store.observe_site(original.id).unwrap().unwrap();
+    let mut changed = original.clone();
+    changed.cookie = Some("replacement".into());
+    store
+        .save_site(&changed, ManualCredentialWrite::Replace)
+        .unwrap();
+    store
+        .save_site(&original, ManualCredentialWrite::Replace)
+        .unwrap();
+    let mut stale = original.clone();
+    stale.cookie = Some("stale response".into());
+    assert!(
+        !store
+            .save_site_if_current(&observed, stale.cookie.as_deref())
+            .unwrap()
+    );
+    assert_eq!(store.get_site(original.id).unwrap(), Some(original));
+}
+
+#[test]
+fn stale_site_maintenance_rejects_recreated_site() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Store::open(tmp.path()).unwrap();
+    let original = site();
+    store.insert_site(&original).unwrap();
+    let observed = store.observe_site(original.id).unwrap().unwrap();
+    store.delete_site(original.id).unwrap();
+    store.insert_site(&original).unwrap();
+    assert_ne!(
+        observed.credential_epoch(),
+        store
+            .observe_site(original.id)
+            .unwrap()
+            .unwrap()
+            .credential_epoch()
+    );
+    let mut stale = original.clone();
+    stale.cookie = Some("stale response".into());
+    assert!(
+        !store
+            .save_site_if_current(&observed, stale.cookie.as_deref())
+            .unwrap()
+    );
+    assert_eq!(store.get_site(original.id).unwrap(), Some(original));
+}
+
+#[test]
+fn site_observations_track_credential_authority_and_revisions() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = std::sync::Arc::new(Store::open(tmp.path()).unwrap());
+    let mut current = site();
+    store.insert_site(&current).unwrap();
+    let first = store.observe_site(current.id).unwrap().unwrap();
+    let reopened = Store::open(tmp.path()).unwrap();
+    assert_eq!(reopened.observe_site(current.id).unwrap().unwrap(), first);
+    for field in 0..4 {
+        match field {
+            0 => current.cookie = Some("new".into()),
+            1 => current.api_key = Some("key".into()),
+            2 => current.rss_url = Some("rss".into()),
+            _ => (),
+        }
+        let before = store.observe_site(current.id).unwrap().unwrap();
+        store
+            .save_site(&current, ManualCredentialWrite::Replace)
+            .unwrap();
+        let after = reopened.observe_site(current.id).unwrap().unwrap();
+        assert_ne!(before.credential_epoch(), after.credential_epoch());
+        assert!(after.revision() > before.revision());
+    }
+    let before = store.observe_site(current.id).unwrap().unwrap();
+    current.url = "https://new.invalid".into();
+    store
+        .save_site(&current, ManualCredentialWrite::Unchanged)
+        .unwrap();
+    let after = store.observe_site(current.id).unwrap().unwrap();
+    assert_ne!(before.credential_epoch(), after.credential_epoch());
+    let peer = store.clone().observe_site(current.id).unwrap().unwrap();
+    assert!(store.save_site_if_current(&after, Some("renewed")).unwrap());
+    assert!(!reopened.save_site_if_current(&peer, Some("stale")).unwrap());
+    let refreshed = store.observe_site(current.id).unwrap().unwrap();
+    assert_eq!(after.credential_epoch(), refreshed.credential_epoch());
+    current = refreshed.site().clone();
+    current.name = "renamed".into();
+    store
+        .save_site(&current, ManualCredentialWrite::Unchanged)
+        .unwrap();
+    let renamed = store.observe_site(current.id).unwrap().unwrap();
+    assert_eq!(refreshed.credential_epoch(), renamed.credential_epoch());
+    assert!(
+        !store
+            .save_site_if_current(&refreshed, Some("stale"))
+            .unwrap()
+    );
+    store.set_site_enabled(current.id, false).unwrap();
+    let disabled = store.observe_site(current.id).unwrap().unwrap();
+    assert_eq!(renamed.credential_epoch(), disabled.credential_epoch());
+    assert!(!store.save_site_if_current(&renamed, Some("stale")).unwrap());
+}
+
+#[test]
+fn unchanged_credential_intent_rejects_all_mutation() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Store::open(tmp.path()).unwrap();
+    let current = site();
+    store.insert_site(&current).unwrap();
+    let before = store.observe_site(current.id).unwrap().unwrap();
+    for field in 0..3 {
+        let mut changed = current.clone();
+        changed.name = "changed".into();
+        match field {
+            0 => changed.cookie = Some("changed".into()),
+            1 => changed.api_key = Some("changed".into()),
+            _ => changed.rss_url = Some("changed".into()),
+        }
+        assert!(
+            store
+                .save_site(&changed, ManualCredentialWrite::Unchanged)
+                .is_err()
+        );
+        assert_eq!(store.observe_site(current.id).unwrap().unwrap(), before);
+    }
+}
+
+#[test]
+fn app_write_enforces_site_authority_without_nested_transactions() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Store::open(tmp.path()).unwrap();
+    let mut current = site();
+    store.app_write(|app| app.insert_site(&current)).unwrap();
+    let before = store.observe_site(current.id).unwrap().unwrap();
+    current.cookie = Some("manual".into());
+    assert!(
+        store
+            .app_write(|app| app.save_site(&current, ManualCredentialWrite::Unchanged))
+            .is_err()
+    );
+    assert_eq!(store.observe_site(current.id).unwrap().unwrap(), before);
+    store
+        .app_write(|app| app.save_site(&current, ManualCredentialWrite::Replace))
+        .unwrap();
+    assert!(
+        !store
+            .app_write(|app| app.save_site_if_current(&before, Some("stale")))
+            .unwrap()
+    );
+    let after = store.observe_site(current.id).unwrap().unwrap();
+    assert_ne!(before.credential_epoch(), after.credential_epoch());
+}
+
+#[test]
 fn stale_site_maintenance_cannot_overwrite_another_connection_and_current_result_persists() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path()).unwrap();
     let expected = site();
     store.insert_site(&expected).unwrap();
+    let observed = store.observe_site(expected.id).unwrap().unwrap();
     let other = Store::open(tmp.path()).unwrap();
     let mut changed = other.get_site(expected.id).unwrap().unwrap();
     changed.url = "https://new.invalid/".into();
-    other.save_site(&changed).unwrap();
+    other
+        .save_site(&changed, ManualCredentialWrite::Unchanged)
+        .unwrap();
     let mut stale = expected.clone();
     stale.cookie = Some("stale response".into());
-    assert!(!store.save_site_if_current(&stale, &expected).unwrap());
+    assert!(
+        !store
+            .save_site_if_current(&observed, stale.cookie.as_deref())
+            .unwrap()
+    );
     assert_eq!(other.get_site(expected.id).unwrap().unwrap(), changed);
     let mut renewed = changed.clone();
     renewed.cookie = Some("current response".into());
-    assert!(store.save_site_if_current(&renewed, &changed).unwrap());
+    let observed = other.observe_site(changed.id).unwrap().unwrap();
+    assert!(
+        store
+            .save_site_if_current(&observed, renewed.cookie.as_deref())
+            .unwrap()
+    );
     drop(store);
     drop(other);
     assert_eq!(
@@ -231,5 +401,46 @@ fn mutate_setting_updates_and_deletes_atomically_in_one_writer_tx() {
             .get_setting("user.test.up_next.dismissed")
             .unwrap()
             .is_none()
+    );
+}
+
+#[test]
+fn sites_browser_search_and_timezone_roundtrip_and_preserve_cas() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Store::open(tmp.path()).unwrap();
+    let mut current = site();
+    current.browser_search = true;
+    current.timezone = "Asia/Shanghai".into();
+    store.insert_site(&current).unwrap();
+
+    let loaded = store.get_site(current.id).unwrap().unwrap();
+    assert!(loaded.browser_search);
+    assert_eq!(loaded.timezone, "Asia/Shanghai");
+
+    let obs1 = store.observe_site(current.id).unwrap().unwrap();
+    assert!(
+        store
+            .save_site_if_current(&obs1, Some("refreshed"))
+            .unwrap()
+    );
+    let after_cookie = store.observe_site(current.id).unwrap().unwrap();
+    assert_eq!(after_cookie.credential_epoch(), obs1.credential_epoch());
+    assert!(after_cookie.site().browser_search);
+    assert_eq!(after_cookie.site().timezone, "Asia/Shanghai");
+
+    let mut updated = after_cookie.site().clone();
+    updated.browser_search = false;
+    updated.timezone = "America/New_York".into();
+    store
+        .save_site(&updated, ManualCredentialWrite::Unchanged)
+        .unwrap();
+    let after_optin = store.observe_site(current.id).unwrap().unwrap();
+    assert_eq!(after_optin.credential_epoch(), obs1.credential_epoch());
+    assert!(!after_optin.site().browser_search);
+    assert_eq!(after_optin.site().timezone, "America/New_York");
+    assert!(
+        !store
+            .save_site_if_current(&after_cookie, Some("stale"))
+            .unwrap()
     );
 }

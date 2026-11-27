@@ -30,6 +30,16 @@ impl crate::LibraryConnection<'_> {
         contexts: &[crate::ScanWriteContext],
         now_ms: i64,
     ) -> Result<(), StoreError> {
+        self.insert_scanned_files_in_contexts_with_outbox(rows, contexts, now_ms, &[])
+    }
+
+    pub fn insert_scanned_files_in_contexts_with_outbox(
+        &self,
+        rows: &[ScannedLedger],
+        contexts: &[crate::ScanWriteContext],
+        now_ms: i64,
+        outbox: &[crate::plugin_events::EmitOutboxEventInput],
+    ) -> Result<(), StoreError> {
         if rows.len() != contexts.len() {
             return Err(StoreError::Invalid(
                 "scan context count does not match files".into(),
@@ -112,6 +122,9 @@ impl crate::LibraryConnection<'_> {
             } else {
                 reduce_library_media(&tx, library_id, media_id)?;
             }
+        }
+        for ev in outbox {
+            crate::plugin_events::emit_outbox_event_in_tx(&tx, ev)?;
         }
         tx.commit()?;
         Ok(())

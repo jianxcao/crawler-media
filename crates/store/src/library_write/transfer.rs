@@ -39,7 +39,20 @@ impl Store {
         expected: &FileVersion,
         now_ms: i64,
     ) -> Result<(), StoreError> {
-        self.with_library_write(|db| db.finish_transfer(scope, coverage, expected, now_ms))
+        self.finish_transfer_with_outbox(scope, coverage, expected, now_ms, None)
+    }
+
+    pub fn finish_transfer_with_outbox(
+        &self,
+        scope: &WriteScope,
+        coverage: &FileCoverage,
+        expected: &FileVersion,
+        now_ms: i64,
+        outbox: Option<&crate::plugin_events::EmitOutboxEventInput>,
+    ) -> Result<(), StoreError> {
+        self.with_library_write(|db| {
+            db.finish_transfer_with_outbox(scope, coverage, expected, now_ms, outbox)
+        })
     }
 }
 

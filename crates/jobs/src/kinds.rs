@@ -21,6 +21,12 @@ pub enum JobKind {
     DataRetention,
     /// 发现页榜单每日预热。
     DiscoverRefresh,
+    /// 插件声明的周期或手动任务。
+    PluginTask,
+    /// 插件后台异步命令执行。
+    PluginCommand,
+    /// 插件不确定副作用/生命周期对账。
+    PluginReconcile,
 }
 
 impl JobKind {
@@ -33,6 +39,13 @@ impl JobKind {
                 | Self::PlaybackHistoryRetention
                 | Self::BrowserReconcile
                 | Self::DataRetention
+        )
+    }
+
+    pub fn is_plugin(self) -> bool {
+        matches!(
+            self,
+            Self::PluginTask | Self::PluginCommand | Self::PluginReconcile
         )
     }
 }
@@ -53,6 +66,9 @@ impl JobKind {
             Self::BrowserReconcile => "browser_reconcile",
             Self::DataRetention => "data_retention",
             Self::DiscoverRefresh => "discover_refresh",
+            Self::PluginTask => "plugin_task",
+            Self::PluginCommand => "plugin_command",
+            Self::PluginReconcile => "plugin_reconcile",
         }
     }
 }
@@ -75,6 +91,9 @@ impl FromStr for JobKind {
             "browser_reconcile" => Ok(Self::BrowserReconcile),
             "data_retention" => Ok(Self::DataRetention),
             "discover_refresh" => Ok(Self::DiscoverRefresh),
+            "plugin_task" => Ok(Self::PluginTask),
+            "plugin_command" => Ok(Self::PluginCommand),
+            "plugin_reconcile" => Ok(Self::PluginReconcile),
             other => Err(other.to_string()),
         }
     }

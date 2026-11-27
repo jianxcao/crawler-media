@@ -634,3 +634,70 @@ INSERT INTO reference_recovery_cursors VALUES('collection','');
 INSERT INTO reference_recovery_cursors VALUES('orphan','');
 
 CREATE TABLE subscribe_compensation_receipts(generation TEXT PRIMARY KEY NOT NULL,protected INTEGER NOT NULL CHECK(protected IN (0,1)));
+-- Plugin event outbox and per-subscriber delivery state (timestamps in Unix milliseconds).
+CREATE TABLE plugin_event_entity_sequences(
+  entity_type TEXT NOT NULL CHECK(length(entity_type)>0),
+  entity_id TEXT NOT NULL CHECK(length(entity_id)>0),
+  last_sequence INTEGER NOT NULL CHECK(last_sequence>0),
+  PRIMARY KEY(entity_type,entity_id)
+) WITHOUT ROWID;
+
+CREATE TABLE plugin_event_outbox(
+  event_id TEXT PRIMARY KEY NOT NULL CHECK(length(event_id)>0),
+  schema_version INTEGER NOT NULL DEFAULT 1 CHECK(schema_version>0),
+  event_domain TEXT NOT NULL CHECK(length(event_domain)>0),
+  event_kind TEXT NOT NULL CHECK(length(event_kind)>0),
+  entity_type TEXT NOT NULL CHECK(length(entity_type)>0),
+  entity_id TEXT NOT NULL CHECK(length(entity_id)>0),
+  entity_sequence INTEGER NOT NULL CHECK(entity_sequence>0),
+  entity_revision INTEGER NOT NULL DEFAULT 1 CHECK(entity_revision>=0),
+  cause_id TEXT NOT NULL CHECK(length(cause_id)>0),
+  subject TEXT NOT NULL DEFAULT 'system' CHECK(length(subject)>0),
+  site_id TEXT CHECK(site_id IS NULL OR length(site_id)>0),
+  subscribe_id TEXT CHECK(subscribe_id IS NULL OR length(subscribe_id)>0),
+  library_id TEXT CHECK(library_id IS NULL OR length(library_id)>0),
+  handles_json TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(handles_json) AND json_type(handles_json)='array'),
+  payload_json TEXT NOT NULL CHECK(json_valid(payload_json) AND json_type(payload_json)='object'),
+  occurred_at INTEGER NOT NULL CHECK(occurred_at>=0),
+  fanout_state TEXT NOT NULL DEFAULT 'pending' CHECK(fanout_state IN ('pending','seeded')),
+  created_at INTEGER NOT NULL CHECK(created_at>=0),
+  UNIQUE(entity_type,entity_id,entity_sequence)
+);
+CREATE INDEX plugin_event_outbox_pending_fanout_idx ON plugin_event_outbox(created_at,event_id) WHERE fanout_state='pending';
+CREATE INDEX plugin_event_outbox_created_idx ON plugin_event_outbox(created_at,event_id);
+CREATE INDEX plugin_event_outbox_domain_created_idx ON plugin_event_outbox(event_domain,event_kind,created_at,event_id);
+CREATE INDEX plugin_event_outbox_entity_created_idx ON plugin_event_outbox(entity_type,entity_id,created_at,event_id);
+
+CREATE TABLE plugin_event_deliveries(
+  event_id TEXT NOT NULL REFERENCES plugin_event_outbox(event_id) ON DELETE CASCADE,
+  plugin_id TEXT NOT NULL CHECK(length(plugin_id)>0),
+  entity_type TEXT NOT NULL CHECK(length(entity_type)>0),
+  entity_id TEXT NOT NULL CHECK(length(entity_id)>0),
+  entity_sequence INTEGER NOT NULL CHECK(entity_sequence>0),
+  status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','delivering','delivered','dead_letter')),
+  attempt_count INTEGER NOT NULL DEFAULT 0 CHECK(attempt_count>=0),
+  next_attempt_at INTEGER NOT NULL CHECK(next_attempt_at>=0),
+  claimed_at INTEGER CHECK(claimed_at IS NULL OR claimed_at>=0),
+  lease_until INTEGER CHECK(lease_until IS NULL OR lease_until>=0),
+  claim_nonce TEXT CHECK(claim_nonce IS NULL OR length(claim_nonce)>0),
+  last_error TEXT,
+  component_state_json TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(component_state_json) AND json_type(component_state_json)='object'),
+  delivered_at INTEGER CHECK(delivered_at IS NULL OR delivered_at>=0),
+  dead_lettered_at INTEGER CHECK(dead_lettered_at IS NULL OR dead_lettered_at>=0),
+  revision INTEGER NOT NULL DEFAULT 1 CHECK(revision>0),
+  created_at INTEGER NOT NULL CHECK(created_at>=0),
+  updated_at INTEGER NOT NULL CHECK(updated_at>=0),
+  PRIMARY KEY(event_id,plugin_id),
+  CHECK((status='delivering')=(claimed_at IS NOT NULL)),
+  CHECK((status='delivering')=(lease_until IS NOT NULL)),
+  CHECK((status='delivering')=(claim_nonce IS NOT NULL)),
+  CHECK(status!='delivering' OR (attempt_count>0 AND lease_until>=claimed_at)),
+  CHECK((status='delivered')=(delivered_at IS NOT NULL)),
+  CHECK((status='dead_letter')=(dead_lettered_at IS NOT NULL)),
+  CHECK(status!='dead_letter' OR (last_error IS NOT NULL AND length(last_error)>0))
+);
+CREATE INDEX plugin_event_deliveries_due_idx ON plugin_event_deliveries(next_attempt_at,event_id,plugin_id) WHERE status='pending';
+CREATE INDEX plugin_event_deliveries_lease_idx ON plugin_event_deliveries(lease_until,event_id,plugin_id) WHERE status='delivering';
+CREATE INDEX plugin_event_deliveries_entity_order_idx ON plugin_event_deliveries(plugin_id,entity_type,entity_id,entity_sequence) WHERE status IN ('pending','delivering');
+CREATE INDEX plugin_event_deliveries_dead_letter_idx ON plugin_event_deliveries(dead_lettered_at DESC,event_id,plugin_id) WHERE status='dead_letter';
+CREATE INDEX plugin_event_deliveries_plugin_status_idx ON plugin_event_deliveries(plugin_id,status,updated_at DESC,event_id);

@@ -19,7 +19,7 @@ library.workspace = true
 rusqlite = { workspace = true, features = ["functions", "trace", "hooks"] }
 media.workspace = true
 marker.workspace = true
-uuid.workspace = true
+uuid = { workspace = true, features = ["serde"] }
 tempfile.workspace = true
 thiserror.workspace = true
 serde.workspace = true
@@ -109,3 +109,11 @@ path = "tests/reader_request_budget.rs"
 [[test]]
 name = "storage_lock_work"
 path = "tests/storage_lock_work.rs"
+
+[[test]]
+name = "download_operations"
+path = "tests/download_operations/main.rs"
+
+[[test]]
+name = "plugin_events"
+path = "tests/plugin_events/main.rs"

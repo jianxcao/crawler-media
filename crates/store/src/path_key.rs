@@ -19,6 +19,7 @@
 //!   case-sensitive, and folding there would merge distinct files.
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use rusqlite::Connection;
 use std::sync::RwLock;
@@ -28,6 +29,8 @@ use crate::StoreError;
 
 /// `(alias prefix, canonical root key)`, longest alias first.
 pub(crate) type RootAliases = Arc<RwLock<Vec<(String, String)>>>;
+
+type TableSlot = (RootAliases, Arc<AtomicBool>);
 
 /// Fixed alias snapshot for one observation plan. IO stays outside the Store lock;
 /// every sidecar key in that plan uses this snapshot, not a later reload.
@@ -49,9 +52,8 @@ pub(crate) fn alias_snapshot(conn: &Connection) -> RootAliases {
 /// in-memory database has no path and is keyed by its own connection handle, so two
 /// in-memory Stores never share aliases. Tables are only rebuilt from committed rows
 /// (writers call [`reload_root_aliases`] after `commit`).
-static TABLES: std::sync::LazyLock<
-    std::sync::Mutex<std::collections::HashMap<String, RootAliases>>,
-> = std::sync::LazyLock::new(Default::default);
+static TABLES: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, TableSlot>>> =
+    std::sync::LazyLock::new(Default::default);
 
 fn table_key(conn: &Connection) -> Option<String> {
     conn.path()
@@ -64,14 +66,18 @@ fn memory_key(conn: &Connection) -> String {
     format!("memory:{:p}", unsafe { conn.handle() })
 }
 
-pub(crate) fn table_for(conn: &Connection) -> RootAliases {
+fn slot_for(conn: &Connection) -> TableSlot {
     let key = table_key(conn).unwrap_or_else(|| memory_key(conn));
     TABLES
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .entry(key)
-        .or_default()
+        .or_insert_with(|| (RootAliases::default(), Arc::new(AtomicBool::new(false))))
         .clone()
+}
+
+pub(crate) fn table_for(conn: &Connection) -> RootAliases {
+    slot_for(conn).0
 }
 
 /// A fresh table for a new in-memory connection: a reused handle address must not
@@ -80,12 +86,12 @@ fn fresh_table(conn: &Connection) -> RootAliases {
     if table_key(conn).is_some() {
         return table_for(conn);
     }
-    let table = RootAliases::default();
+    let slot = (RootAliases::default(), Arc::new(AtomicBool::new(false)));
     TABLES
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .insert(memory_key(conn), table.clone());
-    table
+        .insert(memory_key(conn), slot.clone());
+    slot.0
 }
 
 /// Lexical + NFC form, then the platform realpath when the path exists.
@@ -128,26 +134,31 @@ pub fn normalize_path_key(raw: &str) -> String {
 /// Identity of a path that may already be gone. Uses the committed root aliases and
 /// does not touch the filesystem, so a missing file keeps the key it was stored with.
 pub(crate) fn canonical_recorded_key(conn: &Connection, raw: &str) -> String {
-    let mut aliases = table_for(conn)
-        .read()
-        .unwrap_or_else(|e| e.into_inner())
-        .clone();
-    if (aliases.is_empty() || scoped_alias_dirty(conn).is_some_and(|dirty| dirty.get()))
-        && let Ok(mut stmt) = conn.prepare("SELECT display_path, path_key FROM library_roots")
+    let (slot, loaded) = slot_for(conn);
+    let dirty = scoped_alias_dirty(conn).is_some_and(|flag| flag.get());
+    if loaded.load(Ordering::Acquire) && !dirty {
+        return canonical_key(raw, &slot);
+    }
+    if let Ok(mut stmt) = conn.prepare("SELECT display_path, path_key FROM library_roots")
         && let Ok(rows) = stmt.query_map([], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         })
     {
-        aliases.clear();
-        for row in rows.flatten() {
-            let display = normalize_path_key(&row.0);
-            if display != row.1 {
-                aliases.push((display, row.1));
-            }
+        let mut aliases: Vec<(String, String)> = rows
+            .flatten()
+            .filter_map(|(display, key)| {
+                let d = normalize_path_key(&display);
+                (d != key).then_some((d, key))
+            })
+            .collect();
+        aliases.sort_by_key(|a| std::cmp::Reverse(a.0.len()));
+        if !dirty && conn.is_autocommit() {
+            *slot.write().unwrap_or_else(|e| e.into_inner()) = aliases.clone();
+            loaded.store(true, Ordering::Release);
         }
+        return canonical_key(raw, &Arc::new(RwLock::new(aliases)));
     }
-    aliases.sort_by_key(|a| std::cmp::Reverse(a.0.len()));
-    canonical_key(raw, &Arc::new(RwLock::new(aliases)))
+    canonical_key(raw, &slot)
 }
 
 /// Canonical form with the root alias table applied.
@@ -285,8 +296,9 @@ pub(crate) fn reload_root_aliases(conn: &Connection) -> Result<(), StoreError> {
         register_alias_function(conn, Arc::new(RwLock::new(rows)))?;
         dirty.set(true);
     } else {
-        let aliases = table_for(conn);
+        let (aliases, loaded) = slot_for(conn);
         *aliases.write().unwrap_or_else(|e| e.into_inner()) = rows;
+        loaded.store(true, Ordering::Release);
         if let Some(dirty) = dirty.filter(|dirty| dirty.get()) {
             register_alias_function(conn, aliases)?;
             dirty.set(false);

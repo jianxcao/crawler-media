@@ -82,6 +82,18 @@ impl Store {
     ) -> Result<(), StoreError> {
         self.with_library_write(|db| db.insert_scanned_files_in_contexts(rows, contexts, now_ms))
     }
+
+    pub fn insert_scanned_files_in_contexts_with_outbox(
+        &self,
+        rows: &[ScannedLedger],
+        contexts: &[crate::ScanWriteContext],
+        now_ms: i64,
+        outbox: &[crate::plugin_events::EmitOutboxEventInput],
+    ) -> Result<(), StoreError> {
+        self.with_library_write(|db| {
+            db.insert_scanned_files_in_contexts_with_outbox(rows, contexts, now_ms, outbox)
+        })
+    }
 }
 
 impl Store {

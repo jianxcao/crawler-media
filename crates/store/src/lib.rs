@@ -39,6 +39,8 @@ pub use chapter_frame_tasks::{
 mod collections;
 pub use collections::{CollectionItemFacts, CollectionItemPage, CollectionRead, UserCollection};
 mod data_retention;
+pub mod download_operations;
+pub use download_operations::*;
 mod downloaders;
 mod episode_panorama;
 pub use episode_panorama::{
@@ -137,7 +139,13 @@ pub use scan_probe_obligations::ScannedLedger;
 pub use scan_probe_obligations::{MAX_SCAN_BATCH, ScanProbeObligation};
 mod search_history;
 pub use search_history::{HistoryDeleteOutcome, HistoryDeletePlan};
+mod site_maintenance_receipts;
+pub use site_maintenance_receipts::*;
 mod sites;
+pub use sites::{CredentialEpoch, ManualCredentialWrite, SiteObservation};
+pub mod plugin_events;
+pub mod plugins;
+pub use plugin_events::*;
 mod subscribe_compensation;
 mod subscribe_detach;
 mod subscribe_job_sync;
@@ -209,7 +217,7 @@ mod time;
 
 pub use error::StoreError;
 pub use handle::Store;
-pub use time::{now_rfc3339, rfc3339_from_secs, unix_now};
+pub use time::{now_rfc3339, rfc3339_from_secs, unix_now, unix_now_ms};
 
 mod metadata_language;
 pub use metadata_language::{MetadataLanguageOperation, MetadataLanguageState};

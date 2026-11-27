@@ -65,6 +65,18 @@ mod playback_event_duration;
 mod playback_identity_barrier;
 #[path = "playback_session_archive.rs"]
 mod playback_session_archive;
+#[path = "plugin_command_causes.rs"]
+mod plugin_command_causes;
+#[path = "plugin_event_outbox.rs"]
+mod plugin_event_outbox;
+#[path = "plugin_r12_store.rs"]
+mod plugin_r12_store;
+#[path = "plugin_slice_a_r7.rs"]
+mod plugin_slice_a_r7;
+#[path = "plugin_staged_lifecycle.rs"]
+mod plugin_staged_lifecycle;
+#[path = "plugin_ui_trust.rs"]
+mod plugin_ui_trust;
 #[path = "probe_analysis_dispatch.rs"]
 mod probe_analysis_dispatch;
 #[path = "probe_dispatch_pause.rs"]

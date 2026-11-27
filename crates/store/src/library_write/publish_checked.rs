@@ -35,6 +35,27 @@ impl Store {
             db.publish_unidentified_checked_context(scope, publication, expected, source, now_ms)
         })
     }
+
+    pub fn publish_unidentified_checked_context_with_outbox(
+        &self,
+        scope: &WriteScope,
+        publication: &FilePublication<'_>,
+        expected: Option<&LibraryFile>,
+        source: &crate::UnidentifiedRow,
+        now_ms: i64,
+        outbox: Option<&crate::plugin_events::EmitOutboxEventInput>,
+    ) -> Result<PublishReport, StoreError> {
+        self.with_library_write(|db| {
+            db.publish_unidentified_checked_context_with_outbox(
+                scope,
+                publication,
+                expected,
+                source,
+                now_ms,
+                outbox,
+            )
+        })
+    }
 }
 
 pub(crate) fn validate_context(

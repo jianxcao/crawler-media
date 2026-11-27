@@ -63,6 +63,18 @@ mod playback_event_sequence;
 mod playback_resume_v1;
 #[path = "playback_session_ids.rs"]
 mod playback_session_ids;
+#[path = "plugin_command_targets.rs"]
+mod plugin_command_targets;
+#[path = "plugin_lifecycle_policy.rs"]
+mod plugin_lifecycle_policy;
+#[path = "plugin_read_queries.rs"]
+mod plugin_read_queries;
+#[path = "plugin_slice_a_r8.rs"]
+mod plugin_slice_a_r8;
+#[path = "plugin_state.rs"]
+mod plugin_state;
+#[path = "plugin_upgrade_uninstall.rs"]
+mod plugin_upgrade_uninstall;
 #[path = "probe_analysis_pagination.rs"]
 mod probe_analysis_pagination;
 #[path = "probe_dispatch_plans.rs"]

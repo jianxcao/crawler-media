@@ -15,6 +15,10 @@ impl<'a> QueueRead<'a> {
         Self { conn }
     }
 
+    pub(crate) fn with_connection<T>(&self, work: impl FnOnce(&Connection) -> T) -> T {
+        work(self.conn)
+    }
+
     pub fn list_defs(&self) -> Result<Vec<JobDef>, JobError> {
         crate::schedule::list_defs(self.conn)
     }

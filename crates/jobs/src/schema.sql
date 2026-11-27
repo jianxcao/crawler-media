@@ -107,3 +107,19 @@ CREATE TABLE subscribe_config_receipts (
  PRIMARY KEY(subscribe_id,generation)
 );
 CREATE TABLE subscribe_lifecycle_fences(subscribe_id TEXT PRIMARY KEY,epoch INTEGER NOT NULL,generation TEXT NOT NULL,revision INTEGER NOT NULL,closed INTEGER NOT NULL CHECK(closed IN (0,1)));
+CREATE TABLE plugin_operation_receipts (
+    operation_id TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK(kind IN ('plugin_command','plugin_reconcile')),
+    sequence INTEGER NOT NULL CHECK(sequence >= 0),
+    job_id TEXT NOT NULL,
+    generation INTEGER CHECK(generation IS NULL OR generation >= 0),
+    request_key TEXT NOT NULL,
+    PRIMARY KEY(operation_id, kind, sequence)
+);
+CREATE TABLE plugin_task_fences (
+    binding_id TEXT PRIMARY KEY,
+    generation INTEGER NOT NULL CHECK(generation >= 0),
+    definition_revision INTEGER NOT NULL CHECK(definition_revision > 0),
+    closed INTEGER NOT NULL CHECK(closed IN (0, 1)),
+    def_id TEXT
+);

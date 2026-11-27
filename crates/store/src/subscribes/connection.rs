@@ -42,7 +42,7 @@ impl crate::SubscribeConnection<'_> {
             "CASE WHEN pending_downloads.state IN ('rejected', 'stalled') THEN pending_downloads.state ELSE 'active' END"
         };
         let submitted = if refresh_submitted_at {
-            "submitted_at = excluded.submitted_at,"
+            "submitted_at = CASE WHEN excluded.submitted_at = 0 AND pending_downloads.state = 'active' AND pending_downloads.submitted_at > 0 THEN pending_downloads.submitted_at ELSE excluded.submitted_at END,"
         } else {
             ""
         };
@@ -119,6 +119,8 @@ impl crate::SubscribeConnection<'_> {
         subscribe_id: SubscribeId,
         enclosure: &str,
         submitted_at: i64,
+        downloader_id: Option<DownloaderId>,
+        info_hash: Option<&str>,
     ) -> Result<(), StoreError> {
         if submitted_at <= 0 {
             return Err(StoreError::Invalid(
@@ -126,15 +128,59 @@ impl crate::SubscribeConnection<'_> {
             ));
         }
         let changed = self.subscribe.execute(
-            "UPDATE pending_downloads SET submitted_at=?3
-            WHERE subscribe_id=?1 AND enclosure=?2 AND state='active' AND submitted_at=0",
-            params![subscribe_id.to_string(), enclosure, submitted_at],
+            "UPDATE pending_downloads
+             SET submitted_at = ?3,
+                 torrent_json = CASE
+                     WHEN ?4 IS NOT NULL THEN json_set(torrent_json, '$.downloader_id', ?4)
+                     ELSE torrent_json
+                 END,
+                 info_hash = COALESCE(?5, info_hash)
+             WHERE subscribe_id = ?1 AND enclosure = ?2 AND state = 'active' AND submitted_at = 0",
+            params![
+                subscribe_id.to_string(),
+                enclosure,
+                submitted_at,
+                downloader_id.map(|id| id.to_string()),
+                info_hash.map(str::trim).filter(|s| !s.is_empty()),
+            ],
         )?;
         if changed != 1 {
             return Err(StoreError::Protected(
                 "pending submission intent changed".into(),
             ));
         }
+        Ok(())
+    }
+
+    pub fn set_pending_downloader(
+        &self,
+        subscribe_id: SubscribeId,
+        enclosure: &str,
+        downloader_id: DownloaderId,
+    ) -> Result<(), StoreError> {
+        self.subscribe.execute(
+            "UPDATE pending_downloads
+             SET torrent_json = json_set(torrent_json, '$.downloader_id', ?3)
+             WHERE subscribe_id = ?1 AND enclosure = ?2 AND state = 'active'",
+            params![
+                subscribe_id.to_string(),
+                enclosure,
+                downloader_id.to_string()
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_unconfirmed_pending(
+        &self,
+        subscribe_id: SubscribeId,
+        enclosure: &str,
+    ) -> Result<(), StoreError> {
+        self.subscribe.execute(
+            "DELETE FROM pending_downloads
+             WHERE subscribe_id = ?1 AND enclosure = ?2 AND state = 'active' AND submitted_at = 0",
+            params![subscribe_id.to_string(), enclosure],
+        )?;
         Ok(())
     }
 
@@ -329,6 +375,7 @@ impl crate::SubscribeConnection<'_> {
                 coverage_kind = ?7, season = ?8, episode_from = ?9, episode_to = ?10,
                 tracking_state = ?12, follow_future = ?13, search_interval_secs = ?14,
                 keep_old_versions = ?16, library_id = ?17, updated_at = ?15,
+                policy_revision = policy_revision + 1,
                 jobs_sync_revision = jobs_sync_revision + CASE WHEN (tracking_state='paused')<>(?12='paused') OR search_interval_secs<>?14 THEN 1 ELSE 0 END,
                 jobs_sync_pending = CASE WHEN (tracking_state='paused')<>(?12='paused') OR search_interval_secs<>?14 THEN 1 ELSE jobs_sync_pending END
              WHERE id = ?11",
@@ -351,6 +398,12 @@ impl crate::SubscribeConnection<'_> {
                 subscribe.keep_old_versions as i64,
                 subscribe.library_id.map(|id| id.to_string()),
             ],
+        )?;
+        self.subscribe.execute(
+            "UPDATE subscribe_deferred_candidates
+             SET state = 'invalidated', revision = revision + 1, updated_at = ?2
+             WHERE subscribe_id = ?1 AND state = 'deferred'",
+            params![subscribe.id.to_string(), crate::time::unix_now()],
         )?;
         Ok(())
     }

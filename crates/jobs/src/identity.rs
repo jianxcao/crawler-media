@@ -1,5 +1,5 @@
 use crate::{JobError, JobKind};
-use domain::{MediaId, SubscribeId};
+use domain::{MediaId, PluginOperationId, PluginTaskBindingId, SubscribeId};
 use std::{fmt, str::FromStr};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -7,6 +7,8 @@ pub enum JobScope {
     Global,
     Subscribe(SubscribeId),
     Media(MediaId),
+    PluginTask(PluginTaskBindingId),
+    PluginOperation(PluginOperationId),
 }
 
 impl fmt::Display for JobScope {
@@ -15,6 +17,8 @@ impl fmt::Display for JobScope {
             Self::Global => f.write_str("global"),
             Self::Subscribe(id) => write!(f, "subscribe:{id}"),
             Self::Media(id) => write!(f, "media:{id}"),
+            Self::PluginTask(id) => write!(f, "plugin_task:{id}"),
+            Self::PluginOperation(id) => write!(f, "plugin_operation:{id}"),
         }
     }
 }
@@ -27,6 +31,10 @@ impl FromStr for JobScope {
             Self::Subscribe(id.parse().map_err(|_| JobError::Identity(raw.into()))?)
         } else if let Some(id) = raw.strip_prefix("media:") {
             Self::Media(id.parse().map_err(|_| JobError::Identity(raw.into()))?)
+        } else if let Some(id) = raw.strip_prefix("plugin_task:") {
+            Self::PluginTask(id.parse().map_err(|_| JobError::Identity(raw.into()))?)
+        } else if let Some(id) = raw.strip_prefix("plugin_operation:") {
+            Self::PluginOperation(id.parse().map_err(|_| JobError::Identity(raw.into()))?)
         } else {
             return Err(JobError::Identity(raw.into()));
         };
@@ -61,13 +69,40 @@ impl JobIdentity {
             scope: JobScope::Media(id),
         }
     }
+    pub const fn plugin_task(id: PluginTaskBindingId) -> Self {
+        Self {
+            kind: JobKind::PluginTask,
+            scope: JobScope::PluginTask(id),
+        }
+    }
+    pub const fn plugin_command(id: PluginOperationId) -> Self {
+        Self {
+            kind: JobKind::PluginCommand,
+            scope: JobScope::PluginOperation(id),
+        }
+    }
+    pub const fn plugin_reconcile(id: PluginOperationId) -> Self {
+        Self {
+            kind: JobKind::PluginReconcile,
+            scope: JobScope::PluginOperation(id),
+        }
+    }
     pub(crate) fn validate(self) -> Result<(), JobError> {
         match (self.kind, self.scope) {
             (JobKind::SubscribeSearch, JobScope::Subscribe(_))
-            | (JobKind::CatalogRefresh, JobScope::Media(_)) => Ok(()),
-            (JobKind::SubscribeSearch | JobKind::CatalogRefresh, _) => {
-                Err(JobError::Identity(format!("{:?}", self)))
+            | (JobKind::CatalogRefresh, JobScope::Media(_))
+            | (JobKind::PluginTask, JobScope::PluginTask(_))
+            | (JobKind::PluginCommand | JobKind::PluginReconcile, JobScope::PluginOperation(_)) => {
+                Ok(())
             }
+            (
+                JobKind::SubscribeSearch
+                | JobKind::CatalogRefresh
+                | JobKind::PluginTask
+                | JobKind::PluginCommand
+                | JobKind::PluginReconcile,
+                _,
+            ) => Err(JobError::Identity(format!("{:?}", self))),
             (_, JobScope::Global) => Ok(()),
             _ => Err(JobError::Identity(format!("{:?}", self))),
         }
@@ -78,6 +113,8 @@ impl JobIdentity {
             JobScope::Global => return Ok(()),
             JobScope::Subscribe(id) => ("subscribe_id", id.to_string()),
             JobScope::Media(id) => ("media_id", id.to_string()),
+            JobScope::PluginTask(id) => ("binding_id", id.to_string()),
+            JobScope::PluginOperation(id) => ("operation_id", id.to_string()),
         };
         let value: serde_json::Value = serde_json::from_str(payload)?;
         if value.get(field).and_then(serde_json::Value::as_str) != Some(expected.as_str()) {

@@ -215,6 +215,8 @@ pub(super) fn map_subscribe(row: &rusqlite::Row<'_>) -> rusqlite::Result<Subscri
     })
 }
 
+pub(super) const SITE_COLUMNS: &str = "id, name, url, profile_id, cookie, api_key, rss_url, proxy, rate_limit_per_minute, cdp_url, downloader_id, enabled, maintenance_via, browser_search, timezone";
+
 pub(super) fn map_site(row: &rusqlite::Row<'_>) -> rusqlite::Result<Site> {
     Ok(Site {
         id: parse_id(row.get(0)?, 0)?,
@@ -237,6 +239,8 @@ pub(super) fn map_site(row: &rusqlite::Row<'_>) -> rusqlite::Result<Site> {
             .as_deref()
             .and_then(|s| s.parse().ok())
             .unwrap_or_default(),
+        browser_search: row.get::<_, i64>(13)? != 0,
+        timezone: row.get(14)?,
     })
 }
 
