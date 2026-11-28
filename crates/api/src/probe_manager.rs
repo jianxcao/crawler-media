@@ -83,6 +83,15 @@ pub struct ProbeUnit {
     pub job_id: Option<String>,
 }
 
+impl ProbeUnit {
+    /// True for any explicit marker detection request (season-wide `marker_refresh`
+    /// or single-episode explicit detect), distinct from automatic detection and plain
+    /// media-info probes.
+    pub(crate) fn is_explicit_marker_detection(&self) -> bool {
+        self.marker_refresh_id.is_some() || (self.force_fingerprint && self.overwrite_markers)
+    }
+}
+
 #[derive(Debug)]
 pub(crate) enum ProbeEnqueueError {
     AlreadyRunning,

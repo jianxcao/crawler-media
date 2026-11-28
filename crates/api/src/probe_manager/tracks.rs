@@ -303,10 +303,10 @@ async fn read_tracks(
     Ok(tracks)
 }
 
-/// marker_refresh_id is reconstructed from the durable marker_refresh job kind.
-/// force_fingerprint also occurs in automatic successors and is not an origin.
+/// Explicit marker detection covers both season-wide `marker_refresh` and
+/// single-episode explicit requests (`force_fingerprint && overwrite_markers`).
 pub(super) fn optional_work_kind(unit: &ProbeUnit) -> crate::library_lifecycle::LibraryWorkKind {
-    if unit.marker_refresh_id.is_some() {
+    if unit.is_explicit_marker_detection() {
         crate::library_lifecycle::LibraryWorkKind::ExplicitDetection
     } else {
         crate::library_lifecycle::LibraryWorkKind::AutomaticDetection

@@ -2,6 +2,9 @@
 //! cross-library scoped cancel isolation (Item 3 API), and cancelling queued single-episode
 //! explicit media probes without touching running ffprobe or plain metadata probes (Item 4).
 
+#[path = "review_round2/episode_admission.rs"]
+mod episode_admission;
+
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -480,14 +483,14 @@ async fn library_scoped_cancel_terminates_only_target_library_while_sibling_comp
     state.probe.shutdown_workers().await.unwrap();
 }
 
-struct GatedTracksEnv {
-    state: api::ApiState,
-    entered_rx: std::sync::mpsc::Receiver<()>,
-    release: Arc<AtomicBool>,
-    probed: Arc<Mutex<Vec<PathBuf>>>,
+pub(super) struct GatedTracksEnv {
+    pub(super) state: api::ApiState,
+    pub(super) entered_rx: std::sync::mpsc::Receiver<()>,
+    pub(super) release: Arc<AtomicBool>,
+    pub(super) probed: Arc<Mutex<Vec<PathBuf>>>,
 }
 
-fn state_with_gated_tracks(root: &Path, blocker_path: PathBuf) -> GatedTracksEnv {
+pub(super) fn state_with_gated_tracks(root: &Path, blocker_path: PathBuf) -> GatedTracksEnv {
     let (entered_tx, entered_rx) = std::sync::mpsc::channel();
     let release = Arc::new(AtomicBool::new(false));
     let probed = Arc::new(Mutex::new(Vec::new()));

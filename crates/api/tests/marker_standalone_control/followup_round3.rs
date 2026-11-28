@@ -388,3 +388,94 @@ async fn season_markers_prioritizes_active_job_over_newer_cancelled_job_and_isol
     assert_eq!(diag_done["data"]["job"]["id"], job_e2);
     state.probe.shutdown_workers().await.unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn chapter_probe_status_follows_refresh_library() {
+    let dir = tempfile::tempdir().unwrap();
+    let (fp, entered_rx) = ControllableFingerprint::blocking();
+    let state = test_state(dir.path(), fp.clone());
+    let app = api::router(state.clone());
+    let (lib_a, lib_b, shared, _fid_a, fid_b) =
+        seed_two_libraries_shared_tv(&state.store(), dir.path(), true);
+
+    let status_a_url = format!("/api/v1/libraries/{lib_a}/items/{shared}/probe-status?season=1");
+    let status_b_url = format!("/api/v1/libraries/{lib_b}/items/{shared}/probe-status?season=1");
+
+    // 1. Control: only Library B has a marker_refresh job -> A must see job=null, active=false.
+    create_tv_marker_job(
+        &state.store(),
+        "mr-b-only",
+        "marker_refresh",
+        shared,
+        &format!("marker-refresh:{lib_b}:{shared}:1"),
+        &[fid_b],
+    );
+    let (st_a0, body_a0) = get_markers_json(&app, &status_a_url, "management-secret").await;
+    assert_eq!(st_a0, StatusCode::OK);
+    assert_eq!(body_a0["data"]["active"], false);
+    assert!(
+        body_a0["data"]["job"].is_null(),
+        "A must not see B's marker_refresh: {body_a0}"
+    );
+    let _ = state.store().cancel_probe_job("mr-b-only", "test_cleanup");
+
+    // 2. Start independent season refreshes: A stays running, later B finishes terminal.
+    state.probe.try_start_workers();
+    let detect_a_url = format!("/api/v1/libraries/{lib_a}/items/{shared}/markers/detect");
+    let (st_sub_a, submitted_a) = post_json(
+        &app,
+        &detect_a_url,
+        json!({ "season": 1, "mode": "recapture" }),
+    )
+    .await;
+    assert_eq!(st_sub_a, StatusCode::OK);
+    let job_a = submitted_a["job"]["id"]
+        .as_str()
+        .expect("job_a")
+        .to_string();
+    tokio::task::spawn_blocking(move || entered_rx.recv_timeout(Duration::from_secs(5)))
+        .await
+        .unwrap()
+        .expect("library A refresh must enter capture");
+
+    let detect_b_url = format!("/api/v1/libraries/{lib_b}/items/{shared}/markers/detect");
+    let (st_sub_b, submitted_b) = post_json(
+        &app,
+        &detect_b_url,
+        json!({ "season": 1, "mode": "recapture" }),
+    )
+    .await;
+    assert_eq!(st_sub_b, StatusCode::OK);
+    let job_b = submitted_b["job"]["id"]
+        .as_str()
+        .expect("job_b")
+        .to_string();
+    wait_job_stage_fingerprint(&state.store(), &job_b).await;
+    let _ = post_cancel_raw(
+        &app,
+        json!({ "library_id": lib_b, "media_id": shared.to_string(), "season": 1, "include_running": true }),
+    )
+    .await;
+    assert_eq!(
+        wait_job_terminal(&state.store(), &job_b).await.status,
+        "cancelled"
+    );
+
+    // 3. Query probe-status on both libraries: A stays active on job_a; B shows terminal job_b.
+    let (st_a, status_a) = get_markers_json(&app, &status_a_url, "management-secret").await;
+    assert_eq!(st_a, StatusCode::OK);
+    assert_eq!(status_a["data"]["job"]["id"], job_a, "{status_a}");
+    assert_eq!(status_a["data"]["active"], true, "{status_a}");
+
+    let (st_b, status_b) = get_markers_json(&app, &status_b_url, "management-secret").await;
+    assert_eq!(st_b, StatusCode::OK);
+    assert_eq!(status_b["data"]["job"]["id"], job_b, "{status_b}");
+    assert_eq!(status_b["data"]["active"], false, "{status_b}");
+
+    fp.block_capture.store(false, Ordering::Release);
+    assert_eq!(
+        wait_job_terminal(&state.store(), &job_a).await.status,
+        "succeeded"
+    );
+    state.probe.shutdown_workers().await.unwrap();
+}

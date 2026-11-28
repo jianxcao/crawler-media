@@ -57,6 +57,18 @@ pub struct ProbeJobUnitSpec<'a> {
     pub reuse_media_info_cache: bool,
 }
 
+impl ProbeJobUnit {
+    pub fn is_explicit_marker_detection(&self) -> bool {
+        self.force_fingerprint && self.overwrite_markers
+    }
+}
+
+impl ProbeJobUnitSpec<'_> {
+    pub fn is_explicit_marker_detection(&self) -> bool {
+        self.force_fingerprint && self.overwrite_markers
+    }
+}
+
 impl ProbeJob {
     pub fn is_active(&self) -> bool {
         self.status == "queued" || self.status == "running"
@@ -299,6 +311,17 @@ impl Store {
         season: u32,
     ) -> Result<Option<ProbeJob>, StoreError> {
         self.with_library_read(|db| db.latest_marker_refresh_for_season(media_id, season))
+    }
+
+    pub fn latest_marker_refresh_for_library_season(
+        &self,
+        library_id: domain::LibraryId,
+        media_id: &str,
+        season: u32,
+    ) -> Result<Option<ProbeJob>, StoreError> {
+        self.with_library_read(|db| {
+            db.latest_marker_refresh_for_library_season(library_id, media_id, season)
+        })
     }
 
     pub fn active_probe_job_for_scope(

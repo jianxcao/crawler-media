@@ -107,7 +107,7 @@ async fn probe_metadata_inner(
         return MetadataOutcome::Complete;
     }
     let library_id = unit.row.file.library_id.to_string();
-    let explicit_refresh = unit.marker_refresh_id.is_some();
+    let explicit_refresh = unit.is_explicit_marker_detection();
     let duration = mgr
         .store_access()
         .read_async(move |store| {

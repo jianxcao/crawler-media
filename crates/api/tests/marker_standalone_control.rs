@@ -62,6 +62,7 @@ impl api::probe_manager::TracksProbe for StubTracks {
 struct ControllableFingerprint {
     block_capture: AtomicBool,
     entered: Mutex<Option<std::sync::mpsc::Sender<()>>>,
+    captured_paths: Mutex<Vec<std::path::PathBuf>>,
 }
 
 impl ControllableFingerprint {
@@ -69,6 +70,7 @@ impl ControllableFingerprint {
         Arc::new(Self {
             block_capture: AtomicBool::new(false),
             entered: Mutex::new(None),
+            captured_paths: Mutex::new(Vec::new()),
         })
     }
 
@@ -78,9 +80,16 @@ impl ControllableFingerprint {
             Arc::new(Self {
                 block_capture: AtomicBool::new(true),
                 entered: Mutex::new(Some(tx)),
+                captured_paths: Mutex::new(Vec::new()),
             }),
             rx,
         )
+    }
+
+    fn reset_entered(&self) -> std::sync::mpsc::Receiver<()> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        *self.entered.lock() = Some(tx);
+        rx
     }
 }
 
@@ -139,6 +148,7 @@ impl marker::FingerprintCaptureEngine for ControllableFingerprint {
             }
         }
         let dur_ms = request.window.duration_ms();
+        self.captured_paths.lock().push(request.path.clone());
         let num_words = (dur_ms / 120).max(32) as usize;
         Ok(marker::CapturedFingerprint {
             window: request.window.clone(),

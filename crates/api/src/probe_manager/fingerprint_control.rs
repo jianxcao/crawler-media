@@ -344,7 +344,17 @@ impl ProbeManager {
                             .active_probe_job_for_scope(&scope)
                             .map_err(CreateErr::Store)?
                         {
-                            return Err(CreateErr::AlreadyRunning(existing.id));
+                            let units = store
+                                .probe_job_units(&existing.id)
+                                .map_err(CreateErr::Store)?;
+                            let is_explicit_marker_job = units.iter().any(|u| {
+                                u.ledger_id == ledger_id
+                                    && u.is_explicit_marker_detection()
+                                    && matches!(u.status.as_str(), "queued" | "running")
+                            });
+                            if is_explicit_marker_job {
+                                return Err(CreateErr::AlreadyRunning(existing.id));
+                            }
                         }
                         return Err(CreateErr::Conflict);
                     }

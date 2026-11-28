@@ -41,11 +41,9 @@ impl crate::LibraryConnection<'_> {
         let created = (|| -> Result<bool, StoreError> {
             if matches!(kind, "fingerprint_probe" | "marker_refresh") {
                 for unit in units {
-                    if !optional::file_accepts_optional_work(
-                        &tx,
-                        unit.ledger_id,
-                        kind == "fingerprint_probe",
-                    )? {
+                    let automatic =
+                        kind == "fingerprint_probe" && !unit.is_explicit_marker_detection();
+                    if !optional::file_accepts_optional_work(&tx, unit.ledger_id, automatic)? {
                         return Ok(false);
                     }
                 }
@@ -330,7 +328,14 @@ impl crate::LibraryConnection<'_> {
                     finished_at_ms = ?2 WHERE id = ?1",
             params![job_id, now],
         )?;
-        if !optional::file_accepts_optional_work(&tx, ledger_id, true)? {
+        let (force_fp, overwrite): (bool, bool) = tx.query_row(
+            "SELECT force_fingerprint, overwrite_markers
+             FROM probe_job_units WHERE job_id = ?1 AND file_id = ?2",
+            params![job_id, ledger_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        let automatic = !(force_fp && overwrite);
+        if !optional::file_accepts_optional_work(&tx, ledger_id, automatic)? {
             tx.commit()?;
             return Ok(false);
         }
@@ -532,6 +537,48 @@ impl crate::LibraryConnection<'_> {
                    AND (season = ?2 OR season IS NULL)
                  ORDER BY created_at_ms DESC, rowid DESC LIMIT 1",
                 params![media_id, season],
+                map_probe_job,
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn latest_marker_refresh_for_library_season(
+        &self,
+        library_id: domain::LibraryId,
+        media_id: &str,
+        season: u32,
+    ) -> Result<Option<ProbeJob>, StoreError> {
+        self.library
+            .query_row(
+                "SELECT j.id, j.kind, j.media_id, j.season, j.status, j.total, j.completed,
+                        j.succeeded, j.failed, j.partial, j.error, j.created_at_ms,
+                        j.started_at_ms, j.finished_at_ms
+                 FROM probe_jobs j
+                 WHERE j.kind = 'marker_refresh'
+                   AND j.media_id = ?1
+                   AND EXISTS (SELECT 1 FROM probe_job_units u WHERE u.job_id = j.id)
+                   AND NOT EXISTS (
+                       SELECT 1 FROM probe_job_units u
+                       LEFT JOIN library_files f ON f.file_id = u.file_id
+                       WHERE u.job_id = j.id AND (f.library_id IS NULL OR f.library_id <> ?3)
+                   )
+                   AND (
+                       j.season = ?2
+                       OR (
+                           j.season IS NULL
+                           AND EXISTS (
+                               SELECT 1 FROM probe_job_units u
+                               JOIN library_file_units fu ON fu.file_id = u.file_id
+                               WHERE u.job_id = j.id
+                                 AND (fu.season = ?2 OR (fu.season = -1 AND ?2 = 1))
+                           )
+                       )
+                   )
+                 ORDER BY (j.status IN ('queued', 'running')) DESC,
+                          j.created_at_ms DESC, j.rowid DESC
+                 LIMIT 1",
+                params![media_id, season, library_id.to_string()],
                 map_probe_job,
             )
             .optional()

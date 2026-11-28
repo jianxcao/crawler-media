@@ -320,7 +320,7 @@ pub(crate) async fn probe_status(
                 ));
             }
             let job = store
-                .latest_marker_refresh_for_season(&media_id.to_string(), season)
+                .latest_marker_refresh_for_library_season(library_id, &media_id.to_string(), season)
                 .map_err(|error| {
                     tracing::error!(%error, %media_id, season, "读取片头片尾任务状态失败");
                     err(
