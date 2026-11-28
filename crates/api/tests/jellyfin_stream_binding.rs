@@ -446,6 +446,60 @@ async fn vidhub_static_stream_paths_enforce_auth_and_session_binding() {
 }
 
 #[tokio::test]
+async fn vidhub_stream_accepts_quoted_device_id_with_trailing_backslash() {
+    let tmp = tempfile::tempdir().unwrap();
+    let f = fixture(tmp.path());
+    let (status, body) = get(
+        &f.app,
+        "POST",
+        &format!("/Items/{}/PlaybackInfo", f.item_id),
+        "vidhub-device",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let info: Value = serde_json::from_slice(&body).unwrap();
+    let session = info["PlaySessionId"].as_str().unwrap();
+    let source = info["MediaSources"][0]["Id"].as_str().unwrap();
+
+    for (header_device, query_device, expected) in [
+        (
+            "vidhub-device",
+            "vidhub-device",
+            StatusCode::PARTIAL_CONTENT,
+        ),
+        ("other-device", "other-device", StatusCode::NOT_FOUND),
+        ("other-device", "vidhub-device", StatusCode::NOT_FOUND),
+    ] {
+        let uri = format!(
+            "/videos/{}/stream.mp4?MediaSourceId={source}&PlaySessionId={session}&DeviceId={query_device}",
+            f.item_id
+        );
+        let authorization =
+            format!("Emby Client=\"VidHub\", DeviceId=\"{header_device}\"\\, Version=\"3.0.4\"");
+        let response = f
+            .app
+            .clone()
+            .oneshot(
+                Request::get(uri)
+                    .header("X-Emby-Token", "admin-token")
+                    .header("X-Emby-Authorization", authorization)
+                    .header("range", "bytes=0-3")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), expected);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        if expected == StatusCode::PARTIAL_CONTENT {
+            assert_eq!(bytes.as_ref(), b"AAAA");
+        } else {
+            assert_ne!(bytes.as_ref(), b"AAAA");
+        }
+    }
+}
+
+#[tokio::test]
 async fn empty_media_source_id_uses_the_bound_source_and_rejects_invalid_sources() {
     let tmp = tempfile::tempdir().unwrap();
     let f = fixture(tmp.path());

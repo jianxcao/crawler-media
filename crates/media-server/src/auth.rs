@@ -85,7 +85,14 @@ fn request_device_id(request: &Request) -> Option<String> {
 
 fn protocol_value(headers: &HeaderMap, header_name: &str, key_name: &str) -> Option<String> {
     let clean = |value: &str| {
-        let value = value.trim().trim_matches('"');
+        let value = value.trim();
+        // VidHub may append a backslash after the closing quote in stream headers.
+        let value = if value.starts_with('"') && value.ends_with("\"\\") {
+            &value[..value.len() - 1]
+        } else {
+            value
+        };
+        let value = value.trim_matches('"');
         (!value.is_empty()).then(|| value.to_string())
     };
     headers

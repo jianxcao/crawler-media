@@ -78,6 +78,7 @@ Playing / Progress / Stopped 中缺失或 null PositionTicks 不代表零。活�
 - Episodes 省略 Limit 时返回剩余全部授权单集；仅 StartIndex 也不套用 Items 的默认页长。显式 Limit 保留请求值。用超过 200 集的 fixture 同时检查省略 Limit、只给 StartIndex、显式大页、Season 范围和隐藏/未知父项。
 - Genres/Studios 未给 ParentId 与明确给错 ParentId 不等价，后者不能扩大到全局范围。
 - VidHub 的 POST `/Users/{userId}/{FavoriteItems|PlayedItems}/{itemId}/Delete` 与对应设置入口共享授权和持久化语义。两前缀、整片与 Episode、另一 User 和隐藏条目的正反例都保留。
+- VidHub 3.0.4 的取流认证头可能在带引号的设备 ID 后附加反斜杠。解析应保留原设备身份，使取流与 PlaybackInfo 签发的会话一致；不同设备仍不能消费该会话。公开 Router 回归位于 `jellyfin_stream_binding.rs`，实机验收应检查取流响应和实际出画。
 
 ## 真实客户端对照与排障
 
