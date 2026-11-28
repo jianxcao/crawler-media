@@ -8,7 +8,7 @@ use plugin_package::{
     ArchiveEntryMeta, PackageError, PackagePolicy, PluginManifest, UiAssetEntry, UiAssetManifest,
     UiManifest, validate_ui_manifest_with_policy,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -43,6 +43,7 @@ fn build_wasm_components(dir: &Path, manifest: &PluginManifest) -> Result<(), Cl
         ensure_safe_output_subpath_no_symlinks(dir, &comp.entry)?;
     }
     let cargo_toml = ensure_safe_output_subpath_no_symlinks(dir, "Cargo.toml")?;
+    let selected_packages = resolve_selected_cargo_package_ids(&cargo_toml)?;
 
     let mut cmd = Command::new("cargo");
     cmd.arg("build")
@@ -64,7 +65,7 @@ fn build_wasm_components(dir: &Path, manifest: &PluginManifest) -> Result<(), Cl
         )));
     }
 
-    let artifacts = parse_cargo_wasm_artifacts(&output.stdout);
+    let artifacts = parse_cargo_wasm_artifacts(&output.stdout, &selected_packages);
     let planned_writes = plan_component_writes(dir, manifest, &artifacts)?;
     for (entry, bytes) in planned_writes {
         let dest = ensure_safe_output_subpath_no_symlinks(dir, &entry)?;
@@ -77,7 +78,60 @@ fn build_wasm_components(dir: &Path, manifest: &PluginManifest) -> Result<(), Cl
     Ok(())
 }
 
-fn parse_cargo_wasm_artifacts(stdout: &[u8]) -> Vec<BuiltWasmArtifact> {
+fn resolve_selected_cargo_package_ids(cargo_toml: &Path) -> Result<HashSet<String>, CliError> {
+    let output = Command::new("cargo")
+        .arg("metadata")
+        .arg("--format-version")
+        .arg("1")
+        .arg("--no-deps")
+        .arg("--manifest-path")
+        .arg(cargo_toml)
+        .output()?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(CliError::CommandFailed(format!(
+            "cargo metadata failed:\n{stderr}"
+        )));
+    }
+    let val: serde_json::Value = serde_json::from_slice(&output.stdout).map_err(|e| {
+        CliError::CommandFailed(format!("failed to parse cargo metadata JSON: {e}"))
+    })?;
+    let canon_manifest = fs::canonicalize(cargo_toml).unwrap_or_else(|_| cargo_toml.to_path_buf());
+    if let Some(packages) = val.get("packages").and_then(|v| v.as_array()) {
+        for pkg in packages {
+            let Some(id) = pkg.get("id").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let Some(mpath) = pkg.get("manifest_path").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let pkg_manifest = fs::canonicalize(mpath).unwrap_or_else(|_| PathBuf::from(mpath));
+            if pkg_manifest == canon_manifest {
+                return Ok(HashSet::from([id.to_string()]));
+            }
+        }
+    }
+    for key in ["workspace_default_members", "workspace_members"] {
+        if let Some(arr) = val.get(key).and_then(|v| v.as_array()) {
+            let ids: HashSet<String> = arr
+                .iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect();
+            if !ids.is_empty() {
+                return Ok(ids);
+            }
+        }
+    }
+    Err(CliError::CommandFailed(format!(
+        "cargo metadata returned no selected packages for `{}`",
+        cargo_toml.display()
+    )))
+}
+
+fn parse_cargo_wasm_artifacts(
+    stdout: &[u8],
+    selected_packages: &HashSet<String>,
+) -> Vec<BuiltWasmArtifact> {
     let mut out = Vec::new();
     let text = String::from_utf8_lossy(stdout);
     for line in text.lines() {
@@ -85,6 +139,12 @@ fn parse_cargo_wasm_artifacts(stdout: &[u8]) -> Vec<BuiltWasmArtifact> {
             continue;
         };
         if val.get("reason").and_then(|v| v.as_str()) != Some("compiler-artifact") {
+            continue;
+        }
+        let Some(pkg_id) = val.get("package_id").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        if !selected_packages.contains(pkg_id) {
             continue;
         }
         let target_name = val

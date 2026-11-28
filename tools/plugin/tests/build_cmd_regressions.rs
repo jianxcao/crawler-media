@@ -436,15 +436,55 @@ fn write_fake_cargo(fake_bin: &Path) {
         &script,
         r#"#!/bin/sh
 set -eu
+if [ "${1:-}" = "metadata" ]; then
+  manifest_path=""
+  prev=""
+  for arg in "$@"; do
+    if [ "$prev" = "--manifest-path" ]; then
+      manifest_path="$arg"
+      break
+    fi
+    prev="$arg"
+  done
+  pkg_dir="$(cd "$(dirname "$manifest_path")" && pwd)"
+  pkg_name="${FAKE_CARGO_ROOT_PKG:-hook}"
+  pkg_id="path+file://${pkg_dir}#${pkg_name}@0.1.0"
+  printf '{"packages":[{"id":"%s","name":"%s","manifest_path":"%s"}],"workspace_members":["%s"],"workspace_default_members":["%s"],"resolve":{"root":"%s"}}\n' \
+    "$pkg_id" "$pkg_name" "$manifest_path" "$pkg_id" "$pkg_id" "$pkg_id"
+  exit 0
+fi
 out_dir="${CARGO_TARGET_DIR}/wasm32-wasip2/release"
 mkdir -p "$out_dir"
+manifest_path=""
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "--manifest-path" ]; then
+    manifest_path="$arg"
+    break
+  fi
+  prev="$arg"
+done
+pkg_dir="$(cd "$(dirname "$manifest_path")" && pwd)"
+root_pkg="${FAKE_CARGO_ROOT_PKG:-hook}"
 IFS=','
 for spec in $FAKE_CARGO_ARTIFACTS; do
-  name="${spec%%=*}"
+  # Format: [pkg_id_override@]target_name=src_path
+  lhs="${spec%%=*}"
   src="${spec#*=}"
+  case "$lhs" in
+    *@*)
+      art_pkg="${lhs%%@*}"
+      name="${lhs#*@}"
+      pkg_id="path+file:///deps/${art_pkg}#${art_pkg}@0.1.0"
+      ;;
+    *)
+      name="$lhs"
+      pkg_id="path+file://${pkg_dir}#${root_pkg}@0.1.0"
+      ;;
+  esac
   dest="${out_dir}/${name}.wasm"
   cp "$src" "$dest"
-  printf '{"reason":"compiler-artifact","target":{"name":"%s","kind":["cdylib"]},"filenames":["%s"]}\n' "$name" "$dest"
+  printf '{"reason":"compiler-artifact","package_id":"%s","target":{"name":"%s","kind":["cdylib"]},"filenames":["%s"]}\n' "$pkg_id" "$name" "$dest"
 done
 "#,
     )
@@ -598,4 +638,144 @@ fn build_multi_component_preserves_prebuilt_entries_and_rejects_ambiguous_artifa
         task_bytes,
         "task.wasm must remain untouched on ambiguous build failure"
     );
+}
+
+#[cfg(unix)]
+fn seed_real_dep_plugin(tmp_root: &Path) -> PathBuf {
+    let helper_dir = tmp_root.join("helper");
+    fs::create_dir_all(helper_dir.join("src")).expect("mkdir helper");
+    fs::write(
+        helper_dir.join("Cargo.toml"),
+        "[package]\nname = \"helper\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[lib]\ncrate-type = [\"rlib\", \"cdylib\"]\n",
+    )
+    .expect("write helper Cargo.toml");
+    fs::write(
+        helper_dir.join("src/lib.rs"),
+        "pub fn helper_magic() -> u32 { 7 }\n",
+    )
+    .expect("write helper lib.rs");
+
+    let real_proj = tmp_root.join("real-dep-plugin");
+    run(&args(&[
+        "scaffold",
+        "--world",
+        "hook-plugin",
+        "--api",
+        "1.0.0",
+        "--id",
+        "org.example.dep-cdylib",
+        &real_proj.to_string_lossy(),
+    ]))
+    .expect("scaffold hook-plugin");
+    let real_toml = fs::read_to_string(real_proj.join("Cargo.toml")).expect("read Cargo.toml");
+    fs::write(
+        real_proj.join("Cargo.toml"),
+        real_toml.replace(
+            "dlmalloc = { version = \"=0.2.13\", features = [\"global\"] }\n",
+            "dlmalloc = { version = \"=0.2.13\", features = [\"global\"] }\nhelper = { path = \"../helper\" }\n",
+        ),
+    )
+    .expect("add helper dep");
+    let real_src = fs::read_to_string(real_proj.join("src/lib.rs")).expect("read lib.rs");
+    let real_src = real_src.replace(
+        "    #[panic_handler]\n    fn panic(_: &core::panic::PanicInfo<'_>) -> ! {\n        core::arch::wasm32::unreachable()\n    }\n",
+        "",
+    );
+    fs::write(
+        real_proj.join("src/lib.rs"),
+        format!("{real_src}\n#[allow(dead_code)]\nfn _use_helper() -> u32 {{ helper::helper_magic() }}\n"),
+    )
+    .expect("use helper in lib.rs");
+    let _ = fs::remove_file(real_proj.join("Cargo.lock"));
+    real_proj
+}
+
+#[cfg(unix)]
+#[test]
+fn build_ignores_dependency_cdylib() {
+    let tmp = TempDir::new().expect("tmp");
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let policy_fixture = repo_root.join("crates/plugin-host/tests/fixtures/policy.wasm");
+    let task_fixture = repo_root.join("crates/plugin-host/tests/fixtures/task_fixture.wasm");
+    let policy_bytes = fs::read(&policy_fixture).expect("read policy.wasm");
+    let task_bytes = fs::read(&task_fixture).expect("read task_fixture.wasm");
+
+    // 1. Dependency cdylib (`helper`) emitted alongside root `hook` is ignored;
+    //    dependency cdylib named `task` never overwrites prebuilt `components/task.wasm`.
+    let proj = tmp.path().join("dep-collision");
+    seed_multi_component_project(&proj, &task_bytes);
+    let fake_bin = tmp.path().join("fake-bin");
+    write_fake_cargo(&fake_bin);
+    let target_dir = tmp.path().join("target");
+
+    let spec = format!(
+        "helper_dep@helper={},task_dep@task={},hook={}",
+        policy_fixture.display(),
+        policy_fixture.display(),
+        policy_fixture.display()
+    );
+    let out = run_child_plugin_build_with_path(
+        tmp.path(),
+        &proj.to_string_lossy(),
+        &target_dir,
+        &fake_bin,
+        &[("FAKE_CARGO_ARTIFACTS", &spec)],
+    );
+    assert!(
+        out.status.success(),
+        "build must ignore dependency cdylib artifacts:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        fs::read(proj.join("components/hook.wasm")).unwrap(),
+        policy_bytes
+    );
+    assert_eq!(
+        fs::read(proj.join("components/task.wasm")).unwrap(),
+        task_bytes
+    );
+
+    // 2. Real offline Cargo build with a local `rlib` + `cdylib` path dependency.
+    let real_proj = seed_real_dep_plugin(tmp.path());
+    let real_target = tmp.path().join("real-target");
+    let real_out = run_child_plugin_build(
+        tmp.path(),
+        &real_proj.to_string_lossy(),
+        None,
+        Some(&real_target),
+        Some("true"),
+    );
+    assert!(
+        real_out.status.success(),
+        "real offline Cargo build with cdylib path dependency must succeed:\n{}",
+        String::from_utf8_lossy(&real_out.stderr)
+    );
+    let built_entry =
+        fs::read(real_proj.join("components/main.wasm")).expect("read built components/main.wasm");
+    let expected_root =
+        fs::read(real_target.join("wasm32-wasip2/release/cm_plugin_real_dep_plugin.wasm"))
+            .expect("root plugin artifact must exist");
+    assert_eq!(built_entry, expected_root);
+    let pkg = tmp.path().join("org.example.dep-cdylib.cmplugin");
+    run(&args(&[
+        "pack",
+        &real_proj.to_string_lossy(),
+        "--output",
+        &pkg.to_string_lossy(),
+    ]))
+    .expect("pack built plugin");
+    let validated = validate_cmplugin_bytes(
+        &fs::read(&pkg).expect("read pkg"),
+        &PackagePolicy {
+            dev_mode: true,
+            ..PackagePolicy::default()
+        },
+    )
+    .expect("validate packed plugin");
+    assert_eq!(validated.manifest.id, "org.example.dep-cdylib");
 }
