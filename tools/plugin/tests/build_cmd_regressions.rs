@@ -397,3 +397,205 @@ fn build_ui_invokes_local_vite_for_relative_absolute_and_spaced_directories() {
     );
     assert!(abs_proj.join("ui/assets/remoteEntry.js").is_file());
 }
+
+#[cfg(unix)]
+fn run_child_plugin_build_with_path(
+    cwd: &Path,
+    project_arg: &str,
+    target_dir: &Path,
+    fake_bin: &Path,
+    extra_envs: &[(&str, &str)],
+) -> std::process::Output {
+    let orig_path = std::env::var_os("PATH").unwrap_or_default();
+    let mut path_val = std::ffi::OsString::from(fake_bin.as_os_str());
+    path_val.push(":");
+    path_val.push(orig_path);
+    let mut cmd = Command::new(std::env::current_exe().expect("current_exe"));
+    cmd.args([
+        "--exact",
+        "child_exec_plugin_build_helper",
+        "--nocapture",
+        "--ignored",
+    ])
+    .current_dir(cwd)
+    .env("CM_CHILD_PROJECT_ARG", project_arg)
+    .env("CARGO_TARGET_DIR", target_dir)
+    .env("PATH", path_val);
+    for (k, v) in extra_envs {
+        cmd.env(k, v);
+    }
+    cmd.output().expect("spawn child plugin build")
+}
+
+#[cfg(unix)]
+fn write_fake_cargo(fake_bin: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    fs::create_dir_all(fake_bin).expect("mkdir fake_bin");
+    let script = fake_bin.join("cargo");
+    fs::write(
+        &script,
+        r#"#!/bin/sh
+set -eu
+out_dir="${CARGO_TARGET_DIR}/wasm32-wasip2/release"
+mkdir -p "$out_dir"
+IFS=','
+for spec in $FAKE_CARGO_ARTIFACTS; do
+  name="${spec%%=*}"
+  src="${spec#*=}"
+  dest="${out_dir}/${name}.wasm"
+  cp "$src" "$dest"
+  printf '{"reason":"compiler-artifact","target":{"name":"%s","kind":["cdylib"]},"filenames":["%s"]}\n' "$name" "$dest"
+done
+"#,
+    )
+    .expect("write fake cargo");
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).expect("chmod fake cargo");
+}
+
+#[cfg(unix)]
+fn seed_multi_component_project(proj: &Path, task_bytes: &[u8]) {
+    fs::create_dir_all(proj.join("components")).expect("mkdir components");
+    fs::write(
+        proj.join("plugin.toml"),
+        r#"manifest_version = 1
+id = "org.example.multi-comp"
+name = "Multi Component"
+version = "0.1.0"
+api = "1.0.0"
+license = "MIT"
+authors = ["test"]
+description = "Multi-component preservation test"
+config_schema = "config.schema.json"
+state_schema = 1
+
+[[components]]
+id = "hook"
+entry = "components/hook.wasm"
+world = "crawler:plugin/hook-plugin@1.0.0"
+permissions = ["hooks:download.after"]
+
+[[components.hooks]]
+id = "download.after"
+priority = 10
+
+[[components]]
+id = "task"
+entry = "components/task.wasm"
+world = "crawler:plugin/task-plugin@1.0.0"
+permissions = []
+
+[[components.tasks]]
+id = "sync"
+input_schema = "config.schema.json"
+
+[components.tasks.schedule]
+kind = "interval"
+seconds = 3600
+"#,
+    )
+    .expect("write plugin.toml");
+    fs::write(
+        proj.join("config.schema.json"),
+        r#"{"type":"object","properties":{},"additionalProperties":false}"#,
+    )
+    .expect("write schema");
+    fs::write(
+        proj.join("Cargo.toml"),
+        "[package]\nname = \"hook\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .expect("write Cargo.toml");
+    fs::write(proj.join("components/task.wasm"), task_bytes).expect("write prebuilt task.wasm");
+}
+
+#[cfg(unix)]
+#[test]
+fn build_multi_component_preserves_prebuilt_entries_and_rejects_ambiguous_artifacts_before_writing()
+{
+    let tmp = TempDir::new().expect("tmp");
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let policy_fixture = repo_root.join("crates/plugin-host/tests/fixtures/policy.wasm");
+    let task_fixture = repo_root.join("crates/plugin-host/tests/fixtures/task_fixture.wasm");
+    let policy_bytes = fs::read(&policy_fixture).expect("read policy.wasm");
+    let task_bytes = fs::read(&task_fixture).expect("read task_fixture.wasm");
+    assert_ne!(policy_bytes, task_bytes);
+
+    let proj = tmp.path().join("multi-comp");
+    seed_multi_component_project(&proj, &task_bytes);
+
+    let fake_bin = tmp.path().join("fake-bin");
+    write_fake_cargo(&fake_bin);
+    let target_dir = tmp.path().join("target");
+
+    // 1. Cargo builds only `hook` -> hook.wasm is written, prebuilt task.wasm stays byte-identical.
+    let ok_spec = format!("hook={}", policy_fixture.display());
+    let ok_out = run_child_plugin_build_with_path(
+        tmp.path(),
+        &proj.to_string_lossy(),
+        &target_dir,
+        &fake_bin,
+        &[("FAKE_CARGO_ARTIFACTS", &ok_spec)],
+    );
+    assert!(
+        ok_out.status.success(),
+        "multi-component build with prebuilt task must succeed:\n{}",
+        String::from_utf8_lossy(&ok_out.stderr)
+    );
+    assert_eq!(
+        fs::read(proj.join("components/hook.wasm")).expect("read hook.wasm"),
+        policy_bytes,
+        "hook.wasm must be updated from compiled artifact"
+    );
+    assert_eq!(
+        fs::read(proj.join("components/task.wasm")).expect("read task.wasm"),
+        task_bytes,
+        "prebuilt task.wasm must never be overwritten by hook artifact"
+    );
+
+    // Pack + validate must succeed cleanly.
+    let pkg = tmp.path().join("org.example.multi-comp.cmplugin");
+    run(&args(&[
+        "pack",
+        &proj.to_string_lossy(),
+        "--output",
+        &pkg.to_string_lossy(),
+    ]))
+    .expect("pack multi-component plugin");
+    let validated = validate_cmplugin_bytes(
+        &fs::read(&pkg).expect("read pkg"),
+        &PackagePolicy {
+            dev_mode: true,
+            ..PackagePolicy::default()
+        },
+    )
+    .expect("validate packed multi-component plugin");
+    assert_eq!(validated.manifest.components.len(), 2);
+
+    // 2. Unmapped / ambiguous Cargo artifact must fail BEFORE touching any existing entry on disk.
+    let bad_spec = format!("unrelated={}", task_fixture.display());
+    let bad_out = run_child_plugin_build_with_path(
+        tmp.path(),
+        &proj.to_string_lossy(),
+        &target_dir,
+        &fake_bin,
+        &[("FAKE_CARGO_ARTIFACTS", &bad_spec)],
+    );
+    assert!(
+        !bad_out.status.success(),
+        "unmapped multi-component artifact must fail build"
+    );
+    assert_eq!(
+        fs::read(proj.join("components/hook.wasm")).expect("hook untouched"),
+        policy_bytes,
+        "hook.wasm must remain untouched on ambiguous build failure"
+    );
+    assert_eq!(
+        fs::read(proj.join("components/task.wasm")).expect("task untouched"),
+        task_bytes,
+        "task.wasm must remain untouched on ambiguous build failure"
+    );
+}

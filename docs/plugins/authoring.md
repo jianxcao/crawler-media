@@ -460,7 +460,7 @@ crawler-media plugin sign /tmp/traffic-policy.cmplugin --key /path/to/publisher.
 crawler-media plugin dev ./traffic-policy --instance http://127.0.0.1:18765
 ```
 
-`dev`必须仍走管理API的认证、开发模式、manifest、权限和包级前端UI信任检查，不能绕过签名政策或扩大后端网络；只发布完整验证后的新generation。UI watch-build产物重新打包，已加载联邦页面需完整刷新，不承诺任意JS热卸载；正式宿主不直连开发服务器。签名私钥不进入仓库、不进入插件包、不进入宿主配置。实现时模板须锁定Rust/WIT及前端工具链，并提供可复现构建记录与包hash。当插件目录包含 `Cargo.lock` 时，`plugin build` 默认向 `cargo build` 传入 `--locked` 并继承调用方的网络配置，使新环境能按锁文件拉取依赖且不改写锁文件；显式离线构建可设置 `CARGO_NET_OFFLINE=true`。
+`dev`必须仍走管理API的认证、开发模式、manifest、权限和包级前端UI信任检查，不能绕过签名政策或扩大后端网络；只发布完整验证后的新generation。UI watch-build产物重新打包，已加载联邦页面需完整刷新，不承诺任意JS热卸载；正式宿主不直连开发服务器。签名私钥不进入仓库、不进入插件包、不进入宿主配置。实现时模板须锁定Rust/WIT及前端工具链，并提供可复现构建记录与包hash。当插件目录包含 `Cargo.lock` 时，`plugin build` 默认向 `cargo build` 传入 `--locked` 并继承调用方的网络配置，使新环境能按锁文件拉取依赖且不改写锁文件；显式离线构建可设置 `CARGO_NET_OFFLINE=true`。对于多组件插件，`plugin build` 解析 `cargo build --message-format=json-render-diagnostics` 的 `.wasm` 产物并按规范化（`-` 视同 `_`）的 target 名称/产物文件名与组件 `id` 或 `entry` 文件名唯一匹配；其余未由本次 Cargo 构建生成的组件若磁盘上已有通过组件校验的预编译 `.wasm` 将原样保留；若存在未匹配、歧义或缺失的组件，构建在写入任何文件前直接失败，绝不拿单一产物覆盖其他组件。
 
 ### 8.2 发布前行为测试矩阵
 

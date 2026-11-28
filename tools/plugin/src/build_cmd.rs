@@ -1,6 +1,6 @@
 use crate::error::CliError;
 use crate::validate::{
-    collect_built_ui_assets, ensure_safe_output_subpath_no_symlinks, read_project_file_no_symlinks,
+    collect_built_ui_assets, ensure_safe_output_subpath_no_symlinks,
     read_project_file_no_symlinks_optional, sha256_hex, validate_project_dir,
     validate_wasm_component_bytes,
 };
@@ -33,13 +33,16 @@ pub fn execute_build(dir: &Path) -> Result<String, CliError> {
     ))
 }
 
+struct BuiltWasmArtifact {
+    target_name: String,
+    path: PathBuf,
+}
+
 fn build_wasm_components(dir: &Path, manifest: &PluginManifest) -> Result<(), CliError> {
     for comp in &manifest.components {
         ensure_safe_output_subpath_no_symlinks(dir, &comp.entry)?;
     }
     let cargo_toml = ensure_safe_output_subpath_no_symlinks(dir, "Cargo.toml")?;
-    let pkg_name = parse_cargo_package_name(dir, &cargo_toml)?;
-    let lib_stem = pkg_name.replace('-', "_");
 
     let mut cmd = Command::new("cargo");
     cmd.arg("build")
@@ -47,7 +50,8 @@ fn build_wasm_components(dir: &Path, manifest: &PluginManifest) -> Result<(), Cl
         .arg(&cargo_toml)
         .arg("--target")
         .arg("wasm32-wasip2")
-        .arg("--release");
+        .arg("--release")
+        .arg("--message-format=json-render-diagnostics");
     if read_project_file_no_symlinks_optional(dir, "Cargo.lock")?.is_some() {
         cmd.arg("--locked");
     }
@@ -60,58 +64,172 @@ fn build_wasm_components(dir: &Path, manifest: &PluginManifest) -> Result<(), Cl
         )));
     }
 
-    let target_root = std::env::var_os("CARGO_TARGET_DIR")
-        .filter(|v| !v.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| dir.join("target"));
-    let built_wasm = target_root
-        .join("wasm32-wasip2")
-        .join("release")
-        .join(format!("{lib_stem}.wasm"));
-    let wasm_bytes = fs::read(&built_wasm).map_err(|e| {
-        CliError::CommandFailed(format!(
-            "expected compiled WASM component at `{}`: {e}",
-            built_wasm.display()
-        ))
-    })?;
-
-    for comp in &manifest.components {
-        validate_wasm_component_bytes(&wasm_bytes, &comp.id, &comp.entry)?;
-        let dest = ensure_safe_output_subpath_no_symlinks(dir, &comp.entry)?;
+    let artifacts = parse_cargo_wasm_artifacts(&output.stdout);
+    let planned_writes = plan_component_writes(dir, manifest, &artifacts)?;
+    for (entry, bytes) in planned_writes {
+        let dest = ensure_safe_output_subpath_no_symlinks(dir, &entry)?;
         if let Some(parent) = dest.parent() {
             fs::create_dir_all(parent)?;
         }
-        let dest = ensure_safe_output_subpath_no_symlinks(dir, &comp.entry)?;
-        fs::write(&dest, &wasm_bytes)?;
+        let dest = ensure_safe_output_subpath_no_symlinks(dir, &entry)?;
+        fs::write(&dest, &bytes)?;
     }
     Ok(())
 }
 
-fn parse_cargo_package_name(dir: &Path, cargo_toml: &Path) -> Result<String, CliError> {
-    let bytes = read_project_file_no_symlinks(dir, "Cargo.toml")?;
-    let text = std::str::from_utf8(&bytes)
-        .map_err(|_| CliError::Validation(format!("`{}` is not UTF-8", cargo_toml.display())))?;
-    let mut in_package = false;
+fn parse_cargo_wasm_artifacts(stdout: &[u8]) -> Vec<BuiltWasmArtifact> {
+    let mut out = Vec::new();
+    let text = String::from_utf8_lossy(stdout);
     for line in text.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with('[') {
-            in_package = trimmed == "[package]";
+        let Ok(val) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if val.get("reason").and_then(|v| v.as_str()) != Some("compiler-artifact") {
             continue;
         }
-        if in_package
-            && let Some((k, v)) = trimmed.split_once('=')
-            && k.trim() == "name"
-        {
-            let name = v.trim().trim_matches('"').trim_matches('\'');
-            if !name.is_empty() {
-                return Ok(name.to_string());
+        let target_name = val
+            .pointer("/target/name")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let Some(filenames) = val.get("filenames").and_then(|v| v.as_array()) else {
+            continue;
+        };
+        for file in filenames {
+            let Some(path_str) = file.as_str() else {
+                continue;
+            };
+            if path_str.ends_with(".wasm") {
+                out.push(BuiltWasmArtifact {
+                    target_name: target_name.clone(),
+                    path: PathBuf::from(path_str),
+                });
             }
         }
     }
-    Err(CliError::Validation(format!(
-        "missing [package] name in `{}`",
-        cargo_toml.display()
-    )))
+    out
+}
+
+fn normalize_component_key(raw: &str) -> String {
+    raw.replace('-', "_")
+}
+
+fn component_matches_artifact(
+    comp: &plugin_package::ComponentManifest,
+    artifact: &BuiltWasmArtifact,
+) -> bool {
+    let target_norm = normalize_component_key(&artifact.target_name);
+    let file_stem_norm = artifact
+        .path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .map(normalize_component_key);
+    let id_norm = normalize_component_key(&comp.id);
+    let entry_stem_norm = Path::new(&comp.entry)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .map(normalize_component_key);
+
+    (!target_norm.is_empty() && target_norm == id_norm)
+        || file_stem_norm.as_deref() == Some(id_norm.as_str())
+        || (!target_norm.is_empty() && entry_stem_norm.as_deref() == Some(target_norm.as_str()))
+        || (entry_stem_norm.is_some() && entry_stem_norm == file_stem_norm)
+}
+
+fn plan_component_writes(
+    dir: &Path,
+    manifest: &PluginManifest,
+    artifacts: &[BuiltWasmArtifact],
+) -> Result<Vec<(String, Vec<u8>)>, CliError> {
+    if artifacts.is_empty() {
+        return Err(CliError::CommandFailed(
+            "cargo build produced no .wasm component artifacts".into(),
+        ));
+    }
+
+    if manifest.components.len() == 1 && artifacts.len() == 1 {
+        let comp = &manifest.components[0];
+        let bytes = read_and_validate_artifact(&artifacts[0], &comp.id, &comp.entry)?;
+        return Ok(vec![(comp.entry.clone(), bytes)]);
+    }
+
+    let mut comp_matches: Vec<Vec<usize>> = vec![Vec::new(); manifest.components.len()];
+    for (art_idx, artifact) in artifacts.iter().enumerate() {
+        let matched: Vec<usize> = manifest
+            .components
+            .iter()
+            .enumerate()
+            .filter(|(_, comp)| component_matches_artifact(comp, artifact))
+            .map(|(idx, _)| idx)
+            .collect();
+        if matched.is_empty() {
+            return Err(CliError::CommandFailed(format!(
+                "built WASM artifact `{}` (target `{}`) did not match any component id or entry stem in plugin.toml",
+                artifact.path.display(),
+                artifact.target_name
+            )));
+        }
+        if matched.len() > 1 {
+            let ids = matched
+                .iter()
+                .map(|&i| manifest.components[i].id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(CliError::CommandFailed(format!(
+                "ambiguous WASM artifact `{}` matched multiple components: {ids}",
+                artifact.path.display()
+            )));
+        }
+        comp_matches[matched[0]].push(art_idx);
+    }
+
+    let mut writes = Vec::new();
+    for (comp_idx, comp) in manifest.components.iter().enumerate() {
+        match comp_matches[comp_idx].as_slice() {
+            [art_idx] => {
+                let bytes =
+                    read_and_validate_artifact(&artifacts[*art_idx], &comp.id, &comp.entry)?;
+                writes.push((comp.entry.clone(), bytes));
+            }
+            [] => {
+                let Some(existing) = read_project_file_no_symlinks_optional(dir, &comp.entry)?
+                else {
+                    return Err(CliError::CommandFailed(format!(
+                        "component `{}` (`{}`) was not produced by cargo build and has no prebuilt WASM on disk",
+                        comp.id, comp.entry
+                    )));
+                };
+                validate_wasm_component_bytes(&existing, &comp.id, &comp.entry)?;
+            }
+            many => {
+                let paths = many
+                    .iter()
+                    .map(|&i| artifacts[i].path.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                return Err(CliError::CommandFailed(format!(
+                    "component `{}` matched multiple built WASM artifacts: {paths}",
+                    comp.id
+                )));
+            }
+        }
+    }
+    Ok(writes)
+}
+
+fn read_and_validate_artifact(
+    artifact: &BuiltWasmArtifact,
+    comp_id: &str,
+    comp_entry: &str,
+) -> Result<Vec<u8>, CliError> {
+    let bytes = fs::read(&artifact.path).map_err(|e| {
+        CliError::CommandFailed(format!(
+            "expected compiled WASM component at `{}`: {e}",
+            artifact.path.display()
+        ))
+    })?;
+    validate_wasm_component_bytes(&bytes, comp_id, comp_entry)?;
+    Ok(bytes)
 }
 
 fn build_ui_bundle(dir: &Path, ui: &UiManifest) -> Result<(), CliError> {
