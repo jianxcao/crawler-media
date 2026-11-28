@@ -49,8 +49,7 @@ fn build_wasm_components(dir: &Path, manifest: &PluginManifest) -> Result<(), Cl
         .arg("wasm32-wasip2")
         .arg("--release");
     if read_project_file_no_symlinks_optional(dir, "Cargo.lock")?.is_some() {
-        cmd.arg("--offline");
-        cmd.env("CARGO_NET_OFFLINE", "true");
+        cmd.arg("--locked");
     }
 
     let output = cmd.output()?;
@@ -145,14 +144,15 @@ fn build_ui_bundle(dir: &Path, ui: &UiManifest) -> Result<(), CliError> {
     }
 
     let local_vite = ui_dir.join("node_modules/vite/bin/vite.js");
-    let (vite_bin, maybe_web_root) = if resolve_local_vite(&ui_dir, &local_vite)? {
-        (local_vite, None)
-    } else {
-        let web_root = find_web_root(dir)?;
-        (
-            web_root.join("node_modules/vite/bin/vite.js"),
-            Some(web_root),
-        )
+    let (vite_bin, maybe_web_root) = match resolve_local_vite(&ui_dir, &local_vite)? {
+        Some(canon_vite) => (canon_vite, None),
+        None => {
+            let web_root = find_web_root(dir)?;
+            (
+                web_root.join("node_modules/vite/bin/vite.js"),
+                Some(web_root),
+            )
+        }
     };
 
     let node_bin = std::env::var_os("NODE")
@@ -264,7 +264,7 @@ fn infer_ui_content_type(path: &str) -> Result<String, CliError> {
     Ok(mime.to_string())
 }
 
-fn resolve_local_vite(ui_dir: &Path, local_vite: &Path) -> Result<bool, CliError> {
+fn resolve_local_vite(ui_dir: &Path, local_vite: &Path) -> Result<Option<PathBuf>, CliError> {
     let nm_dir = ui_dir.join("node_modules");
     if let Ok(nm_meta) = fs::symlink_metadata(&nm_dir)
         && nm_meta.file_type().is_symlink()
@@ -290,10 +290,10 @@ fn resolve_local_vite(ui_dir: &Path, local_vite: &Path) -> Result<bool, CliError
                     reason: "local Vite binary escapes UI directory via symlink".into(),
                 }));
             }
-            Ok(true)
+            Ok(Some(canon_vite))
         }
-        Ok(_) => Ok(false),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Ok(_) => Ok(None),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(err) => Err(CliError::Io(err)),
     }
 }
@@ -302,7 +302,7 @@ fn find_web_root(project_dir: &Path) -> Result<PathBuf, CliError> {
     if let Some(explicit) = std::env::var_os("CRAWLER_PLUGIN_WEB_DIR").filter(|v| !v.is_empty()) {
         let candidate = PathBuf::from(explicit);
         if candidate.join("node_modules/vite/bin/vite.js").is_file() {
-            return Ok(candidate);
+            return Ok(candidate.canonicalize()?);
         }
     }
 
@@ -311,11 +311,11 @@ fn find_web_root(project_dir: &Path) -> Result<PathBuf, CliError> {
         .join("node_modules/vite/bin/vite.js")
         .is_file()
     {
-        return Ok(compile_time_web);
+        return Ok(compile_time_web.canonicalize()?);
     }
 
     for start in [
-        Some(project_dir.to_path_buf()),
+        project_dir.canonicalize().ok(),
         std::env::current_dir().ok(),
         std::env::current_exe().ok(),
     ]
@@ -325,7 +325,7 @@ fn find_web_root(project_dir: &Path) -> Result<PathBuf, CliError> {
         for ancestor in start.ancestors() {
             let web_dir = ancestor.join("web");
             if web_dir.join("node_modules/vite/bin/vite.js").is_file() {
-                return Ok(web_dir);
+                return Ok(web_dir.canonicalize()?);
             }
         }
     }
