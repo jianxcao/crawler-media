@@ -1303,3 +1303,199 @@ test("MarkerControlPanel preserves manual season switch when selectedSeason is s
   assert.equal(detectCalls.length, detectCountBefore + 1);
   assert.deepEqual(detectCalls.at(-1), ["detect", "lib-a", { season: 1, mode: "reuse_valid" }]);
 });
+
+test("MarkerControlPanel isolates async ops across season switch and unmount, and validates detect receipt message", async (t) => {
+  const calls = [];
+  let s1DetectGate = null;
+  let s2FetchGate = null;
+  let s1SaveGate = null;
+  let detectReceipt = { queued: true, already_running: false, skipped_multi_unit: 0, job: null };
+  let onChangedCount = 0;
+
+  const makeDiag = (season) => ({
+    media_id: "media-race",
+    season,
+    active: false,
+    paused: false,
+    job: null,
+    episodes: [
+      {
+        file_id: `file-s${season}-e1`,
+        season,
+        episode: 1,
+        duration_ms: 1200000,
+        multi_unit: false,
+        marker: {
+          intro_start_ms: season * 10000,
+          intro_end_ms: season * 10000 + 30000,
+          outro_start_ms: null,
+          outro_end_ms: null,
+          source: "manual",
+          locked: true,
+        },
+        detection: null,
+      },
+    ],
+  });
+
+  const { MarkerControlPanel } = loadTsModule(
+    "../components/library-item/marker-control-panel.tsx",
+    {
+      "@/lib/api/libraries": {
+        fetchSeasonMarkers: async (_lib, _media, season) => {
+          calls.push(["fetch", season]);
+          if (season === 2 && s2FetchGate) {
+            await s2FetchGate.promise;
+          }
+          return makeDiag(season);
+        },
+        detectItemMarkers: async (_lib, _media, body) => {
+          calls.push(["detect", body]);
+          if (body.season === 1 && s1DetectGate) {
+            await s1DetectGate.promise;
+          }
+          return detectReceipt;
+        },
+        saveManualMarker: async (_lib, _media, body) => {
+          calls.push(["save", body]);
+          if (s1SaveGate) {
+            await s1SaveGate.promise;
+          }
+          return {};
+        },
+        deleteManualMarker: async (_lib, _media, body) => {
+          calls.push(["delete", body]);
+          return { deleted: true };
+        },
+      },
+      "@/lib/api/probe": {
+        cancelFingerprintQueue: async () => ({ cancelled_units: 0, aborted_running: 0 }),
+      },
+    },
+  );
+
+  let renderer;
+  t.after(async () => {
+    s1DetectGate?.resolve();
+    s2FetchGate?.resolve();
+    s1SaveGate?.resolve();
+    if (renderer) await act(async () => renderer.unmount());
+  });
+
+  await act(async () => {
+    renderer = create(
+      React.createElement(MarkerControlPanel, {
+        libraryId: "lib-race",
+        mediaItemId: "media-race",
+        seasons: [1, 2],
+        selectedSeason: 1,
+        onChanged: () => {
+          onChangedCount += 1;
+        },
+      }),
+    );
+  });
+
+  const selector = () => renderer.root.findByProps({ "aria-label": "检测季选择" });
+  assert.match(collectText(renderer.toJSON()), /00:10–00:40/);
+
+  // 1. Start deferred S1 detect, switch to S2 (with S2 fetch pending), verify S1 rows vanish immediately.
+  s1DetectGate = deferred();
+  s2FetchGate = deferred();
+  let s1DetectPromise;
+  await act(async () => {
+    const detectBtn = renderer.root
+      .findAllByType("button")
+      .find((b) => collectText(b) === "检测本季");
+    s1DetectPromise = detectBtn.props.onClick();
+    await Promise.resolve();
+  });
+  await act(async () => {
+    selector().props.onChange({ target: { value: "2" } });
+    await Promise.resolve();
+  });
+  assert.equal(selector().props.value, 2);
+  assert.doesNotMatch(
+    collectText(renderer.toJSON()),
+    /00:10–00:40/,
+    "switching to season 2 must clear season 1 episode rows while season 2 loads",
+  );
+
+  // Resolve S2 fetch, then let late S1 detect complete -> S2 must keep file-s2-e1 & not fire stale onChanged.
+  await act(async () => {
+    s2FetchGate.resolve();
+    await Promise.resolve();
+  });
+  s2FetchGate = null;
+  assert.match(collectText(renderer.toJSON()), /00:20–00:50/);
+
+  const changedBeforeLateResolve = onChangedCount;
+  await act(async () => {
+    s1DetectGate.resolve();
+    await s1DetectPromise;
+    await Promise.resolve();
+  });
+  s1DetectGate = null;
+  assert.equal(selector().props.value, 2);
+  assert.match(collectText(renderer.toJSON()), /00:20–00:50/);
+  assert.doesNotMatch(collectText(renderer.toJSON()), /00:10–00:40/);
+  assert.equal(
+    onChangedCount,
+    changedBeforeLateResolve,
+    "late season 1 detect completion must not trigger onChanged after switching to season 2",
+  );
+
+  // Clicking 清除 while viewing S2 must target file-s2-e1 (season 2), never S1.
+  const delBtn = renderer.root
+    .findAllByType("button")
+    .find((b) => collectText(b) === "清除");
+  await act(async () => {
+    await delBtn.props.onClick();
+  });
+  assert.deepEqual(calls.filter((c) => c[0] === "delete").at(-1), [
+    "delete",
+    { season: 2, episode: 1, file_id: "file-s2-e1" },
+  ]);
+
+  // 2. Non-queued / non-running receipt must NOT claim "已提交".
+  detectReceipt = { queued: false, already_running: false, skipped_multi_unit: 0, job: null };
+  await act(async () => {
+    const detectBtn = renderer.root
+      .findAllByType("button")
+      .find((b) => collectText(b) === "检测本季");
+    await detectBtn.props.onClick();
+  });
+  assert.doesNotMatch(
+    collectText(renderer.toJSON()),
+    /已提交/,
+    "queued=false, already_running=false must not claim task was submitted",
+  );
+
+  // 3. Unmounting during in-flight save must not invoke onChanged.
+  s1SaveGate = deferred();
+  const editBtn = renderer.root
+    .findAllByType("button")
+    .find((b) => collectText(b) === "编辑/锁定");
+  await act(async () => {
+    editBtn.props.onClick();
+  });
+  const saveBtn = renderer.root
+    .findAllByType("button")
+    .find((b) => collectText(b) === "保存锁定");
+  let savePromise;
+  await act(async () => {
+    savePromise = saveBtn.props.onClick();
+    await Promise.resolve();
+  });
+  const changedBeforeUnmount = onChangedCount;
+  await act(async () => {
+    renderer.unmount();
+    renderer = null;
+  });
+  await act(async () => {
+    s1SaveGate.resolve();
+    await savePromise;
+    await Promise.resolve();
+  });
+  assert.equal(onChangedCount, changedBeforeUnmount, "unmounted save must not fire onChanged");
+});

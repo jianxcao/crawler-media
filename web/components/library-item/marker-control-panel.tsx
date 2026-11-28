@@ -24,6 +24,7 @@ import {
   sourceBadgeLabel,
   validateEditDraft,
 } from "./marker-control-helpers";
+import { MarkerEditForm } from "./marker-edit-form";
 
 export { msToInputSeconds, parseSecondsInput };
 
@@ -56,7 +57,8 @@ export function MarkerControlPanel({
   const [error, setError] = useState<string | null>(null);
   const [editing, setEditing] = useState<EditDraft | null>(null);
 
-  const activeRef = useRef(true);
+  const mountedRef = useRef(true);
+  const scopeGenRef = useRef(0);
   const prevActiveRef = useRef(false);
   const loadSeqRef = useRef(0);
   const loadAbortRef = useRef<AbortController | null>(null);
@@ -66,8 +68,23 @@ export function MarkerControlPanel({
   seasonsRef.current = seasons;
   const prevExternalRef = useRef({ isTv, libraryId, mediaItemId, selectedSeason });
 
+  const targetSeason = isTv ? season : null;
   const effectiveMode: MarkerDetectMode = isTv ? mode : "theintrodb_only";
   const canDetectSingleEpisode = isTv && selectedSeason === season && selectedEpisode != null;
+
+  const isCurrentScope = useCallback(
+    (gen: number) => mountedRef.current && scopeGenRef.current === gen,
+    [],
+  );
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      scopeGenRef.current += 1;
+      loadAbortRef.current?.abort();
+    };
+  }, []);
 
   useEffect(() => {
     const prev = prevExternalRef.current;
@@ -90,50 +107,66 @@ export function MarkerControlPanel({
     );
   }, [isTv, seasons]);
 
-  useEffect(() => {
-    setEditing(null);
-  }, [mediaItemId, season, isTv]);
+  const load = useCallback(
+    async (expectedGen?: number) => {
+      const gen = expectedGen ?? scopeGenRef.current;
+      if (!isCurrentScope(gen)) return;
+      loadAbortRef.current?.abort();
+      const controller = new AbortController();
+      loadAbortRef.current = controller;
+      const reqId = ++loadSeqRef.current;
+      try {
+        const next = await fetchSeasonMarkers(
+          libraryId,
+          mediaItemId,
+          targetSeason,
+          controller.signal,
+        );
+        if (!isCurrentScope(gen) || controller.signal.aborted || reqId !== loadSeqRef.current) {
+          return;
+        }
+        const finishedActive = prevActiveRef.current && !next.active;
+        prevActiveRef.current = next.active;
+        setDiag(next);
+        setError(null);
+        if (finishedActive && isCurrentScope(gen)) onChangedRef.current?.();
+      } catch (cause) {
+        if (!isCurrentScope(gen) || controller.signal.aborted || reqId !== loadSeqRef.current) {
+          return;
+        }
+        setError(`读取片头片尾诊断失败：${(cause as Error).message}`);
+      }
+    },
+    [isCurrentScope, libraryId, mediaItemId, targetSeason],
+  );
 
-  const load = useCallback(async () => {
-    loadAbortRef.current?.abort();
-    const controller = new AbortController();
-    loadAbortRef.current = controller;
-    const reqId = ++loadSeqRef.current;
-    const targetSeason = isTv ? season : null;
-    try {
-      const next = await fetchSeasonMarkers(libraryId, mediaItemId, targetSeason, controller.signal);
-      if (!activeRef.current || controller.signal.aborted || reqId !== loadSeqRef.current) return;
-      const finishedActive = prevActiveRef.current && !next.active;
-      prevActiveRef.current = next.active;
-      setDiag(next);
-      setError(null);
-      if (finishedActive) onChangedRef.current?.();
-    } catch (cause) {
-      if (!activeRef.current || controller.signal.aborted || reqId !== loadSeqRef.current) return;
-      setError(`读取片头片尾诊断失败：${(cause as Error).message}`);
-    }
-  }, [isTv, libraryId, mediaItemId, season]);
-
   useEffect(() => {
-    activeRef.current = true;
+    const gen = ++scopeGenRef.current;
     prevActiveRef.current = false;
-    void load();
+    setDiag(null);
+    setBusy(null);
+    setMessage(null);
+    setError(null);
+    setEditing(null);
+    void load(gen);
     return () => {
-      activeRef.current = false;
+      scopeGenRef.current += 1;
       loadAbortRef.current?.abort();
     };
   }, [load]);
 
   useEffect(() => {
     if (!diag?.active) return;
+    const gen = scopeGenRef.current;
     const timer = setInterval(() => {
-      void load();
+      void load(gen);
     }, 2000);
     return () => clearInterval(timer);
   }, [diag?.active, load]);
 
   const runDetect = async (singleEpisode: boolean) => {
     if (busy || (singleEpisode && !canDetectSingleEpisode)) return;
+    const gen = scopeGenRef.current;
     setBusy(singleEpisode ? "episode" : "season");
     setError(null);
     setMessage(null);
@@ -149,7 +182,7 @@ export function MarkerControlPanel({
             }
           : { season, mode: effectiveMode };
       const receipt = await detectItemMarkers(libraryId, mediaItemId, payload);
-      if (!activeRef.current) return;
+      if (!isCurrentScope(gen)) return;
       const skipNote =
         receipt.skipped_multi_unit > 0
           ? `（已自动跳过 ${receipt.skipped_multi_unit} 个合并集文件）`
@@ -161,25 +194,29 @@ export function MarkerControlPanel({
             ? `TheIntroDB 云端同步完成，已更新 ${count} 项标记${skipNote}。`
             : `TheIntroDB 云端同步完成，未发现可更新标记${skipNote}。`,
         );
-        await load();
+        await load(gen);
+        if (!isCurrentScope(gen)) return;
         onChangedRef.current?.();
       } else {
         setMessage(
           receipt.already_running
             ? "该季已有片头片尾任务正在运行。"
-            : `已提交片头片尾检测任务${skipNote}。`,
+            : receipt.queued
+              ? `已提交片头片尾检测任务${skipNote}。`
+              : `未创建新的片头片尾检测任务${skipNote}。`,
         );
-        await load();
+        await load(gen);
       }
     } catch (cause) {
-      if (activeRef.current) setError(`提交检测失败：${(cause as Error).message}`);
+      if (isCurrentScope(gen)) setError(`提交检测失败：${(cause as Error).message}`);
     } finally {
-      if (activeRef.current) setBusy(null);
+      if (isCurrentScope(gen)) setBusy(null);
     }
   };
 
   const handleCancel = async (targetFileId?: string) => {
     if (busy) return;
+    const gen = scopeGenRef.current;
     setBusy("cancel");
     setError(null);
     setMessage(null);
@@ -191,15 +228,15 @@ export function MarkerControlPanel({
         ...(targetFileId ? { file_id: targetFileId } : {}),
         include_running: true,
       });
-      if (!activeRef.current) return;
+      if (!isCurrentScope(gen)) return;
       setMessage(
         `已停止检测（取消 ${receipt.cancelled_units} 项，中断 ${receipt.aborted_running} 项在途读取）。`,
       );
-      await load();
+      await load(gen);
     } catch (cause) {
-      if (activeRef.current) setError(`取消检测失败：${(cause as Error).message}`);
+      if (isCurrentScope(gen)) setError(`取消检测失败：${(cause as Error).message}`);
     } finally {
-      if (activeRef.current) setBusy(null);
+      if (isCurrentScope(gen)) setBusy(null);
     }
   };
 
@@ -225,6 +262,7 @@ export function MarkerControlPanel({
       setError(validated.error);
       return;
     }
+    const gen = scopeGenRef.current;
     setBusy("manual");
     setError(null);
     try {
@@ -239,23 +277,25 @@ export function MarkerControlPanel({
         outro_end_ms: validated.outroEndMs,
         locked: editing.locked,
       });
-      if (!activeRef.current) return;
+      if (!isCurrentScope(gen)) return;
       const targetLabel =
         isTv && editing.episode != null ? `第 ${editing.episode} 集` : "正片";
       const lockAction = editing.locked ? "保存并锁定" : "保存并解锁";
       setEditing(null);
       setMessage(`已${lockAction}${targetLabel}片头片尾时间。`);
-      await load();
+      await load(gen);
+      if (!isCurrentScope(gen)) return;
       onChangedRef.current?.();
     } catch (cause) {
-      if (activeRef.current) setError(`保存人工标记失败：${(cause as Error).message}`);
+      if (isCurrentScope(gen)) setError(`保存人工标记失败：${(cause as Error).message}`);
     } finally {
-      if (activeRef.current) setBusy(null);
+      if (isCurrentScope(gen)) setBusy(null);
     }
   };
 
   const handleDeleteMarker = async (row: SeasonEpisodeMarkerRow) => {
     if (busy) return;
+    const gen = scopeGenRef.current;
     setBusy("delete");
     setError(null);
     try {
@@ -265,7 +305,7 @@ export function MarkerControlPanel({
           ? { season: row.season, episode: row.episode }
           : {}),
       });
-      if (!activeRef.current) return;
+      if (!isCurrentScope(gen)) return;
       if (
         editing &&
         editing.fileId === row.file_id &&
@@ -276,12 +316,13 @@ export function MarkerControlPanel({
       }
       const targetLabel = isTv && row.episode != null ? `第 ${row.episode} 集` : "正片";
       setMessage(`已清除${targetLabel}片头片尾标记。`);
-      await load();
+      await load(gen);
+      if (!isCurrentScope(gen)) return;
       onChangedRef.current?.();
     } catch (cause) {
-      if (activeRef.current) setError(`清除标记失败：${(cause as Error).message}`);
+      if (isCurrentScope(gen)) setError(`清除标记失败：${(cause as Error).message}`);
     } finally {
-      if (activeRef.current) setBusy(null);
+      if (isCurrentScope(gen)) setBusy(null);
     }
   };
 
@@ -397,93 +438,13 @@ export function MarkerControlPanel({
       )}
 
       {editing && (
-        <div className="mt-3 rounded-xl border border-sky-400/25 bg-sky-500/[0.06] p-3 text-caption">
-          <p className="font-medium text-sky-200">
-            手工编辑
-            {isTv && editing.episode != null ? `第 ${editing.episode} 集` : "正片"}
-            （支持填秒数如 90 或分:秒如 01:30，留空表示无）
-          </p>
-          <div className="mt-2 grid grid-cols-2 gap-2 sm:grid-cols-4">
-            <label className="text-white/70">
-              片头起
-              <input
-                type="text"
-                aria-label="片头起点"
-                value={editing.introStart}
-                onChange={(e) =>
-                  setEditing((prev) => (prev ? { ...prev, introStart: e.target.value } : prev))
-                }
-                className="mt-1 block w-full rounded-lg border border-white/15 bg-black/40 px-2 py-1 text-white"
-              />
-            </label>
-            <label className="text-white/70">
-              片头止
-              <input
-                type="text"
-                aria-label="片头终点"
-                value={editing.introEnd}
-                onChange={(e) =>
-                  setEditing((prev) => (prev ? { ...prev, introEnd: e.target.value } : prev))
-                }
-                className="mt-1 block w-full rounded-lg border border-white/15 bg-black/40 px-2 py-1 text-white"
-              />
-            </label>
-            <label className="text-white/70">
-              片尾起
-              <input
-                type="text"
-                aria-label="片尾起点"
-                value={editing.outroStart}
-                onChange={(e) =>
-                  setEditing((prev) => (prev ? { ...prev, outroStart: e.target.value } : prev))
-                }
-                className="mt-1 block w-full rounded-lg border border-white/15 bg-black/40 px-2 py-1 text-white"
-              />
-            </label>
-            <label className="text-white/70">
-              片尾止
-              <input
-                type="text"
-                aria-label="片尾终点"
-                value={editing.outroEnd}
-                onChange={(e) =>
-                  setEditing((prev) => (prev ? { ...prev, outroEnd: e.target.value } : prev))
-                }
-                className="mt-1 block w-full rounded-lg border border-white/15 bg-black/40 px-2 py-1 text-white"
-              />
-            </label>
-          </div>
-          <label className="mt-2.5 inline-flex items-center gap-2 text-white/80">
-            <input
-              type="checkbox"
-              aria-label="锁定人工标记"
-              checked={editing.locked}
-              onChange={(e) =>
-                setEditing((prev) => (prev ? { ...prev, locked: e.target.checked } : prev))
-              }
-              className="rounded border-white/20 bg-black/40"
-            />
-            锁定此标记（防止后续自动检测覆盖）
-          </label>
-          <div className="mt-2.5 flex items-center gap-2">
-            <button
-              type="button"
-              disabled={busy != null}
-              onClick={() => void submitManualEdit()}
-              className="rounded-lg bg-sky-500/25 px-3 py-1 font-medium text-sky-100 hover:bg-sky-500/35 disabled:opacity-40"
-            >
-              {editing.locked ? "保存锁定" : "保存并解锁"}
-            </button>
-            <button
-              type="button"
-              disabled={busy != null}
-              onClick={() => setEditing(null)}
-              className="rounded-lg border border-white/15 px-3 py-1 text-white/70 hover:bg-white/10 disabled:opacity-40"
-            >
-              取消
-            </button>
-          </div>
-        </div>
+        <MarkerEditForm
+          editing={editing}
+          setEditing={setEditing}
+          isTv={isTv}
+          busy={busy}
+          onSubmit={() => void submitManualEdit()}
+        />
       )}
 
       {diag && diag.episodes.length > 0 && (
