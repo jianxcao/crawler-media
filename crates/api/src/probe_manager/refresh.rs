@@ -8,7 +8,24 @@ use std::time::Instant;
 
 use domain::MediaKind;
 
-use super::{ProbeEnqueueError, ProbeManager, ProbeUnit, marker_refresh_scope, single_season_opt};
+use super::{
+    ProbeEnqueueError, ProbeManager, ProbeUnit, marker_refresh_scope,
+    marker_refresh_scope_for_library, single_season_opt,
+};
+
+pub(crate) enum MarkerDetectEnqueue {
+    Queued { job_id: String, dispatched: usize },
+    AlreadyRunning { job_id: String },
+    Conflict,
+    Failed(crate::store::StoreError),
+}
+
+enum RefreshPersistResult {
+    Created(Vec<(String, String)>),
+    AlreadyRunning(String),
+    Conflict,
+    Store(crate::store::StoreError),
+}
 
 impl ProbeManager {
     /// Force a complete season refresh while leaving its current markers and
@@ -26,37 +43,53 @@ impl ProbeManager {
         units: Vec<ProbeUnit>,
         capture_policy: crate::fingerprint_job::CapturePolicy,
     ) -> usize {
-        self.enqueue_marker_refresh_job_with_policy(units, capture_policy)
-            .1
+        match self.enqueue_marker_refresh_scoped(None, units, capture_policy) {
+            MarkerDetectEnqueue::Queued { dispatched, .. } => dispatched,
+            _ => 0,
+        }
     }
 
-    pub(crate) fn enqueue_marker_refresh_job_with_policy(
+    pub(crate) fn enqueue_library_marker_refresh(
         &self,
+        library_id: domain::LibraryId,
+        units: Vec<ProbeUnit>,
+        capture_policy: crate::fingerprint_job::CapturePolicy,
+    ) -> MarkerDetectEnqueue {
+        self.enqueue_marker_refresh_scoped(Some(library_id), units, capture_policy)
+    }
+
+    fn enqueue_marker_refresh_scoped(
+        &self,
+        library_id: Option<domain::LibraryId>,
         mut units: Vec<ProbeUnit>,
         capture_policy: crate::fingerprint_job::CapturePolicy,
-    ) -> (bool, usize) {
+    ) -> MarkerDetectEnqueue {
         let reuse = capture_policy == crate::fingerprint_job::CapturePolicy::ReuseValid;
         let Some(first) = units.first() else {
-            return (false, 0);
+            return MarkerDetectEnqueue::Conflict;
         };
         let media_id = first.row.file.media_id;
         let Ok((season, _)) = super::require_episode_coordinates(&first.row) else {
-            return (false, 0);
+            return MarkerDetectEnqueue::Conflict;
         };
         if units.iter().any(|unit| {
             unit.row.file.media_id != media_id
+                || library_id.is_some_and(|lib| unit.row.file.library_id != lib)
                 || super::require_single_unit(&unit.row).is_err()
                 || single_season_opt(&unit.row) != Some(season)
         }) {
-            tracing::error!(%media_id, season, "拒绝创建跨媒体或跨季的片头片尾刷新批次");
-            return (false, 0);
+            tracing::error!(%media_id, season, "拒绝创建跨媒体、跨库或跨季的片头片尾刷新批次");
+            return MarkerDetectEnqueue::Conflict;
         }
 
         let id = self.next_marker_refresh_id.fetch_add(1, Ordering::Relaxed);
         let episode_count = units.len();
         let started_at = Instant::now();
         let job_id = uuid::Uuid::new_v4().to_string();
-        let scope = marker_refresh_scope(media_id, season);
+        let scope = match library_id {
+            Some(lib_id) => marker_refresh_scope_for_library(lib_id, media_id, season),
+            None => marker_refresh_scope(media_id, season),
+        };
         let ledger_ids = units
             .iter()
             .map(|unit| unit.row.file.file_id.to_string())
@@ -73,9 +106,31 @@ impl ProbeManager {
                 reuse_media_info_cache: true,
             })
             .collect::<Vec<_>>();
-        if !self.persist_marker_refresh_job(&job_id, media_id, season, &scope, &ledger_ids, &specs)
-        {
-            return (false, 0);
+        match self.persist_marker_refresh_job(
+            &job_id,
+            media_id,
+            season,
+            &scope,
+            &ledger_ids,
+            &specs,
+        ) {
+            RefreshPersistResult::Created(cancelled) => {
+                self.finish_superseding_cancelled_units(&cancelled);
+            }
+            RefreshPersistResult::AlreadyRunning(existing_id) => {
+                tracing::info!(%media_id, season, existing_job_id = %existing_id, "该季已有同作用域片头片尾刷新任务，复用活动任务");
+                return MarkerDetectEnqueue::AlreadyRunning {
+                    job_id: existing_id,
+                };
+            }
+            RefreshPersistResult::Conflict => {
+                tracing::info!(%media_id, season, "该季存在冲突的探测任务，拒绝重复入队");
+                return MarkerDetectEnqueue::Conflict;
+            }
+            RefreshPersistResult::Store(error) => {
+                tracing::error!(%error, %media_id, season, "创建持久化片头片尾刷新任务失败");
+                return MarkerDetectEnqueue::Failed(error);
+            }
         }
         self.mark_job_paused_exempt(job_id.clone());
 
@@ -109,7 +164,10 @@ impl ProbeManager {
         tracing::info!(%media_id, season, refresh_id = id, job_id, episodes = episode_count, queued,
             elapsed_ms = started_at.elapsed().as_millis() as u64,
             "【片头片尾】已启动强制刷新，旧标记保持可见直到整季探测完成");
-        (true, queued)
+        MarkerDetectEnqueue::Queued {
+            job_id,
+            dispatched: queued,
+        }
     }
 
     fn persist_marker_refresh_job(
@@ -120,8 +178,9 @@ impl ProbeManager {
         scope: &str,
         ledger_ids: &[String],
         specs: &[crate::store::ProbeJobUnitSpec<'_>],
-    ) -> bool {
+    ) -> RefreshPersistResult {
         enum RefreshPersistErr {
+            AlreadyRunning(String),
             Conflict,
             Store(crate::store::StoreError),
         }
@@ -159,24 +218,22 @@ impl ProbeManager {
                         )
                         .map_err(RefreshPersistErr::Store)?;
                     if !created {
+                        if let Some(existing) = store
+                            .active_probe_job_for_scope(scope)
+                            .map_err(RefreshPersistErr::Store)?
+                        {
+                            return Err(RefreshPersistErr::AlreadyRunning(existing.id));
+                        }
                         return Err(RefreshPersistErr::Conflict);
                     }
                     Ok(cancelled)
                 })
             });
         match outcome {
-            Ok(cancelled) => {
-                self.finish_superseding_cancelled_units(&cancelled);
-                true
-            }
-            Err(RefreshPersistErr::Conflict) => {
-                tracing::info!(%media_id, season, "该剧该季已有片头片尾刷新任务，拒绝重复入队");
-                false
-            }
-            Err(RefreshPersistErr::Store(error)) => {
-                tracing::error!(%error, %media_id, season, "创建持久化片头片尾刷新任务失败");
-                false
-            }
+            Ok(cancelled) => RefreshPersistResult::Created(cancelled),
+            Err(RefreshPersistErr::AlreadyRunning(id)) => RefreshPersistResult::AlreadyRunning(id),
+            Err(RefreshPersistErr::Conflict) => RefreshPersistResult::Conflict,
+            Err(RefreshPersistErr::Store(error)) => RefreshPersistResult::Store(error),
         }
     }
 

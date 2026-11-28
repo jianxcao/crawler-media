@@ -159,14 +159,48 @@ pub(crate) async fn resume(State(state): State<ApiState>) -> Response {
     build_status_response(&state).await
 }
 
+fn deserialize_non_null_present<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de>,
+{
+    T::deserialize(deserializer).map(Some)
+}
+
 #[derive(Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CancelFingerprintRequest {
+    #[serde(default, deserialize_with = "deserialize_non_null_present")]
     library_id: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_non_null_present")]
     media_id: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_non_null_present")]
     season: Option<u32>,
+    #[serde(default, deserialize_with = "deserialize_non_null_present")]
     file_id: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_non_null_present")]
     include_running: Option<bool>,
+}
+
+fn validate_optional_scope_id(
+    field: &str,
+    value: Option<String>,
+) -> Result<Option<String>, Response> {
+    match value {
+        None => Ok(None),
+        Some(raw) => {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                Err(err(
+                    StatusCode::BAD_REQUEST,
+                    "probe.invalid",
+                    &format!("取消片头片尾任务参数 {field} 不能为空"),
+                ))
+            } else {
+                Ok(Some(trimmed.to_string()))
+            }
+        }
+    }
 }
 
 pub(crate) async fn cancel(State(state): State<ApiState>, body: Bytes) -> Response {
@@ -187,12 +221,23 @@ pub(crate) async fn cancel(State(state): State<ApiState>, body: Bytes) -> Respon
             }
         }
     };
-    let clean = |v: Option<String>| v.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    let library_id = match validate_optional_scope_id("library_id", parsed.library_id) {
+        Ok(v) => v,
+        Err(resp) => return resp,
+    };
+    let media_id = match validate_optional_scope_id("media_id", parsed.media_id) {
+        Ok(v) => v,
+        Err(resp) => return resp,
+    };
+    let file_id = match validate_optional_scope_id("file_id", parsed.file_id) {
+        Ok(v) => v,
+        Err(resp) => return resp,
+    };
     let scope = store::FingerprintCancelScope {
-        library_id: clean(parsed.library_id),
-        media_id: clean(parsed.media_id),
+        library_id,
+        media_id,
         season: parsed.season,
-        file_id: clean(parsed.file_id),
+        file_id,
         include_running: parsed.include_running.unwrap_or(true),
     };
     let global_cancel = scope.library_id.is_none()

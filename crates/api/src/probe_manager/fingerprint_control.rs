@@ -4,6 +4,7 @@ use std::sync::atomic::Ordering;
 
 use crate::scrape_store::ScrapeStoreExt;
 
+use super::refresh::MarkerDetectEnqueue;
 use super::{ProbeManager, ProbeUnit, probe, single_season_opt};
 
 pub(super) struct ActiveFingerprintControl {
@@ -11,6 +12,13 @@ pub(super) struct ActiveFingerprintControl {
     pub(super) media_id: String,
     pub(super) season: Option<u32>,
     pub(super) control: marker::WorkControl,
+}
+
+enum SinglePersistResult {
+    Created(Vec<(String, String)>),
+    AlreadyRunning(String),
+    Conflict,
+    Store(store::StoreError),
 }
 
 impl ProbeManager {
@@ -209,7 +217,7 @@ impl ProbeManager {
         &self,
         mut unit: ProbeUnit,
         reuse_cache: bool,
-    ) -> Result<(bool, Option<String>), store::StoreError> {
+    ) -> MarkerDetectEnqueue {
         let ledger_id = unit.row.file.file_id.to_string();
         unit.force_fingerprint = true;
         unit.reuse_fingerprint_cache = reuse_cache;
@@ -218,33 +226,38 @@ impl ProbeManager {
         self.last_failure.lock().remove(&ledger_id);
 
         let actual_version = crate::fingerprint_job::current_source_version(&unit.row.file.path);
-        let cached_meta = self
-            .store
-            .get_media_info_cache_version(&ledger_id)?
-            .filter(|v| {
+        let cached_meta = match self.store.get_media_info_cache_version(&ledger_id) {
+            Ok(v) => v.filter(|v| {
                 v.source_version == actual_version
                     && v.source_version == unit.row.file.version.source_version
-            });
-        let sample_duration_secs = self
-            .store
-            .get_scrape_config()?
-            .effective
-            .fingerprint_duration_secs;
+            }),
+            Err(err) => return MarkerDetectEnqueue::Failed(err),
+        };
+        let sample_duration_secs = match self.store.get_scrape_config() {
+            Ok(cfg) => cfg.effective.fingerprint_duration_secs,
+            Err(err) => return MarkerDetectEnqueue::Failed(err),
+        };
         let job_kind = if cached_meta.is_some() {
             "fingerprint_probe"
         } else {
             "media_probe"
         };
         let job_id = uuid::Uuid::new_v4().to_string();
-        let Some(cancelled) = self.persist_single_episode_marker_job(
+        let cancelled = match self.persist_single_episode_marker_job(
             &unit,
             &ledger_id,
             &job_id,
             job_kind,
             reuse_cache,
-        )?
-        else {
-            return Ok((false, None));
+        ) {
+            SinglePersistResult::Created(cancelled) => cancelled,
+            SinglePersistResult::AlreadyRunning(existing_id) => {
+                return MarkerDetectEnqueue::AlreadyRunning {
+                    job_id: existing_id,
+                };
+            }
+            SinglePersistResult::Conflict => return MarkerDetectEnqueue::Conflict,
+            SinglePersistResult::Store(err) => return MarkerDetectEnqueue::Failed(err),
         };
         self.finish_superseding_cancelled_units(&cancelled);
         self.mark_job_paused_exempt(job_id.clone());
@@ -258,7 +271,10 @@ impl ProbeManager {
             actual_version,
             sample_duration_secs,
         );
-        Ok((true, Some(job_id)))
+        MarkerDetectEnqueue::Queued {
+            job_id,
+            dispatched: 1,
+        }
     }
 
     fn persist_single_episode_marker_job(
@@ -268,7 +284,7 @@ impl ProbeManager {
         job_id: &str,
         job_kind: &str,
         reuse_cache: bool,
-    ) -> Result<Option<Vec<(String, String)>>, store::StoreError> {
+    ) -> SinglePersistResult {
         let paused = self.fingerprint_dispatch_paused();
         let include_metadata = self.background_is_paused();
         let lid_owned = ledger_id.to_string();
@@ -287,6 +303,7 @@ impl ProbeManager {
             reuse_media_info_cache: true,
         };
         enum CreateErr {
+            AlreadyRunning(String),
             Conflict,
             Store(store::StoreError),
         }
@@ -323,15 +340,22 @@ impl ProbeManager {
                         )
                         .map_err(CreateErr::Store)?;
                     if !created {
+                        if let Some(existing) = store
+                            .active_probe_job_for_scope(&scope)
+                            .map_err(CreateErr::Store)?
+                        {
+                            return Err(CreateErr::AlreadyRunning(existing.id));
+                        }
                         return Err(CreateErr::Conflict);
                     }
                     Ok(cancelled)
                 })
             });
         match outcome {
-            Ok(cancelled) => Ok(Some(cancelled)),
-            Err(CreateErr::Conflict) => Ok(None),
-            Err(CreateErr::Store(err)) => Err(err),
+            Ok(cancelled) => SinglePersistResult::Created(cancelled),
+            Err(CreateErr::AlreadyRunning(id)) => SinglePersistResult::AlreadyRunning(id),
+            Err(CreateErr::Conflict) => SinglePersistResult::Conflict,
+            Err(CreateErr::Store(err)) => SinglePersistResult::Store(err),
         }
     }
 

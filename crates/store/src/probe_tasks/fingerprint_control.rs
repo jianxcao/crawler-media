@@ -34,13 +34,23 @@ impl Store {
         self.with_library_write(|db| db.cancel_fingerprint_probe_work(scope, reason))
     }
 
-    pub fn latest_marker_job_for_season(
+    pub fn active_or_latest_marker_job_for_season(
         &self,
         library_id: domain::LibraryId,
         media_id: &str,
         season: u32,
     ) -> Result<Option<ProbeJob>, StoreError> {
-        self.with_library_read(|db| db.latest_marker_job_for_season(library_id, media_id, season))
+        self.with_library_read(|db| {
+            db.active_or_latest_marker_job_for_season(library_id, media_id, season)
+        })
+    }
+
+    pub fn marker_job_in_library(
+        &self,
+        job_id: &str,
+        library_id: domain::LibraryId,
+    ) -> Result<Option<ProbeJob>, StoreError> {
+        self.with_library_read(|db| db.marker_job_in_library(job_id, library_id))
     }
 
     pub fn latest_probe_unit_for_ledger(
@@ -71,7 +81,7 @@ impl crate::LibraryConnection<'_> {
         Ok(count.max(0) as usize)
     }
 
-    pub fn latest_marker_job_for_season(
+    pub fn active_or_latest_marker_job_for_season(
         &self,
         library_id: domain::LibraryId,
         media_id: &str,
@@ -102,8 +112,36 @@ impl crate::LibraryConnection<'_> {
                        LEFT JOIN library_files f ON f.file_id = u.file_id
                        WHERE u.job_id = j.id AND (f.library_id IS NULL OR f.library_id <> ?3)
                    )
-                 ORDER BY j.created_at_ms DESC, j.rowid DESC LIMIT 1",
+                 ORDER BY (j.status IN ('queued', 'running')) DESC,
+                          j.created_at_ms DESC, j.rowid DESC
+                 LIMIT 1",
                 params![media_id, season, library_id.to_string()],
+                map_probe_job,
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn marker_job_in_library(
+        &self,
+        job_id: &str,
+        library_id: domain::LibraryId,
+    ) -> Result<Option<ProbeJob>, StoreError> {
+        self.library
+            .query_row(
+                "SELECT j.id, j.kind, j.media_id, j.season, j.status, j.total, j.completed,
+                        j.succeeded, j.failed, j.partial, j.error, j.created_at_ms,
+                        j.started_at_ms, j.finished_at_ms
+                 FROM probe_jobs j
+                 WHERE j.id = ?1
+                   AND EXISTS (SELECT 1 FROM probe_job_units u WHERE u.job_id = j.id)
+                   AND NOT EXISTS (
+                       SELECT 1 FROM probe_job_units u
+                       LEFT JOIN library_files f ON f.file_id = u.file_id
+                       WHERE u.job_id = j.id AND (f.library_id IS NULL OR f.library_id <> ?2)
+                   )
+                 LIMIT 1",
+                params![job_id, library_id.to_string()],
                 map_probe_job,
             )
             .optional()

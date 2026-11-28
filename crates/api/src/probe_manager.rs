@@ -43,6 +43,7 @@ mod query;
 mod queue;
 pub mod recovery;
 mod refresh;
+pub(crate) use refresh::MarkerDetectEnqueue;
 mod retry;
 pub mod season;
 pub mod season_schedule;
@@ -644,6 +645,14 @@ pub(super) fn remove_seen_entry_if_job(
 
 pub(crate) fn marker_refresh_scope(media_id: MediaId, season: u32) -> String {
     format!("marker-refresh:{media_id}:{season}")
+}
+
+pub(crate) fn marker_refresh_scope_for_library(
+    library_id: domain::LibraryId,
+    media_id: MediaId,
+    season: u32,
+) -> String {
+    format!("marker-refresh:{library_id}:{media_id}:{season}")
 }
 
 fn now_ms() -> i64 {

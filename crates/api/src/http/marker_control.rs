@@ -131,7 +131,11 @@ pub(crate) async fn season_markers(
                         .map_err(marker_store_error)?;
                     let episodes = render::build_tv_episode_rows(store, &rows, season)?;
                     let job = store
-                        .latest_marker_job_for_season(lib_id, &media_id.to_string(), season)
+                        .active_or_latest_marker_job_for_season(
+                            lib_id,
+                            &media_id.to_string(),
+                            season,
+                        )
                         .map_err(marker_store_error)?;
                     let active = job.as_ref().is_some_and(|j| j.is_active());
                     let job_json = job

@@ -68,7 +68,7 @@ fn insert_media_row(store: &api::Store, kind: MediaKind, title: &str) -> MediaId
     media_id
 }
 
-fn insert_file_in_root(
+pub(super) fn insert_file_in_root(
     store: &api::Store,
     root: &Path,
     filename: &str,
@@ -120,7 +120,7 @@ fn insert_file_in_root(
     (fid, path)
 }
 
-fn seed_two_libraries_shared_tv(
+pub(super) fn seed_two_libraries_shared_tv(
     store: &api::Store,
     root: &Path,
     with_cached_meta: bool,
@@ -175,7 +175,7 @@ fn seed_two_libraries_shared_tv(
     (lib_a.id, lib_b.id, shared, fid_a, fid_b)
 }
 
-fn create_tv_marker_job(
+pub(super) fn create_tv_marker_job(
     store: &api::Store,
     job_id: &str,
     kind: &str,
@@ -202,7 +202,11 @@ fn create_tv_marker_job(
     );
 }
 
-async fn get_markers_json(app: &axum::Router, url: &str, token: &str) -> (StatusCode, Value) {
+pub(super) async fn get_markers_json(
+    app: &axum::Router,
+    url: &str,
+    token: &str,
+) -> (StatusCode, Value) {
     let resp = app
         .clone()
         .oneshot(common::request("GET", url, Some(token), Value::Null))
@@ -212,7 +216,7 @@ async fn get_markers_json(app: &axum::Router, url: &str, token: &str) -> (Status
     (status, common::json_body(resp).await)
 }
 
-async fn post_json(app: &axum::Router, url: &str, body: Value) -> (StatusCode, Value) {
+pub(super) async fn post_json(app: &axum::Router, url: &str, body: Value) -> (StatusCode, Value) {
     let resp = app
         .clone()
         .oneshot(common::request(
@@ -227,7 +231,7 @@ async fn post_json(app: &axum::Router, url: &str, body: Value) -> (StatusCode, V
     (status, common::json_data(resp).await)
 }
 
-async fn wait_job_terminal(store: &api::Store, job_id: &str) -> store::ProbeJob {
+pub(super) async fn wait_job_terminal(store: &api::Store, job_id: &str) -> store::ProbeJob {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         let job = store.get_probe_job(job_id).unwrap().unwrap();

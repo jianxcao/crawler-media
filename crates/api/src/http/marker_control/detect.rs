@@ -110,23 +110,14 @@ pub(crate) async fn detect_markers(
     if let Some(client) = theintrodb {
         return run_theintrodb_only(&state, media, cloud_targets, client, skipped_multi_unit).await;
     }
-    let Some(season) = body.season else {
+    if body.season.is_none() {
         return err(
             StatusCode::BAD_REQUEST,
             "markers.invalid",
             "电视作品检测必须指定季号",
         );
-    };
-    enqueue_detect_work(
-        &state,
-        lib_id,
-        media,
-        single_rows,
-        season,
-        skipped_multi_unit,
-        body,
-    )
-    .await
+    }
+    enqueue_detect_work(&state, lib_id, media, single_rows, skipped_multi_unit, body).await
 }
 
 fn select_detect_rows(
@@ -218,11 +209,11 @@ async fn enqueue_detect_work(
     state: &ApiState,
     lib_id: domain::LibraryId,
     media: domain::Media,
-    single_rows: Vec<domain::FileCoverage>,
-    season: u32,
+    mut single_rows: Vec<domain::FileCoverage>,
     skipped_multi_unit: usize,
     body: DetectMarkersRequest,
 ) -> Response {
+    single_rows.sort_by_key(|row| row.file.file_id.to_string());
     let reuse = body.mode == MarkerDetectMode::ReuseValid;
     let season_wide = body.episode.is_none() && body.file_id.is_none();
     let worker = state.clone();
@@ -230,12 +221,21 @@ async fn enqueue_detect_work(
         .http_work
         .run_to_completion(move || {
             crate::http::store_wait::with_foreground_store(&worker, |store| {
-                let (queued, already_running) =
-                    enqueue_rows_on_probe(&worker, &media, &single_rows, reuse, season_wide)?;
-                let job = store
-                    .latest_marker_job_for_season(lib_id, &media.id.to_string(), season)
-                    .map_err(marker_store_error)?
-                    .map(|j| probe_job_json_enriched(store, &worker.probe, &j));
+                let (queued, already_running, job_id) = enqueue_rows_on_probe(
+                    &worker,
+                    lib_id,
+                    &media,
+                    &single_rows,
+                    reuse,
+                    season_wide,
+                )?;
+                let job = match job_id {
+                    Some(jid) => store
+                        .marker_job_in_library(&jid, lib_id)
+                        .map_err(marker_store_error)?
+                        .map(|j| probe_job_json_enriched(store, &worker.probe, &j)),
+                    None => None,
+                };
                 Ok::<_, Response>((queued, already_running, job))
             })?
         })
@@ -255,11 +255,14 @@ async fn enqueue_detect_work(
 
 fn enqueue_rows_on_probe(
     state: &ApiState,
+    lib_id: domain::LibraryId,
     media: &domain::Media,
     single_rows: &[domain::FileCoverage],
     reuse: bool,
     season_wide: bool,
-) -> Result<(bool, bool), Response> {
+) -> Result<(bool, bool, Option<String>), Response> {
+    use crate::probe_manager::MarkerDetectEnqueue;
+
     if season_wide {
         let units = single_rows
             .iter()
@@ -279,16 +282,23 @@ fn enqueue_rows_on_probe(
         } else {
             crate::fingerprint_job::CapturePolicy::Recapture
         };
-        let (created, count) = state
+        return match state
             .probe
-            .enqueue_marker_refresh_job_with_policy(units, policy);
-        let active = single_rows
-            .iter()
-            .any(|r| state.probe.is_queued(&r.file.file_id.to_string()));
-        return Ok((created || count > 0, !created && active));
+            .enqueue_library_marker_refresh(lib_id, units, policy)
+        {
+            MarkerDetectEnqueue::Queued { job_id, .. } => Ok((true, false, Some(job_id))),
+            MarkerDetectEnqueue::AlreadyRunning { job_id } => Ok((false, true, Some(job_id))),
+            MarkerDetectEnqueue::Conflict => Err(err(
+                StatusCode::CONFLICT,
+                "markers.conflict",
+                "该季存在冲突的探测任务，无法重复创建",
+            )),
+            MarkerDetectEnqueue::Failed(error) => Err(marker_store_error(error)),
+        };
     }
-    let mut any_queued = false;
-    let mut any_running = false;
+    let mut queued_ids = Vec::new();
+    let mut reused_ids = Vec::new();
+    let mut had_conflict = false;
     for row in single_rows {
         let unit = crate::probe_manager::ProbeUnit {
             row: row.clone(),
@@ -300,12 +310,28 @@ fn enqueue_rows_on_probe(
             marker_refresh_id: None,
             job_id: None,
         };
-        let (created, _) = state
+        match state
             .probe
             .enqueue_single_episode_marker_detect(unit, reuse)
-            .map_err(marker_store_error)?;
-        any_queued |= created;
-        any_running |= !created && state.probe.is_queued(&row.file.file_id.to_string());
+        {
+            MarkerDetectEnqueue::Queued { job_id, .. } => queued_ids.push(job_id),
+            MarkerDetectEnqueue::AlreadyRunning { job_id } => reused_ids.push(job_id),
+            MarkerDetectEnqueue::Conflict => had_conflict = true,
+            MarkerDetectEnqueue::Failed(error) => return Err(marker_store_error(error)),
+        }
     }
-    Ok((any_queued, !any_queued && any_running))
+    if let Some(first) = queued_ids.into_iter().next() {
+        return Ok((true, false, Some(first)));
+    }
+    if let Some(first) = reused_ids.into_iter().next() {
+        return Ok((false, true, Some(first)));
+    }
+    if had_conflict {
+        return Err(err(
+            StatusCode::CONFLICT,
+            "markers.conflict",
+            "目标文件存在冲突的探测任务，无法重复创建",
+        ));
+    }
+    Ok((false, false, None))
 }

@@ -114,13 +114,24 @@ async fn finalize_chapter_refresh(
         .http_work
         .run_to_completion(move || {
             let outcome = crate::http::store_wait::with_foreground_store(&worker, |store| {
-                let _ = store;
-                let (job_created, probe_queued, season_probe_was_active) =
+                let (job_created, probe_queued, season_probe_was_active, exact_job_id) =
                     enqueue_season_refresh(&worker, &media, &rows, season, capture_policy);
-                let marker_job = worker
-                    .probe
-                    .marker_refresh_job(media_id, season)
-                    .map_err(chapter_store_error)?;
+                let marker_job = match (exact_job_id, rows.first().map(|r| r.file.library_id)) {
+                    (Some(jid), Some(lib_id)) => store
+                        .marker_job_in_library(&jid, lib_id)
+                        .map_err(chapter_store_error)?,
+                    (None, Some(lib_id)) => store
+                        .active_or_latest_marker_job_for_season(
+                            lib_id,
+                            &media_id.to_string(),
+                            season,
+                        )
+                        .map_err(chapter_store_error)?,
+                    _ => worker
+                        .probe
+                        .marker_refresh_job(media_id, season)
+                        .map_err(chapter_store_error)?,
+                };
                 Ok::<_, Response>((
                     job_created,
                     probe_queued,
@@ -190,14 +201,20 @@ fn enqueue_season_refresh(
     fingerprint_rows: &[domain::FileCoverage],
     season: u32,
     capture_policy: crate::fingerprint_job::CapturePolicy,
-) -> (bool, usize, bool) {
-    let season_probe_was_active = !state.probe.fingerprint_dispatch_paused()
+) -> (bool, usize, bool, Option<String>) {
+    use crate::probe_manager::MarkerDetectEnqueue;
+
+    let mut season_probe_was_active = !state.probe.fingerprint_dispatch_paused()
         && fingerprint_rows
             .iter()
             .any(|candidate| state.probe.is_queued(&candidate.file.file_id.to_string()));
     let mut job_created = false;
     let mut probe_queued = 0;
-    if should_queue_voiceprint_refresh(media.kind) && !season_probe_was_active {
+    let mut exact_job_id = None;
+    if should_queue_voiceprint_refresh(media.kind)
+        && !season_probe_was_active
+        && let Some(lib_id) = fingerprint_rows.first().map(|r| r.file.library_id)
+    {
         let units = fingerprint_rows
             .iter()
             .map(|candidate_row| crate::probe_manager::ProbeUnit {
@@ -211,28 +228,43 @@ fn enqueue_season_refresh(
                 job_id: None,
             })
             .collect();
-        (job_created, probe_queued) = state
+        match state
             .probe
-            .enqueue_marker_refresh_job_with_policy(units, capture_policy);
-        if job_created {
-            tracing::info!(
-                media = %media.title,
-                season,
-                rows = fingerprint_rows.len(),
-                queued = probe_queued,
-                "【片头片尾】用户强制刷新，已排队同季完整声纹探测"
-            );
+            .enqueue_library_marker_refresh(lib_id, units, capture_policy)
+        {
+            MarkerDetectEnqueue::Queued { job_id, dispatched } => {
+                job_created = true;
+                probe_queued = dispatched;
+                exact_job_id = Some(job_id);
+                tracing::info!(
+                    media = %media.title,
+                    season,
+                    rows = fingerprint_rows.len(),
+                    queued = probe_queued,
+                    "【片头片尾】用户强制刷新，已排队同季完整声纹探测"
+                );
+            }
+            MarkerDetectEnqueue::AlreadyRunning { job_id } => {
+                season_probe_was_active = true;
+                exact_job_id = Some(job_id);
+            }
+            MarkerDetectEnqueue::Conflict | MarkerDetectEnqueue::Failed(_) => {}
         }
     } else if season_probe_was_active {
         tracing::info!(
             media = %media.title,
             season,
             rows = fingerprint_rows.len(),
-            "【片头片尾】该剧该季已有探测任务，跳过重复刷新"
+            "【片头片尾】该季已有探测任务，跳过重复刷新"
         );
     }
 
-    (job_created, probe_queued, season_probe_was_active)
+    (
+        job_created,
+        probe_queued,
+        season_probe_was_active,
+        exact_job_id,
+    )
 }
 
 #[derive(serde::Deserialize)]
