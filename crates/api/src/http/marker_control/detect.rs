@@ -51,6 +51,17 @@ pub(crate) async fn detect_markers(
                 .id
                 .parse::<domain::LibraryId>()
                 .map_err(|e| marker_store_error(e.into()))?;
+            if store
+                .library_item_detail(lib_id, media_id, "")
+                .map_err(marker_store_error)?
+                .is_none()
+            {
+                return Err(err(
+                    StatusCode::NOT_FOUND,
+                    "library.item_missing",
+                    "条目不存在",
+                ));
+            }
             let filtered =
                 select_detect_rows(store, &media, lib_id, req_season, req_ep, req_fid, req_mode)?;
             let theintrodb = if req_mode == MarkerDetectMode::TheIntroDbOnly {
@@ -68,11 +79,11 @@ pub(crate) async fn detect_markers(
                 None
             };
             let cloud_targets = prepare_cloud_targets(store, &media, &filtered, req_season)?;
-            Ok((media, filtered, cloud_targets, theintrodb))
+            Ok((lib_id, media, filtered, cloud_targets, theintrodb))
         },
     )
     .await;
-    let (media, filtered, cloud_targets, theintrodb) = match loaded {
+    let (lib_id, media, filtered, cloud_targets, theintrodb) = match loaded {
         Ok(Ok(v)) => v,
         Ok(Err(response)) => return response,
         Err(error) => return error.response(),
@@ -106,7 +117,16 @@ pub(crate) async fn detect_markers(
             "电视作品检测必须指定季号",
         );
     };
-    enqueue_detect_work(&state, media, single_rows, season, skipped_multi_unit, body).await
+    enqueue_detect_work(
+        &state,
+        lib_id,
+        media,
+        single_rows,
+        season,
+        skipped_multi_unit,
+        body,
+    )
+    .await
 }
 
 fn select_detect_rows(
@@ -196,6 +216,7 @@ fn filter_tv_rows(
 
 async fn enqueue_detect_work(
     state: &ApiState,
+    lib_id: domain::LibraryId,
     media: domain::Media,
     single_rows: Vec<domain::FileCoverage>,
     season: u32,
@@ -212,7 +233,7 @@ async fn enqueue_detect_work(
                 let (queued, already_running) =
                     enqueue_rows_on_probe(&worker, &media, &single_rows, reuse, season_wide)?;
                 let job = store
-                    .latest_marker_job_for_season(&media.id.to_string(), season)
+                    .latest_marker_job_for_season(lib_id, &media.id.to_string(), season)
                     .map_err(marker_store_error)?
                     .map(|j| probe_job_json_enriched(store, &worker.probe, &j));
                 Ok::<_, Response>((queued, already_running, job))

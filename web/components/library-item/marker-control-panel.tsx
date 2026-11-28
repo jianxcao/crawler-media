@@ -62,20 +62,33 @@ export function MarkerControlPanel({
   const loadAbortRef = useRef<AbortController | null>(null);
   const onChangedRef = useRef(onChanged);
   onChangedRef.current = onChanged;
+  const seasonsRef = useRef(seasons);
+  seasonsRef.current = seasons;
+  const prevExternalRef = useRef({ isTv, libraryId, mediaItemId, selectedSeason });
 
   const effectiveMode: MarkerDetectMode = isTv ? mode : "theintrodb_only";
   const canDetectSingleEpisode = isTv && selectedSeason === season && selectedEpisode != null;
 
   useEffect(() => {
+    const prev = prevExternalRef.current;
+    prevExternalRef.current = { isTv, libraryId, mediaItemId, selectedSeason };
     if (!isTv) return;
-    if (selectedSeason != null) {
+    const itemChanged =
+      prev.libraryId !== libraryId || prev.mediaItemId !== mediaItemId || prev.isTv !== isTv;
+    const selectedSeasonChanged = prev.selectedSeason !== selectedSeason;
+    if (selectedSeason != null && (itemChanged || selectedSeasonChanged)) {
       setSeason(selectedSeason);
-      return;
+    } else if (itemChanged) {
+      setSeason(pickDefaultSeason(seasonsRef.current, selectedSeason));
     }
-    if (seasons.length > 0 && !seasons.includes(season)) {
-      setSeason(pickDefaultSeason(seasons));
-    }
-  }, [isTv, mediaItemId, seasons, selectedSeason, season]);
+  }, [isTv, libraryId, mediaItemId, selectedSeason]);
+
+  useEffect(() => {
+    if (!isTv || seasons.length === 0) return;
+    setSeason((current) =>
+      seasons.includes(current) ? current : pickDefaultSeason(seasons),
+    );
+  }, [isTv, seasons]);
 
   useEffect(() => {
     setEditing(null);
@@ -172,6 +185,7 @@ export function MarkerControlPanel({
     setMessage(null);
     try {
       const receipt = await cancelFingerprintQueue({
+        library_id: libraryId,
         media_id: mediaItemId,
         ...(isTv ? { season } : {}),
         ...(targetFileId ? { file_id: targetFileId } : {}),

@@ -1103,3 +1103,203 @@ test("Movie ItemChaptersSection + LibraryItemDetailView support Movie markers an
     /片头/,
   );
 });
+
+test("MarkerControlPanel preserves manual season switch when selectedSeason is set and sends library_id on cancel", async (t) => {
+  const calls = [];
+  let season2Gate = null;
+  const { MarkerControlPanel } = loadTsModule(
+    "../components/library-item/marker-control-panel.tsx",
+    {
+      "@/lib/api/libraries": {
+        fetchSeasonMarkers: async (_lib, _media, season) => {
+          calls.push(["fetch", _lib, season]);
+          if (season === 2 && season2Gate) {
+            await season2Gate.promise;
+          }
+          return {
+            media_id: "media-shared",
+            season,
+            active: true,
+            paused: false,
+            job: {
+              id: `job-s${season}`,
+              kind: "marker_refresh",
+              season,
+              status: "running",
+              total: season === 2 ? 9 : 2,
+              completed: 0,
+              succeeded: 0,
+              failed: 0,
+              error: null,
+              elapsed_ms: 100,
+              phase: "capturing",
+              sampling_mode: "full_window",
+            },
+            episodes: [
+              {
+                file_id: `file-s${season}-e1`,
+                season,
+                episode: 1,
+                duration_ms: 1200000,
+                multi_unit: false,
+                marker: null,
+                detection: {
+                  job_id: `job-s${season}`,
+                  stage: "fingerprint",
+                  status: "running",
+                  error: null,
+                  intro: null,
+                  outro: null,
+                },
+              },
+            ],
+          };
+        },
+        detectItemMarkers: async (_lib, _media, body) => {
+          calls.push(["detect", _lib, body]);
+          return { queued: true, already_running: false, skipped_multi_unit: 0, job: null };
+        },
+        saveManualMarker: async () => ({}),
+        deleteManualMarker: async () => ({ deleted: true }),
+      },
+      "@/lib/api/probe": {
+        cancelFingerprintQueue: async (opts) => {
+          calls.push(["cancel", opts]);
+          return { cancelled_units: 1, aborted_running: 1 };
+        },
+      },
+    },
+  );
+
+  let renderer;
+  t.after(async () => {
+    season2Gate?.resolve();
+    if (renderer) await act(async () => renderer.unmount());
+  });
+
+  const renderPanel = (props) =>
+    React.createElement(MarkerControlPanel, {
+      libraryId: "lib-a",
+      mediaItemId: "media-shared",
+      seasons: [0, 1, 2],
+      selectedSeason: 1,
+      selectedEpisode: 1,
+      selectedFileId: "file-s1-e1",
+      ...props,
+    });
+
+  await act(async () => {
+    renderer = create(renderPanel({}));
+  });
+
+  const selector = () => renderer.root.findByProps({ "aria-label": "检测季选择" });
+  assert.equal(selector().props.value, 1);
+
+  // Item 5: manual season selection must NOT snap back to selectedSeason=1.
+  await act(async () => {
+    selector().props.onChange({ target: { value: "2" } });
+  });
+  assert.equal(selector().props.value, 2);
+
+  // Re-rendering with a new array reference having the same seasons must preserve manual selection.
+  await act(async () => {
+    renderer.update(renderPanel({ seasons: [0, 1, 2] }));
+  });
+  assert.equal(selector().props.value, 2);
+  assert.equal(
+    renderer.root.findAllByType("button").some((b) => collectText(b).includes("检测第 1 集")),
+    false,
+    "single-episode button from season 1 must hide while viewing season 2",
+  );
+
+  // Season detect + season cancel + row cancel must carry season=2 and library_id="lib-a".
+  const detectSeasonBtn = renderer.root
+    .findAllByType("button")
+    .find((b) => collectText(b) === "检测本季");
+  await act(async () => {
+    await detectSeasonBtn.props.onClick();
+  });
+  assert.deepEqual(
+    calls.find((c) => c[0] === "detect"),
+    ["detect", "lib-a", { season: 2, mode: "reuse_valid" }],
+  );
+
+  const stopSeasonBtn = renderer.root
+    .findAllByType("button")
+    .find((b) => collectText(b) === "取消当前检测");
+  await act(async () => {
+    await stopSeasonBtn.props.onClick();
+  });
+  const rowStopBtn = renderer.root
+    .findAllByType("button")
+    .find((b) => collectText(b) === "停止");
+  await act(async () => {
+    await rowStopBtn.props.onClick();
+  });
+  const cancelCalls = calls.filter((c) => c[0] === "cancel").map((c) => c[1]);
+  assert.deepEqual(cancelCalls[0], {
+    library_id: "lib-a",
+    media_id: "media-shared",
+    season: 2,
+    include_running: true,
+  });
+  assert.deepEqual(cancelCalls[1], {
+    library_id: "lib-a",
+    media_id: "media-shared",
+    season: 2,
+    file_id: "file-s2-e1",
+    include_running: true,
+  });
+
+  // External chapter switch to season 0 (特别篇) must sync panel to 0.
+  await act(async () => {
+    renderer.update(renderPanel({ selectedSeason: 0, selectedEpisode: 1 }));
+  });
+  assert.equal(selector().props.value, 0);
+
+  // Out-of-order GET: slow season 2 response resolving after switching back to 0 must not overwrite 0.
+  season2Gate = deferred();
+  await act(async () => {
+    selector().props.onChange({ target: { value: "2" } });
+  });
+  await act(async () => {
+    selector().props.onChange({ target: { value: "0" } });
+  });
+  await act(async () => {
+    season2Gate.resolve();
+    await Promise.resolve();
+  });
+  season2Gate = null;
+  assert.equal(selector().props.value, 0);
+  const afterStaleResolve = collectText(renderer.toJSON());
+  assert.match(afterStaleResolve, /进度：0\/2/);
+  assert.doesNotMatch(afterStaleResolve, /进度：0\/9/);
+
+  // Shrinking seasons list to exclude manual choice must fall back cleanly; empty list keeps current.
+  await act(async () => {
+    selector().props.onChange({ target: { value: "2" } });
+  });
+  assert.equal(selector().props.value, 2);
+  await act(async () => {
+    renderer.update(renderPanel({ selectedSeason: 0, seasons: [0, 1] }));
+  });
+  assert.equal(selector().props.value, 1);
+  await act(async () => {
+    renderer.update(renderPanel({ selectedSeason: 0, seasons: [] }));
+  });
+  assert.equal(
+    renderer.root.findAllByProps({ "aria-label": "检测季选择" }).length,
+    0,
+    "empty seasons list hides season dropdown",
+  );
+  const detectCountBefore = calls.filter((c) => c[0] === "detect").length;
+  await act(async () => {
+    await renderer.root
+      .findAllByType("button")
+      .find((b) => collectText(b) === "检测本季")
+      .props.onClick();
+  });
+  const detectCalls = calls.filter((c) => c[0] === "detect");
+  assert.equal(detectCalls.length, detectCountBefore + 1);
+  assert.deepEqual(detectCalls.at(-1), ["detect", "lib-a", { season: 1, mode: "reuse_valid" }]);
+});

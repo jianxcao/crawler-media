@@ -124,7 +124,10 @@ impl marker::FingerprintCaptureEngine for ControllableFingerprint {
                 let _ = tx.send(());
             }
             let started = Instant::now();
-            while !control.is_cancelled() && started.elapsed() < Duration::from_secs(10) {
+            while self.block_capture.load(Ordering::Acquire)
+                && !control.is_cancelled()
+                && started.elapsed() < Duration::from_secs(10)
+            {
                 std::thread::sleep(Duration::from_millis(15));
             }
             if control.is_cancelled() {
@@ -622,3 +625,9 @@ async fn standalone_season_detect_diagnostics_and_manual_marker_crud() {
 
 #[path = "marker_standalone_control/review_fixes.rs"]
 mod review_fixes;
+
+#[path = "marker_standalone_control/review_round2.rs"]
+mod review_round2;
+
+#[path = "marker_standalone_control/manual_async_obs.rs"]
+mod manual_async_obs;

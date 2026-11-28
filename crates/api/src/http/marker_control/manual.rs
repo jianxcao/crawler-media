@@ -58,21 +58,19 @@ pub(crate) async fn put_manual_marker(
     if let Err(message) = validate_manual_bounds(&body, duration_ms) {
         return err(StatusCode::BAD_REQUEST, "markers.invalid", message);
     }
-    if crate::fingerprint_job::source::observe_source(&row).is_err() {
-        return err(
-            StatusCode::CONFLICT,
-            "chapters.source_changed",
-            "源文件已变更或不可访问，请刷新后重试",
-        );
+    let file_id = row.file.file_id;
+    let version = row.file.version.clone();
+    if let Err(response) = observe_manual_source(&state, row).await {
+        return response;
     }
     let observation = store::SourceObservation {
-        file_id: row.file.file_id,
-        expected: row.file.version.clone(),
+        file_id,
+        expected: version.clone(),
         presence: domain::FilePresence::Present,
     };
     let marker = store::StoredFileMarker {
-        file_id: row.file.file_id,
-        version: row.file.version.clone(),
+        file_id,
+        version,
         unit,
         intro_start_ms: body.intro_start_ms,
         intro_end_ms: body.intro_end_ms,
@@ -155,16 +153,14 @@ pub(crate) async fn delete_manual_marker(
             "多单元合并文件不支持单集时间轴标记",
         );
     }
-    if crate::fingerprint_job::source::observe_source(&row).is_err() {
-        return err(
-            StatusCode::CONFLICT,
-            "chapters.source_changed",
-            "源文件已变更或不可访问，请刷新后重试",
-        );
+    let observed_file_id = row.file.file_id;
+    let observed_version = row.file.version.clone();
+    if let Err(response) = observe_manual_source(&state, row).await {
+        return response;
     }
     let observation = store::SourceObservation {
-        file_id: row.file.file_id,
-        expected: row.file.version.clone(),
+        file_id: observed_file_id,
+        expected: observed_version,
         presence: domain::FilePresence::Present,
     };
     let frames = state.chapter_frames.clone();
@@ -180,6 +176,28 @@ pub(crate) async fn delete_manual_marker(
         }
         Ok(Err(error)) => marker_store_error(error),
         Err(response) => response,
+    }
+}
+
+async fn observe_manual_source(
+    state: &ApiState,
+    row: domain::FileCoverage,
+) -> Result<(), Response> {
+    let observed = state
+        .fs_work
+        .run_to_completion(move || crate::fingerprint_job::source::observe_source(&row))
+        .await;
+    match observed {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(_)) => Err(err(
+            StatusCode::CONFLICT,
+            "chapters.source_changed",
+            "源文件已变更或不可访问，请刷新后重试",
+        )),
+        Err(crate::blocking_budget::BlockingError::Busy) => {
+            Err(crate::http::store_wait::busy_response())
+        }
+        Err(error) => Err(crate::http::library::browse_work_error(error)),
     }
 }
 

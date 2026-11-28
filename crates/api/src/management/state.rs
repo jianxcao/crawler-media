@@ -164,6 +164,9 @@ pub struct ApiState {
     pub(crate) library_read_stage_barrier: Option<Arc<dyn Fn(&'static str) + Send + Sync>>,
     /// 测试 seam：统计计算在计划收集与 totals 读取之间的屏障（生产为 `None`）。
     pub statistics_phase_barrier: Option<Arc<dyn Fn() + Send + Sync>>,
+    /// 测试 seam：声纹设置写完 app.db 后触发的屏障（生产为 `None`）。
+    pub(crate) fingerprint_settings_after_write_barrier:
+        Option<Arc<dyn Fn(usize, bool) + Send + Sync>>,
 }
 
 fn apply_admin_bootstrap(
@@ -545,6 +548,15 @@ impl ApiState {
         barrier: Arc<dyn Fn(&'static str) + Send + Sync>,
     ) -> Self {
         self.library_read_stage_barrier = Some(barrier);
+        self
+    }
+
+    #[doc(hidden)]
+    pub fn with_fingerprint_settings_after_write_barrier(
+        mut self,
+        barrier: Arc<dyn Fn(usize, bool) + Send + Sync>,
+    ) -> Self {
+        self.fingerprint_settings_after_write_barrier = Some(barrier);
         self
     }
 

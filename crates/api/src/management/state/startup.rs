@@ -258,6 +258,7 @@ where
         library_header_barrier: None,
         library_read_stage_barrier: None,
         statistics_phase_barrier: None,
+        fingerprint_settings_after_write_barrier: None,
     }
 }
 

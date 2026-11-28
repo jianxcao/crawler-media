@@ -36,10 +36,11 @@ impl Store {
 
     pub fn latest_marker_job_for_season(
         &self,
+        library_id: domain::LibraryId,
         media_id: &str,
         season: u32,
     ) -> Result<Option<ProbeJob>, StoreError> {
-        self.with_library_read(|db| db.latest_marker_job_for_season(media_id, season))
+        self.with_library_read(|db| db.latest_marker_job_for_season(library_id, media_id, season))
     }
 
     pub fn latest_probe_unit_for_ledger(
@@ -72,6 +73,7 @@ impl crate::LibraryConnection<'_> {
 
     pub fn latest_marker_job_for_season(
         &self,
+        library_id: domain::LibraryId,
         media_id: &str,
         season: u32,
     ) -> Result<Option<ProbeJob>, StoreError> {
@@ -94,8 +96,14 @@ impl crate::LibraryConnection<'_> {
                            )
                        )
                    )
+                   AND EXISTS (SELECT 1 FROM probe_job_units u WHERE u.job_id = j.id)
+                   AND NOT EXISTS (
+                       SELECT 1 FROM probe_job_units u
+                       LEFT JOIN library_files f ON f.file_id = u.file_id
+                       WHERE u.job_id = j.id AND (f.library_id IS NULL OR f.library_id <> ?3)
+                   )
                  ORDER BY j.created_at_ms DESC, j.rowid DESC LIMIT 1",
-                params![media_id, season],
+                params![media_id, season, library_id.to_string()],
                 map_probe_job,
             )
             .optional()
@@ -261,7 +269,9 @@ fn select_fingerprint_targets(
            AND (
                (u.stage IN ('fingerprint', 'analysis')
                    AND (u.status = 'queued' OR (?1 != 0 AND u.status = 'running')))
-               OR (j.kind = 'marker_refresh' AND u.stage = 'metadata' AND u.status = 'queued')
+               OR (u.stage = 'metadata' AND u.status = 'queued'
+                   AND (j.kind = 'marker_refresh'
+                        OR (j.kind = 'media_probe' AND u.force_fingerprint <> 0)))
            )",
     )?;
     let rows = stmt.query_map([i64::from(scope.include_running)], |row| {

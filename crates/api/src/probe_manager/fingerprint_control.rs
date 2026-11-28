@@ -30,16 +30,16 @@ impl ProbeManager {
         self.fingerprint_admission.lock().active
     }
 
-    pub(crate) fn apply_fingerprint_settings(
+    pub(crate) fn publish_fingerprint_settings(
         &self,
         settings: crate::probe_settings::FingerprintProbeSettings,
     ) {
         let _publish = self.settings_publish_lock.lock();
-        self.apply_fingerprint_settings_locked(settings);
+        self.publish_fingerprint_settings_locked(settings);
         self.settings_revision.fetch_add(1, Ordering::Release);
     }
 
-    pub(super) fn apply_fingerprint_settings_locked(
+    pub(super) fn publish_fingerprint_settings_locked(
         &self,
         settings: crate::probe_settings::FingerprintProbeSettings,
     ) {
@@ -49,12 +49,24 @@ impl ProbeManager {
         *self.fingerprint_settings.lock() = settings;
         self.fingerprint_admission.lock().limit = settings.workers;
         self.fingerprint_capacity.notify_waiters();
-        if settings.paused {
-            if !was_paused {
-                self.analysis_schedule.lock().clear_unstarted();
-            }
+        if settings.paused && !was_paused {
+            self.analysis_schedule.lock().clear_unstarted();
+        }
+        self.wake.notify_waiters();
+    }
+
+    /// Reconcile in-memory fingerprint dispatch against the latest published settings.
+    /// Must run outside the `app.db` writer lock because refilling reads `library.db`.
+    pub(crate) fn reconcile_fingerprint_dispatch_after_settings(&self) {
+        let rev = self.settings_revision.load(Ordering::Acquire);
+        if self.fingerprint_is_paused() {
             self.drain_fingerprint_dispatch();
-            if self.has_paused_exempt_work() {
+            if !self.fingerprint_is_paused() {
+                if !self.background_is_paused() {
+                    self.fill_fingerprint_window_now();
+                }
+                self.wake.notify_waiters();
+            } else if self.has_paused_exempt_work() {
                 self.wake.notify_waiters();
             }
         } else {
@@ -62,6 +74,13 @@ impl ProbeManager {
                 self.fill_fingerprint_window_now();
             }
             self.wake.notify_waiters();
+            if self.settings_revision.load(Ordering::Acquire) != rev && self.fingerprint_is_paused()
+            {
+                self.drain_fingerprint_dispatch();
+                if self.has_paused_exempt_work() {
+                    self.wake.notify_waiters();
+                }
+            }
         }
     }
 

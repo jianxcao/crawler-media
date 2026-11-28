@@ -107,6 +107,17 @@ pub(crate) async fn season_markers(
                 .id
                 .parse::<domain::LibraryId>()
                 .map_err(|e| marker_store_error(e.into()))?;
+            if store
+                .library_item_detail(lib_id, media_id, "")
+                .map_err(marker_store_error)?
+                .is_none()
+            {
+                return Err(err(
+                    StatusCode::NOT_FOUND,
+                    "library.item_missing",
+                    "条目不存在",
+                ));
+            }
             match media.kind {
                 domain::MediaKind::Tv => {
                     let season = query.season.unwrap_or(1);
@@ -120,7 +131,7 @@ pub(crate) async fn season_markers(
                         .map_err(marker_store_error)?;
                     let episodes = render::build_tv_episode_rows(store, &rows, season)?;
                     let job = store
-                        .latest_marker_job_for_season(&media_id.to_string(), season)
+                        .latest_marker_job_for_season(lib_id, &media_id.to_string(), season)
                         .map_err(marker_store_error)?;
                     let active = job.as_ref().is_some_and(|j| j.is_active());
                     let job_json = job

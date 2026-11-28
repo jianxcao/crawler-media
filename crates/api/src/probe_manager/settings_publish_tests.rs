@@ -26,3 +26,26 @@ fn startup_discards_settings_snapshot_after_a_newer_publication() {
     assert!(manager.remote_reads_are_paused());
     assert!(marker::media_read::remote_reads_paused());
 }
+
+#[test]
+fn startup_discards_fingerprint_settings_snapshot_after_a_newer_publication() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Arc::new(Store::open(tmp.path()).unwrap());
+    let manager = ProbeManager::new(store).unwrap();
+    let observed = manager.settings_revision();
+    manager.publish_fingerprint_settings(crate::probe_settings::FingerprintProbeSettings {
+        workers: 1,
+        paused: true,
+    });
+    assert!(!manager.apply_startup_all_settings_if_unchanged(
+        observed,
+        None,
+        Some(crate::probe_settings::FingerprintProbeSettings {
+            workers: 4,
+            paused: false,
+        }),
+        None,
+    ));
+    assert_eq!(manager.fingerprint_worker_limit(), 1);
+    assert!(manager.fingerprint_is_paused());
+}

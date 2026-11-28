@@ -40,55 +40,72 @@ pub(crate) async fn put(State(state): State<ApiState>, Json(body): Json<Value>) 
     save_and_apply(&state, settings).await.unwrap_or_else(|r| r)
 }
 
+async fn persist_and_publish_settings<F>(
+    state: &ApiState,
+    compute_next: F,
+) -> Result<FingerprintProbeSettings, Response>
+where
+    F: FnOnce(&store::App<'_>) -> Result<FingerprintProbeSettings, store::StoreError>
+        + Send
+        + 'static,
+{
+    let probe = state.probe.clone();
+    let next = super::store_wait::store_write(state, move |store| {
+        store
+            .writers()
+            .with_app(|app| {
+                let next = compute_next(app)?;
+                let raw = serde_json::to_string(&next)?;
+                app.put_setting(crate::settings_keys::PROBE_FINGERPRINT, &raw)?;
+                // Keep publication ordered with concurrent saves. Pure in-memory admission
+                // update; performs no DB/file IO and never interrupts active reads.
+                probe.publish_fingerprint_settings(next);
+                Ok(next)
+            })
+            .map_err(store_error)
+    })
+    .await??;
+    if let Some(hook) = state.fingerprint_settings_after_write_barrier.clone() {
+        let _ = tokio::task::spawn_blocking(move || hook(next.workers, next.paused)).await;
+    }
+    let probe = state.probe.clone();
+    if let Err(error) = tokio::task::spawn_blocking(move || {
+        probe.reconcile_fingerprint_dispatch_after_settings();
+    })
+    .await
+    {
+        tracing::warn!(%error, "声纹设置生效后重协调派发窗口失败，等待后台轮询兜底");
+        state.probe.wake_dispatch();
+    }
+    Ok(next)
+}
+
 async fn save_and_apply(
     state: &ApiState,
     settings: FingerprintProbeSettings,
 ) -> Result<Response, Response> {
-    let raw = serde_json::to_string(&settings).map_err(|e| store_error(e.into()))?;
-    let probe = state.probe.clone();
-    super::store_wait::store_write(state, move |store| {
-        let saved = store
-            .writers()
-            .with_app(|app| app.put_setting(crate::settings_keys::PROBE_FINGERPRINT, &raw));
-        match saved {
-            Ok(()) => {
-                probe.apply_fingerprint_settings(settings);
-                tracing::info!(?settings, "片头片尾声纹队列设置已保存并生效");
-                ok(json!(settings)).into_response()
-            }
-            Err(error) => store_error(error),
-        }
-    })
-    .await
+    let saved = persist_and_publish_settings(state, move |_| Ok(settings)).await?;
+    tracing::info!(?saved, "片头片尾声纹队列设置已保存并生效");
+    Ok(ok(json!(saved)).into_response())
 }
 
 async fn update_paused(state: &ApiState, paused: bool) -> Result<(), Response> {
-    let probe = state.probe.clone();
-    super::store_wait::store_write(state, move |store| {
-        let next = store
-            .writers()
-            .with_app(|app| {
-                let current = match app.get_setting(crate::settings_keys::PROBE_FINGERPRINT)? {
-                    Some(raw) => {
-                        let parsed = serde_json::from_str::<FingerprintProbeSettings>(&raw)?;
-                        parsed.validate().map_err(store::StoreError::Invalid)?;
-                        parsed
-                    }
-                    None => FingerprintProbeSettings::default(),
-                };
-                let next = FingerprintProbeSettings {
-                    workers: current.workers,
-                    paused,
-                };
-                let raw = serde_json::to_string(&next)?;
-                app.put_setting(crate::settings_keys::PROBE_FINGERPRINT, &raw)?;
-                Ok(next)
-            })
-            .map_err(store_error)?;
-        probe.apply_fingerprint_settings(next);
-        Ok(())
+    let _ = persist_and_publish_settings(state, move |app| {
+        let current = match app.get_setting(crate::settings_keys::PROBE_FINGERPRINT)? {
+            Some(raw) => {
+                let parsed = serde_json::from_str::<FingerprintProbeSettings>(&raw)?;
+                parsed.validate().map_err(store::StoreError::Invalid)?;
+                parsed
+            }
+            None => FingerprintProbeSettings::default(),
+        };
+        Ok(FingerprintProbeSettings {
+            workers: current.workers,
+            paused,
+        })
     })
-    .await?
+    .await?;
+    Ok(())
 }
 
 async fn build_status_response(state: &ApiState) -> Response {

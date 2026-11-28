@@ -486,7 +486,7 @@ impl ProbeManager {
             self.apply_probe_settings_locked(settings);
         }
         if let Some(fingerprint) = fingerprint {
-            self.apply_fingerprint_settings_locked(fingerprint);
+            self.publish_fingerprint_settings_locked(fingerprint);
         }
         self.apply_remote_reads_pause_locked(remote_reads.is_none_or(|settings| settings.paused));
         self.settings_revision.fetch_add(1, Ordering::Release);
