@@ -101,6 +101,15 @@ pub struct PluginService {
     hook_traces: Mutex<super::hooks_runtime::HookTraceBuffers>,
     events_notify: Arc<tokio::sync::Notify>,
     events_last_pruned_ms: std::sync::atomic::AtomicI64,
+    fanout_read_fault: Mutex<
+        Option<
+            Arc<
+                dyn Fn(super::events::FanoutReadOp<'_>) -> Result<(), store::StoreError>
+                    + Send
+                    + Sync,
+            >,
+        >,
+    >,
     resume_in_flight: Mutex<ResumeInFlightMap>,
     active_staged_ops: Arc<Mutex<std::collections::HashSet<uuid::Uuid>>>,
 }
@@ -132,6 +141,7 @@ impl PluginService {
             hook_traces: Mutex::new(super::hooks_runtime::HookTraceBuffers::default()),
             events_notify: Arc::new(tokio::sync::Notify::new()),
             events_last_pruned_ms: std::sync::atomic::AtomicI64::new(i64::MIN),
+            fanout_read_fault: Mutex::new(None),
             resume_in_flight: Mutex::new(ResumeInFlightMap::new()),
             active_staged_ops: Arc::new(Mutex::new(std::collections::HashSet::new())),
         }
@@ -213,6 +223,31 @@ impl PluginService {
 
     pub(crate) fn wake_events(&self) {
         self.events_notify.notify_one();
+    }
+
+    #[doc(hidden)]
+    pub fn set_fanout_read_fault_for_test(
+        &self,
+        fault: Option<
+            Arc<
+                dyn Fn(super::events::FanoutReadOp<'_>) -> Result<(), store::StoreError>
+                    + Send
+                    + Sync,
+            >,
+        >,
+    ) {
+        *self.fanout_read_fault.lock() = fault;
+    }
+
+    pub(super) fn check_fanout_read_fault(
+        &self,
+        op: super::events::FanoutReadOp<'_>,
+    ) -> Result<(), store::StoreError> {
+        let hook = self.fanout_read_fault.lock().clone();
+        match hook {
+            Some(f) => f(op),
+            None => Ok(()),
+        }
     }
 
     pub(crate) fn list_all_plugins(

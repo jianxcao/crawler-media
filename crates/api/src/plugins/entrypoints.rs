@@ -1,3 +1,4 @@
+pub use super::events::FanoutReadOp;
 use super::events::PluginEventDispatcherHandle;
 use super::service::SubmitPluginCommand;
 use crate::management::ApiState;

@@ -519,3 +519,248 @@ async fn startup_recovery_reclaims_orphaned_delivering_rows_after_crash() {
     api::drain_plugin_events_for_test(&env.state, t0 + 200).await;
     assert_eq!(srv.hits.load(Ordering::SeqCst), 1);
 }
+
+fn emit_download_after(store: &api::Store, event_id: &str, op_id: &str, now_ms: i64) {
+    let payload = serde_json::to_string(&DownloadAfterEvent {
+        operation_id: op_id.into(),
+        downloader_id: Some("dl-1".into()),
+        info_hash: Some(format!("hash-{op_id}")),
+        outcome: "submitted".into(),
+        verified_total_bytes: Some(4096),
+    })
+    .unwrap();
+    store
+        .emit_outbox_event(
+            OutboxDb::Subscribe,
+            &EmitOutboxEventInput {
+                event_id: event_id.into(),
+                schema_version: 1,
+                event_domain: "download".into(),
+                event_kind: "download.after".into(),
+                entity_type: "download_operation".into(),
+                entity_id: op_id.into(),
+                entity_sequence: None,
+                entity_revision: 1,
+                cause_id: format!("cause-{op_id}"),
+                subject: "system".into(),
+                site_id: None,
+                subscribe_id: None,
+                library_id: None,
+                handles_json: format!("[\"{op_id}\"]"),
+                payload_json: payload,
+                occurred_at: now_ms,
+                created_at: now_ms,
+            },
+        )
+        .unwrap();
+}
+
+fn emit_transfer_completed(store: &api::Store, event_id: &str, media_id: &str, now_ms: i64) {
+    let payload = serde_json::to_string(&TransferCompletedEvent {
+        media_id: media_id.into(),
+        library_id: "lib-none".into(),
+        relative_path: "NoSub/Film.mkv".into(),
+        file_count: 1,
+        total_bytes: 1024,
+    })
+    .unwrap();
+    store
+        .emit_outbox_event(
+            OutboxDb::Library,
+            &EmitOutboxEventInput {
+                event_id: event_id.into(),
+                schema_version: 1,
+                event_domain: "transfer".into(),
+                event_kind: "transfer.completed".into(),
+                entity_type: "media".into(),
+                entity_id: media_id.into(),
+                entity_sequence: None,
+                entity_revision: 1,
+                cause_id: format!("cause-{event_id}"),
+                subject: "system".into(),
+                site_id: None,
+                subscribe_id: None,
+                library_id: Some("lib-none".into()),
+                handles_json: format!("[\"{media_id}\"]"),
+                payload_json: payload,
+                occurred_at: now_ms,
+                created_at: now_ms,
+            },
+        )
+        .unwrap();
+}
+
+#[tokio::test]
+async fn fanout_list_plugins_read_error_retains_pending_event_and_delivers_after_recovery() {
+    let env = HttpEnv::new().await;
+    env.enable_dev_mode().await;
+    let srv = WebhookStub::start(false);
+    install_notify_plugin(
+        &env,
+        "org.example.evtfault",
+        "download.after",
+        &["hooks:download.after", "events:download.after", "http"],
+        Some(srv.addr),
+        true,
+    )
+    .await;
+
+    let t0 = store::unix_now_ms().unwrap();
+    emit_download_after(&env.state.store(), "ev-preseeded-1", "op-pre-1", t0);
+    env.state
+        .store()
+        .seed_event_fanout(
+            OutboxDb::Subscribe,
+            &store::plugin_events::SeedSubscriberDeliveriesInput {
+                event_id: "ev-preseeded-1".into(),
+                plugin_ids: vec!["org.example.evtfault".into()],
+                next_attempt_at: t0,
+                now_ms: t0,
+            },
+        )
+        .unwrap();
+    emit_download_after(
+        &env.state.store(),
+        "ev-pending-fault-1",
+        "op-fault-1",
+        t0 + 1,
+    );
+
+    env.state
+        .plugins()
+        .set_fanout_read_fault_for_test(Some(Arc::new(|op| match op {
+            api::FanoutReadOp::ListEnabledPlugins => Err(store::StoreError::ReadBusy),
+            _ => Ok(()),
+        })));
+    api::drain_plugin_events_for_test(&env.state, t0 + 2).await;
+
+    assert_eq!(srv.hits.load(Ordering::SeqCst), 1);
+    let pending = env
+        .state
+        .store()
+        .list_pending_fanout_events(OutboxDb::Subscribe, None, Some(20))
+        .unwrap();
+    assert!(
+        pending
+            .items
+            .iter()
+            .any(|e| e.event_id == "ev-pending-fault-1"),
+        "pending event must stay pending on transient subscriber list read error"
+    );
+    assert!(
+        env.state
+            .store()
+            .get_delivery_receipt(
+                OutboxDb::Subscribe,
+                "ev-pending-fault-1",
+                "org.example.evtfault"
+            )
+            .unwrap()
+            .is_none()
+    );
+
+    env.state.plugins().set_fanout_read_fault_for_test(None);
+    api::drain_plugin_events_for_test(&env.state, t0 + 10).await;
+    api::drain_plugin_events_for_test(&env.state, t0 + 20).await;
+    assert_eq!(srv.hits.load(Ordering::SeqCst), 2);
+    let receipt = env
+        .state
+        .store()
+        .get_delivery_receipt(
+            OutboxDb::Subscribe,
+            "ev-pending-fault-1",
+            "org.example.evtfault",
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(receipt.status, OutboxDeliveryStatus::Delivered);
+    assert_eq!(receipt.attempt_count, 1);
+
+    emit_transfer_completed(&env.state.store(), "ev-nosub-1", "m-none", t0 + 30);
+    api::drain_plugin_events_for_test(&env.state, t0 + 35).await;
+    let lib_pending = env
+        .state
+        .store()
+        .list_pending_fanout_events(OutboxDb::Library, None, Some(20))
+        .unwrap();
+    assert!(lib_pending.items.is_empty());
+}
+
+#[tokio::test]
+async fn fanout_single_grant_read_error_avoids_partial_deliveries_and_recovers_after_restart() {
+    let env = HttpEnv::new().await;
+    env.enable_dev_mode().await;
+    let srv_a = WebhookStub::start(false);
+    let srv_b = WebhookStub::start(false);
+    install_notify_plugin(
+        &env,
+        "org.example.evta",
+        "download.after",
+        &["hooks:download.after", "events:download.after", "http"],
+        Some(srv_a.addr),
+        true,
+    )
+    .await;
+    install_notify_plugin(
+        &env,
+        "org.example.evtb",
+        "download.after",
+        &["hooks:download.after", "events:download.after", "http"],
+        Some(srv_b.addr),
+        true,
+    )
+    .await;
+
+    let t0 = store::unix_now_ms().unwrap();
+    emit_download_after(&env.state.store(), "ev-grant-fault-1", "op-grant-1", t0);
+
+    // Fail grant lookup for the second plugin only -> neither plugin may be seeded yet.
+    env.state
+        .plugins()
+        .set_fanout_read_fault_for_test(Some(Arc::new(|op| match op {
+            api::FanoutReadOp::PluginGrants {
+                plugin_id: "org.example.evtb",
+            } => Err(store::StoreError::ReadBusy),
+            _ => Ok(()),
+        })));
+    api::drain_plugin_events_for_test(&env.state, t0 + 5).await;
+
+    let pending = env
+        .state
+        .store()
+        .list_pending_fanout_events(OutboxDb::Subscribe, None, Some(20))
+        .unwrap();
+    assert!(
+        pending
+            .items
+            .iter()
+            .any(|e| e.event_id == "ev-grant-fault-1"),
+        "event must remain pending when second plugin grant read fails"
+    );
+    assert!(
+        env.state
+            .store()
+            .get_delivery_receipt(OutboxDb::Subscribe, "ev-grant-fault-1", "org.example.evta")
+            .unwrap()
+            .is_none(),
+        "must not write partial delivery for first plugin when second plugin read failed"
+    );
+    assert_eq!(srv_a.hits.load(Ordering::SeqCst), 0);
+    assert_eq!(srv_b.hits.load(Ordering::SeqCst), 0);
+
+    // Simulate worker restart with a fresh ApiState on the same data directory.
+    env.state.probe.shutdown_workers().await.unwrap();
+    let restarted = plugin_http_support::build_state(env._dir.path());
+    api::drain_plugin_events_for_test(&restarted, t0 + 20).await;
+    assert_eq!(srv_a.hits.load(Ordering::SeqCst), 1);
+    assert_eq!(srv_b.hits.load(Ordering::SeqCst), 1);
+    for pid in ["org.example.evta", "org.example.evtb"] {
+        let receipt = restarted
+            .store()
+            .get_delivery_receipt(OutboxDb::Subscribe, "ev-grant-fault-1", pid)
+            .unwrap()
+            .unwrap();
+        assert_eq!(receipt.status, OutboxDeliveryStatus::Delivered);
+    }
+    restarted.probe.shutdown_workers().await.unwrap();
+}

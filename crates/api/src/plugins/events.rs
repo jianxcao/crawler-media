@@ -29,6 +29,15 @@ use crate::management::ApiState;
 pub(crate) const OUTBOX_DBS: [OutboxDb; 3] =
     [OutboxDb::App, OutboxDb::Subscribe, OutboxDb::Library];
 
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FanoutReadOp<'a> {
+    ListEnabledPlugins,
+    PluginVersion { plugin_id: &'a str },
+    PluginGrants { plugin_id: &'a str },
+    ObserveSite { site_id: &'a str },
+}
+
 pub(super) const EVENT_DELIVERY_LEASE_MS: i64 = 6_000;
 pub(super) const EVENT_NOTIFY_TIMEOUT_MS: u64 = 5_000;
 pub(super) const MAX_EVENT_ATTEMPTS: i64 = 5;
@@ -237,11 +246,18 @@ pub(crate) async fn drain_once(state: &ApiState, now_ms: i64) -> bool {
 
 async fn drain_ctx(ctx: &EventDispatchContext, now_ms: i64) -> bool {
     let fanout_store = ctx.store.clone();
-    if let Err(err) =
-        tokio::task::spawn_blocking(move || fanout_pending_events(&fanout_store, now_ms)).await
+    let fanout_plugins = ctx.plugins.clone();
+    let fanout_retry_pending = match tokio::task::spawn_blocking(move || {
+        fanout_pending_events(&fanout_store, &fanout_plugins, now_ms)
+    })
+    .await
     {
-        tracing::warn!(error = %err, "Plugin event fanout worker panicked");
-    }
+        Ok(retry_pending) => retry_pending,
+        Err(err) => {
+            tracing::warn!(error = %err, "Plugin event fanout worker panicked");
+            true
+        }
+    };
 
     let claim_store = ctx.store.clone();
     let grouped = match tokio::task::spawn_blocking(move || {
@@ -252,17 +268,17 @@ async fn drain_ctx(ctx: &EventDispatchContext, now_ms: i64) -> bool {
         Ok(Ok(grouped)) => grouped,
         Ok(Err(err)) => {
             tracing::warn!(error = %err, "Failed to claim plugin event deliveries");
-            return false;
+            return fanout_retry_pending;
         }
         Err(err) => {
             tracing::warn!(error = %err, "Plugin event claim worker panicked");
-            return false;
+            return fanout_retry_pending;
         }
     };
 
     if grouped.is_empty() {
         maybe_prune_delivered_outbox(ctx, now_ms).await;
-        return false;
+        return fanout_retry_pending;
     }
 
     let mut set = tokio::task::JoinSet::new();
@@ -280,7 +296,7 @@ async fn drain_ctx(ctx: &EventDispatchContext, now_ms: i64) -> bool {
         });
     }
 
-    let mut any_retry = false;
+    let mut any_retry = fanout_retry_pending;
     while let Some(res) = set.join_next().await {
         match res {
             Ok(retry) => any_retry |= retry,
@@ -325,25 +341,57 @@ struct EligibleSubscriber {
     manifest_has_hook: Vec<String>,
 }
 
-fn load_enabled_plugins_snapshot(store: &Store) -> Vec<EligibleSubscriber> {
-    let Ok(items) = super::PluginService::list_all_plugins(store, Some(PluginLifecycle::Enabled))
-    else {
-        return Vec::new();
-    };
+fn store_error_kind(err: &store::StoreError) -> &'static str {
+    match err {
+        store::StoreError::ReadBusy => "read_busy",
+        store::StoreError::ReadDeadline => "read_deadline",
+        store::StoreError::ReadClosed => "read_closed",
+        store::StoreError::WriteBusy => "write_busy",
+        store::StoreError::Sqlite(_) => "sqlite",
+        store::StoreError::Io(_) => "io",
+        store::StoreError::Invalid(_) => "invalid",
+        store::StoreError::Missing(_) => "missing",
+        _ => "other",
+    }
+}
+
+fn load_enabled_plugins_snapshot(
+    store: &Store,
+    plugins: &super::PluginService,
+) -> Result<Vec<EligibleSubscriber>, store::StoreError> {
+    plugins.check_fanout_read_fault(FanoutReadOp::ListEnabledPlugins)?;
+    let items = super::PluginService::list_all_plugins(store, Some(PluginLifecycle::Enabled))?;
     let mut out = Vec::with_capacity(items.len());
     for plugin in items {
         if plugin.lifecycle != PluginLifecycle::Enabled || !plugin.desired_enabled {
             continue;
         }
-        let Ok(Some(version)) = store.get_plugin_version(&plugin.plugin_id, &plugin.package_hash)
+        plugins.check_fanout_read_fault(FanoutReadOp::PluginVersion {
+            plugin_id: &plugin.plugin_id,
+        })?;
+        let Some(version) = store.get_plugin_version(&plugin.plugin_id, &plugin.package_hash)?
         else {
+            tracing::warn!(
+                plugin_id = %plugin.plugin_id,
+                package_hash = %plugin.package_hash,
+                "Enabled plugin version row missing during outbox fanout"
+            );
             continue;
         };
         if version.manifest_json == "{}" {
             continue;
         }
-        let Ok(manifest) = serde_json::from_str::<PluginManifest>(&version.manifest_json) else {
-            continue;
+        let manifest = match serde_json::from_str::<PluginManifest>(&version.manifest_json) {
+            Ok(manifest) => manifest,
+            Err(err) => {
+                tracing::warn!(
+                    plugin_id = %plugin.plugin_id,
+                    package_hash = %plugin.package_hash,
+                    error = %err,
+                    "Failed to parse persisted plugin manifest during outbox fanout"
+                );
+                continue;
+            }
         };
         for comp in manifest.components {
             if comp.world != HOOK_WORLD {
@@ -370,7 +418,7 @@ fn load_enabled_plugins_snapshot(store: &Store) -> Vec<EligibleSubscriber> {
             });
         }
     }
-    out
+    Ok(out)
 }
 
 pub(super) fn extract_event_scope(
@@ -451,11 +499,106 @@ pub(super) fn plugin_holds_dual_event_grants_for_event(
     )
 }
 
-fn fanout_pending_events(store: &Store, now_ms: i64) {
+fn lookup_site_enabled(
+    store: &Store,
+    plugins: &super::PluginService,
+    raw_site: &str,
+    cache: &mut HashMap<String, bool>,
+) -> Result<bool, store::StoreError> {
+    if let Some(&enabled) = cache.get(raw_site) {
+        return Ok(enabled);
+    }
+    let Ok(sid) = SiteId::from_str(strip_site_prefix(raw_site)) else {
+        cache.insert(raw_site.to_string(), false);
+        return Ok(false);
+    };
+    plugins.check_fanout_read_fault(FanoutReadOp::ObserveSite { site_id: raw_site })?;
+    let enabled = store
+        .observe_site(sid)?
+        .is_some_and(|obs| obs.site().enabled);
+    cache.insert(raw_site.to_string(), enabled);
+    Ok(enabled)
+}
+
+fn resolve_event_subscribers(
+    store: &Store,
+    plugins: &super::PluginService,
+    db: OutboxDb,
+    event: &OutboxEventRecord,
+    subs: &[EligibleSubscriber],
+    plugin_grants_cache: &mut HashMap<String, Vec<PluginGrant>>,
+    site_exists_cache: &mut HashMap<String, bool>,
+) -> Result<Vec<String>, store::StoreError> {
+    let (site_id, library_id, subscribe_id) = extract_event_scope(event);
+    let mut plugin_ids: Vec<String> = Vec::new();
+    for sub in subs {
+        if !sub.manifest_has_hook.iter().any(|h| h == &event.event_kind) {
+            continue;
+        }
+        if sub.credential_bound {
+            let Some(raw_site) = site_id.as_deref() else {
+                continue;
+            };
+            let resolvable = lookup_site_enabled(store, plugins, raw_site, site_exists_cache)
+                .map_err(|err| {
+                    tracing::warn!(
+                        db = db.as_str(),
+                        event_id = %event.event_id,
+                        plugin_id = %sub.plugin_id,
+                        site_id = raw_site,
+                        error_kind = store_error_kind(&err),
+                        error = %err,
+                        "Failed to read site status during event fanout; keeping event pending"
+                    );
+                    err
+                })?;
+            if !resolvable {
+                continue;
+            }
+        }
+        let pid = &sub.plugin_id;
+        if plugin_ids.iter().any(|existing| existing == pid) {
+            continue;
+        }
+        if !plugin_grants_cache.contains_key(pid) {
+            let grants = plugins
+                .check_fanout_read_fault(FanoutReadOp::PluginGrants { plugin_id: pid })
+                .and_then(|()| store.get_plugin_grants(pid))
+                .map_err(|err| {
+                    tracing::warn!(
+                        db = db.as_str(),
+                        event_id = %event.event_id,
+                        plugin_id = %pid,
+                        error_kind = store_error_kind(&err),
+                        error = %err,
+                        "Failed to read plugin grants during event fanout; keeping event pending"
+                    );
+                    err
+                })?;
+            plugin_grants_cache.insert(pid.clone(), grants);
+        }
+        let Some(grants) = plugin_grants_cache.get(pid) else {
+            continue;
+        };
+        if grants_cover_event_scope(
+            grants,
+            &event.event_kind,
+            site_id.as_deref(),
+            library_id.as_deref(),
+            subscribe_id.as_deref(),
+        ) {
+            plugin_ids.push(pid.clone());
+        }
+    }
+    Ok(plugin_ids)
+}
+
+fn fanout_pending_events(store: &Store, plugins: &super::PluginService, now_ms: i64) -> bool {
     let clamped_now = now_ms.max(0);
     let mut cached_subscribers: Option<Vec<EligibleSubscriber>> = None;
     let mut plugin_grants_cache: HashMap<String, Vec<PluginGrant>> = HashMap::new();
     let mut site_exists_cache: HashMap<String, bool> = HashMap::new();
+    let mut retry_pending = false;
 
     for db in OUTBOX_DBS {
         let mut cursor: Option<OutboxEventCursor> = None;
@@ -467,7 +610,13 @@ fn fanout_pending_events(store: &Store, now_ms: i64) {
             ) {
                 Ok(page) => page,
                 Err(err) => {
-                    tracing::warn!(db = db.as_str(), error = %err, "Failed to list pending outbox fanout");
+                    tracing::warn!(
+                        db = db.as_str(),
+                        error_kind = store_error_kind(&err),
+                        error = %err,
+                        "Failed to list pending outbox fanout"
+                    );
+                    retry_pending = true;
                     break;
                 }
             };
@@ -475,48 +624,36 @@ fn fanout_pending_events(store: &Store, now_ms: i64) {
             if pending.is_empty() {
                 break;
             }
-            let subs =
-                cached_subscribers.get_or_insert_with(|| load_enabled_plugins_snapshot(store));
-            for event in &pending {
-                let (site_id, library_id, subscribe_id) = extract_event_scope(event);
-                let mut plugin_ids: Vec<String> = Vec::new();
-                for sub in subs.iter() {
-                    if !sub.manifest_has_hook.iter().any(|h| h == &event.event_kind) {
-                        continue;
-                    }
-                    if sub.credential_bound {
-                        let Some(raw_site) = site_id.as_deref() else {
-                            continue;
-                        };
-                        let resolvable = *site_exists_cache
-                            .entry(raw_site.to_string())
-                            .or_insert_with(|| {
-                                SiteId::from_str(strip_site_prefix(raw_site))
-                                    .ok()
-                                    .and_then(|sid| store.observe_site(sid).ok().flatten())
-                                    .is_some_and(|obs| obs.site().enabled)
-                            });
-                        if !resolvable {
-                            continue;
-                        }
-                    }
-                    let pid = &sub.plugin_id;
-                    if plugin_ids.iter().any(|existing| existing == pid) {
-                        continue;
-                    }
-                    let grants = plugin_grants_cache
-                        .entry(pid.clone())
-                        .or_insert_with(|| store.get_plugin_grants(pid).unwrap_or_default());
-                    if grants_cover_event_scope(
-                        grants,
-                        &event.event_kind,
-                        site_id.as_deref(),
-                        library_id.as_deref(),
-                        subscribe_id.as_deref(),
-                    ) {
-                        plugin_ids.push(pid.clone());
+            if cached_subscribers.is_none() {
+                match load_enabled_plugins_snapshot(store, plugins) {
+                    Ok(loaded) => cached_subscribers = Some(loaded),
+                    Err(err) => {
+                        tracing::warn!(
+                            db = db.as_str(),
+                            error_kind = store_error_kind(&err),
+                            error = %err,
+                            "Failed to load enabled plugin subscribers for outbox fanout; deferring pending events"
+                        );
+                        return true;
                     }
                 }
+            }
+            let Some(subs) = cached_subscribers.as_deref() else {
+                return true;
+            };
+            for event in &pending {
+                let Ok(plugin_ids) = resolve_event_subscribers(
+                    store,
+                    plugins,
+                    db,
+                    event,
+                    subs,
+                    &mut plugin_grants_cache,
+                    &mut site_exists_cache,
+                ) else {
+                    retry_pending = true;
+                    continue;
+                };
                 if let Err(err) = store.seed_event_fanout(
                     db,
                     &SeedSubscriberDeliveriesInput {
@@ -529,9 +666,11 @@ fn fanout_pending_events(store: &Store, now_ms: i64) {
                     tracing::warn!(
                         db = db.as_str(),
                         event_id = %event.event_id,
+                        error_kind = store_error_kind(&err),
                         error = %err,
                         "Failed to seed outbox fanout deliveries"
                     );
+                    retry_pending = true;
                 }
             }
             cursor = pending.last().map(|e| OutboxEventCursor {
@@ -543,6 +682,7 @@ fn fanout_pending_events(store: &Store, now_ms: i64) {
             }
         }
     }
+    retry_pending
 }
 
 fn claim_due_grouped_by_plugin(
