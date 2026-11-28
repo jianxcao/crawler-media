@@ -169,6 +169,7 @@ fn resolve_delivery_targets(
             &ctx.deps,
             &host,
             &plugin,
+            &version,
             comp,
             event_kind,
             authority_mode.clone(),

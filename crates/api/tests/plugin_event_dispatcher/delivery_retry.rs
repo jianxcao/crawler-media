@@ -207,3 +207,107 @@ async fn claimed_delivery_revoked_grant_dead_letters_and_sustained_transient_cap
     assert_eq!(rejected.attempt_count, 1);
     assert_eq!(srv.hits.load(Ordering::SeqCst), 0);
 }
+
+#[tokio::test]
+async fn claimed_delivery_cold_cache_version_read_fault_preserves_retry_and_recovers() {
+    let env = HttpEnv::new().await;
+    env.enable_dev_mode().await;
+    let srv = WebhookStub::start(false);
+    let plugin_id = "org.example.evtcold";
+    install_notify_plugin(
+        &env,
+        plugin_id,
+        "download.after",
+        &["hooks:download.after", "events:download.after", "http"],
+        Some(srv.addr),
+        true,
+    )
+    .await;
+
+    let t0 = store::unix_now_ms().unwrap();
+    emit_download_after(&env.state.store(), "ev-cold-1", "op-cold-1", t0);
+    env.state
+        .store()
+        .seed_event_fanout(
+            OutboxDb::Subscribe,
+            &SeedSubscriberDeliveriesInput {
+                event_id: "ev-cold-1".into(),
+                plugin_ids: vec![plugin_id.into()],
+                next_attempt_at: t0,
+                now_ms: t0,
+            },
+        )
+        .unwrap();
+
+    // Fail the SECOND PluginVersion read (inside cold-cache component load) with ReadBusy
+    // while the first PluginVersion read in resolve_delivery_targets succeeds.
+    let version_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let version_calls_c = version_calls.clone();
+    env.state
+        .plugins()
+        .set_fanout_read_fault_for_test(Some(Arc::new(move |op| match op {
+            api::FanoutReadOp::PluginVersion {
+                plugin_id: "org.example.evtcold",
+            } => {
+                let n = version_calls_c.fetch_add(1, Ordering::SeqCst) + 1;
+                if n == 2 {
+                    Err(store::StoreError::ReadBusy)
+                } else {
+                    Ok(())
+                }
+            }
+            _ => Ok(()),
+        })));
+
+    api::drain_plugin_events_for_test(&env.state, t0 + 5).await;
+    let first = env
+        .state
+        .store()
+        .get_delivery_receipt(OutboxDb::Subscribe, "ev-cold-1", plugin_id)
+        .unwrap()
+        .unwrap();
+    assert_ne!(
+        first.status,
+        OutboxDeliveryStatus::DeadLetter,
+        "transient ReadBusy during cold-cache policy load must never dead-letter delivery"
+    );
+
+    // Clear fault and allow any pending retry to complete.
+    env.state.plugins().set_fanout_read_fault_for_test(None);
+    if first.status == OutboxDeliveryStatus::Pending {
+        api::drain_plugin_events_for_test(&env.state, first.next_attempt_at + 10).await;
+    }
+    let final_receipt = env
+        .state
+        .store()
+        .get_delivery_receipt(OutboxDb::Subscribe, "ev-cold-1", plugin_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(final_receipt.status, OutboxDeliveryStatus::Delivered);
+    assert_eq!(srv.hits.load(Ordering::SeqCst), 1);
+
+    // Warm-cache second event must deliver cleanly without re-reading version on cache hit.
+    let t2 = t0 + 20_000;
+    emit_download_after(&env.state.store(), "ev-warm-1", "op-warm-1", t2);
+    env.state
+        .store()
+        .seed_event_fanout(
+            OutboxDb::Subscribe,
+            &SeedSubscriberDeliveriesInput {
+                event_id: "ev-warm-1".into(),
+                plugin_ids: vec![plugin_id.into()],
+                next_attempt_at: t2,
+                now_ms: t2,
+            },
+        )
+        .unwrap();
+    api::drain_plugin_events_for_test(&env.state, t2 + 5).await;
+    let warm = env
+        .state
+        .store()
+        .get_delivery_receipt(OutboxDb::Subscribe, "ev-warm-1", plugin_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(warm.status, OutboxDeliveryStatus::Delivered);
+    assert_eq!(srv.hits.load(Ordering::SeqCst), 2);
+}

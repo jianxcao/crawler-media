@@ -329,17 +329,20 @@ pub(crate) fn resolve_wasm_hook_invoker(
     deps: &HostDeps,
     host: &plugin_host::PluginHost,
     plugin: &PluginRecord,
+    version: &PluginVersionMetadata,
     comp: &plugin_package::ComponentManifest,
     hook_id: &str,
     authority_mode: PolicyAuthority,
     trust: plugin_api::PluginTrust,
     timeout_ms: u64,
 ) -> Option<Arc<dyn hooks::PluginInvoker>> {
-    let Ok(compiled) =
-        plugins
-            .cache()
-            .get_or_load_policy_from_store(&deps.store, host, plugin, &comp.entry)
-    else {
+    let Ok(compiled) = plugins.cache().get_or_load_policy_from_version(
+        deps.store.data_dir(),
+        host,
+        plugin,
+        version,
+        &comp.entry,
+    ) else {
         tracing::warn!(
             plugin_id = %plugin.plugin_id,
             hook_id = %hook_id,
@@ -386,6 +389,7 @@ pub(crate) fn resolve_hook_invoker(
         &deps,
         host,
         plugin,
+        version,
         comp,
         hook_id,
         authority_mode,

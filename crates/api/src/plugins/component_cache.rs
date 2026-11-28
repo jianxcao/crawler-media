@@ -58,11 +58,12 @@ impl ComponentCache {
             .retain(|k, _| k.0 != plugin_id || k.1 != package_hash);
     }
 
-    pub(crate) fn get_or_load_policy_from_store(
+    pub(crate) fn get_or_load_policy_from_version(
         &self,
-        store: &store::Store,
+        data_dir: &Path,
         host: &PluginHost,
         plugin: &PluginRecord,
+        version: &PluginVersionMetadata,
         entry: &str,
     ) -> Result<CompiledPolicy, Failure> {
         let key = (
@@ -73,7 +74,8 @@ impl ComponentCache {
         if let Some(found) = self.policies.lock().get(&key).cloned() {
             return Ok(found);
         }
-        let bytes = load_component_bytes_from_store(store, plugin, entry)?;
+        let bytes = read_component_entry_bytes(data_dir, version, entry)
+            .map_err(Failure::InvalidComponent)?;
         let compiled = host.load(&bytes, HOOK_WORLD)?;
         Ok(self.policies.lock().entry(key).or_insert(compiled).clone())
     }
