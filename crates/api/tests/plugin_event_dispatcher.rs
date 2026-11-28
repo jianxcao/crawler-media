@@ -1,3 +1,5 @@
+#[path = "plugin_event_dispatcher/delivery_retry.rs"]
+mod delivery_retry;
 #[path = "plugin_http_support/mod.rs"]
 mod plugin_http_support;
 
@@ -16,16 +18,16 @@ use plugin_http_support::{HttpEnv, TOKEN, assert_ok, assert_paged, pkg, req_json
 
 const POLICY_WASM: &[u8] = include_bytes!("../../plugin-host/tests/fixtures/policy.wasm");
 
-struct WebhookStub {
-    addr: SocketAddr,
-    hits: Arc<AtomicUsize>,
+pub(super) struct WebhookStub {
+    pub(super) addr: SocketAddr,
+    pub(super) hits: Arc<AtomicUsize>,
     fail_mode: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
     handle: Option<std::thread::JoinHandle<()>>,
 }
 
 impl WebhookStub {
-    fn start(initially_fail: bool) -> Self {
+    pub(super) fn start(initially_fail: bool) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         listener.set_nonblocking(true).unwrap();
@@ -78,7 +80,7 @@ impl Drop for WebhookStub {
     }
 }
 
-async fn install_notify_plugin(
+pub(super) async fn install_notify_plugin(
     env: &HttpEnv,
     plugin_id: &str,
     hook_id: &str,
@@ -520,7 +522,7 @@ async fn startup_recovery_reclaims_orphaned_delivering_rows_after_crash() {
     assert_eq!(srv.hits.load(Ordering::SeqCst), 1);
 }
 
-fn emit_download_after(store: &api::Store, event_id: &str, op_id: &str, now_ms: i64) {
+pub(super) fn emit_download_after(store: &api::Store, event_id: &str, op_id: &str, now_ms: i64) {
     let payload = serde_json::to_string(&DownloadAfterEvent {
         operation_id: op_id.into(),
         downloader_id: Some("dl-1".into()),

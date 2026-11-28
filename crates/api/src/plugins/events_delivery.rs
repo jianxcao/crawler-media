@@ -22,43 +22,71 @@ use store::plugins::{
 use uuid::Uuid;
 
 use super::events::{
-    EVENT_NOTIFY_TIMEOUT_MS, EVENT_RETRY_BACKOFF_MS, EventDispatchContext, MAX_EVENT_ATTEMPTS,
-    extract_event_scope, plugin_holds_dual_event_grants_for_event,
+    EVENT_NOTIFY_TIMEOUT_MS, EVENT_RETRY_BACKOFF_MS, EventDispatchContext, FanoutReadOp,
+    MAX_EVENT_ATTEMPTS, extract_event_scope, is_transient_store_error,
+    plugin_holds_dual_event_grants_for_event, store_error_kind,
 };
 use super::hooks_runtime::{PolicyAuthority, resolve_wasm_hook_invoker};
 use super::ports::strip_site_prefix;
 use super::wasm_runner::resolve_plugin_trust;
 use progress::{DeliveryTarget, execute_target_components};
 
+enum ResolveTargetsError {
+    Transient {
+        error_kind: &'static str,
+        reason: String,
+    },
+    Rejected(String),
+    Failed(String),
+}
+
+impl ResolveTargetsError {
+    fn from_store(context: &str, err: store::StoreError) -> Self {
+        if is_transient_store_error(&err) {
+            Self::Transient {
+                error_kind: store_error_kind(&err),
+                reason: format!("{context}: {err}"),
+            }
+        } else {
+            Self::Failed(format!("{context}: {err}"))
+        }
+    }
+}
+
 fn resolve_event_authority_mode(
     store: &Store,
+    plugins: &super::PluginService,
     plugin: &PluginRecord,
     credential_bound: bool,
     event: &OutboxEventRecord,
-) -> Result<PolicyAuthority, String> {
+) -> Result<PolicyAuthority, ResolveTargetsError> {
     if !credential_bound {
         let authority = store
             .issue_plugin_state_authority(plugin, None)
-            .map_err(|e| format!("failed to issue plugin authority: {e}"))?;
+            .map_err(|e| ResolveTargetsError::from_store("failed to issue plugin authority", e))?;
         return Ok(PolicyAuthority::Fixed {
             authority,
             credential_epoch: None,
         });
     }
     let (resolved_site_id, _, _) = extract_event_scope(event);
-    let raw_site = resolved_site_id
-        .as_deref()
-        .ok_or_else(|| "credential-bound plugin event missing site_id".to_string())?;
-    let sid = SiteId::from_str(strip_site_prefix(raw_site))
-        .map_err(|_| format!("invalid event site_id `{raw_site}`"))?;
-    let obs = store
-        .observe_site(sid)
-        .map_err(|e| format!("failed to observe site: {e}"))?
-        .ok_or_else(|| "event site not found".to_string())?;
+    let raw_site = resolved_site_id.as_deref().ok_or_else(|| {
+        ResolveTargetsError::Rejected("credential-bound plugin event missing site_id".to_string())
+    })?;
+    let sid = SiteId::from_str(strip_site_prefix(raw_site)).map_err(|_| {
+        ResolveTargetsError::Rejected(format!("invalid event site_id `{raw_site}`"))
+    })?;
+    let obs = plugins
+        .check_fanout_read_fault(FanoutReadOp::ObserveSite { site_id: raw_site })
+        .and_then(|()| store.observe_site(sid))
+        .map_err(|e| ResolveTargetsError::from_store("failed to observe site", e))?
+        .ok_or_else(|| ResolveTargetsError::Rejected("event site not found".to_string()))?;
     let epoch = obs.credential_epoch().storage_key().to_string();
     let authority = store
         .issue_plugin_state_authority(plugin, Some(&obs))
-        .map_err(|e| format!("failed to issue site-bound plugin authority: {e}"))?;
+        .map_err(|e| {
+            ResolveTargetsError::from_store("failed to issue site-bound plugin authority", e)
+        })?;
     Ok(PolicyAuthority::Fixed {
         authority,
         credential_epoch: Some(epoch),
@@ -69,34 +97,53 @@ fn resolve_delivery_targets(
     ctx: &EventDispatchContext,
     plugin_id: &str,
     event: &OutboxEventRecord,
-) -> Result<(PluginRecord, Vec<DeliveryTarget>), String> {
+) -> Result<(PluginRecord, Vec<DeliveryTarget>), ResolveTargetsError> {
     let event_kind = event.event_kind.as_str();
     let plugin = ctx
-        .store
-        .get_plugin(plugin_id)
-        .map_err(|e| format!("failed to load plugin: {e}"))?
-        .ok_or_else(|| "plugin not installed".to_string())?;
+        .plugins
+        .check_fanout_read_fault(FanoutReadOp::GetPlugin { plugin_id })
+        .and_then(|()| ctx.store.get_plugin(plugin_id))
+        .map_err(|e| ResolveTargetsError::from_store("failed to load plugin", e))?
+        .ok_or_else(|| ResolveTargetsError::Rejected("plugin not installed".to_string()))?;
     if plugin.lifecycle != PluginLifecycle::Enabled || !plugin.desired_enabled {
-        return Err("plugin is disabled".to_string());
-    }
-    if !plugin_holds_dual_event_grants_for_event(&ctx.store, plugin_id, event) {
-        return Err(format!(
-            "missing scoped hooks:{event_kind} or events:{event_kind} grant"
+        return Err(ResolveTargetsError::Rejected(
+            "plugin is disabled".to_string(),
         ));
     }
+    let has_grants =
+        plugin_holds_dual_event_grants_for_event(&ctx.store, &ctx.plugins, plugin_id, event)
+            .map_err(|e| ResolveTargetsError::from_store("failed to load plugin grants", e))?;
+    if !has_grants {
+        return Err(ResolveTargetsError::Rejected(format!(
+            "missing scoped hooks:{event_kind} or events:{event_kind} grant"
+        )));
+    }
     let version = ctx
-        .store
-        .get_plugin_version(&plugin.plugin_id, &plugin.package_hash)
-        .map_err(|e| format!("failed to load plugin version: {e}"))?
-        .ok_or_else(|| "active plugin version missing".to_string())?;
+        .plugins
+        .check_fanout_read_fault(FanoutReadOp::PluginVersion {
+            plugin_id: &plugin.plugin_id,
+        })
+        .and_then(|()| {
+            ctx.store
+                .get_plugin_version(&plugin.plugin_id, &plugin.package_hash)
+        })
+        .map_err(|e| ResolveTargetsError::from_store("failed to load plugin version", e))?
+        .ok_or_else(|| {
+            ResolveTargetsError::Rejected("active plugin version missing".to_string())
+        })?;
     let manifest = serde_json::from_str::<PluginManifest>(&version.manifest_json)
-        .map_err(|e| format!("invalid manifest JSON: {e}"))?;
-    let authority_mode =
-        resolve_event_authority_mode(&ctx.store, &plugin, version.credential_bound, event)?;
+        .map_err(|e| ResolveTargetsError::Failed(format!("invalid manifest JSON: {e}")))?;
+    let authority_mode = resolve_event_authority_mode(
+        &ctx.store,
+        &ctx.plugins,
+        &plugin,
+        version.credential_bound,
+        event,
+    )?;
     let host = ctx
         .plugins
         .wasm_host()
-        .map_err(|e| format!("wasm host unavailable: {e}"))?;
+        .map_err(|e| ResolveTargetsError::Failed(format!("wasm host unavailable: {e}")))?;
     let trust = resolve_plugin_trust(
         &plugin.plugin_id,
         &version.signature_status,
@@ -129,15 +176,17 @@ fn resolve_delivery_targets(
             EVENT_NOTIFY_TIMEOUT_MS,
         )
         .ok_or_else(|| {
-            format!(
+            ResolveTargetsError::Failed(format!(
                 "failed to load policy component `{}` for hook {event_kind}",
                 comp.id
-            )
+            ))
         })?;
         targets.push((hook.priority, comp.id.clone(), invoker));
     }
     if targets.is_empty() {
-        return Err(format!("no policy component declared hook {event_kind}"));
+        return Err(ResolveTargetsError::Rejected(format!(
+            "no policy component declared hook {event_kind}"
+        )));
     }
     targets.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
     Ok((plugin, targets))
@@ -332,22 +381,37 @@ pub(super) fn deliver_claimed_item(
 
     let (plugin, targets) = match resolve_delivery_targets(ctx, &plugin_id, &item.event) {
         Ok(found) => found,
-        Err(reason) => {
-            let generation = ctx
-                .store
-                .get_plugin(&plugin_id)
-                .ok()
-                .flatten()
-                .map(|p| p.generation);
-            let phase = format!("rejected: {reason}");
-            return dead_letter_pre_delivery_error(
+        Err(ResolveTargetsError::Transient { error_kind, reason }) => {
+            return settle_pre_delivery_transient(
+                ctx,
+                db,
+                &item,
+                claim_nonce,
+                error_kind,
+                reason,
+                pre_now,
+            );
+        }
+        Err(ResolveTargetsError::Rejected(reason)) => {
+            return dead_letter_resolve_error(
                 &ctx.store,
                 db,
                 &item,
-                generation,
                 claim_nonce,
                 PluginOperationState::Rejected,
-                phase,
+                "rejected",
+                reason,
+                pre_now,
+            );
+        }
+        Err(ResolveTargetsError::Failed(reason)) => {
+            return dead_letter_resolve_error(
+                &ctx.store,
+                db,
+                &item,
+                claim_nonce,
+                PluginOperationState::Failed,
+                "failed",
                 reason,
                 pre_now,
             );
@@ -614,4 +678,108 @@ fn dead_letter_failure(
         phase,
     );
     false
+}
+
+#[allow(clippy::too_many_arguments)]
+fn dead_letter_resolve_error(
+    store: &Store,
+    db: OutboxDb,
+    item: &ClaimedOutboxDelivery,
+    claim_nonce: String,
+    op_state: PluginOperationState,
+    prefix: &str,
+    reason: String,
+    now_ms: i64,
+) -> bool {
+    let generation = store
+        .get_plugin(&item.delivery.plugin_id)
+        .ok()
+        .flatten()
+        .map(|p| p.generation);
+    let phase = format!("{prefix}: {reason}");
+    dead_letter_pre_delivery_error(
+        store,
+        db,
+        item,
+        generation,
+        claim_nonce,
+        op_state,
+        phase,
+        reason,
+        now_ms,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn settle_pre_delivery_transient(
+    ctx: &EventDispatchContext,
+    db: OutboxDb,
+    item: &ClaimedOutboxDelivery,
+    claim_nonce: String,
+    error_kind: &'static str,
+    reason: String,
+    now_ms: i64,
+) -> bool {
+    let event_id = item.event.event_id.clone();
+    let plugin_id = item.delivery.plugin_id.clone();
+    if item.delivery.attempt_count >= MAX_EVENT_ATTEMPTS {
+        tracing::warn!(
+            db = db.as_str(),
+            event_id = %event_id,
+            plugin_id = %plugin_id,
+            attempt = item.delivery.attempt_count,
+            error_kind,
+            reason = %reason,
+            "Transient store read error exhausted max attempts before plugin event delivery; moving to dead_letter"
+        );
+        let generation = ctx
+            .store
+            .get_plugin(&plugin_id)
+            .ok()
+            .flatten()
+            .map(|p| p.generation);
+        let phase = format!("failed: {reason}");
+        return dead_letter_pre_delivery_error(
+            &ctx.store,
+            db,
+            item,
+            generation,
+            claim_nonce,
+            PluginOperationState::Failed,
+            phase,
+            reason,
+            now_ms,
+        );
+    }
+    let delay = retry_delay_ms(item.delivery.attempt_count, None);
+    let next_attempt = now_ms.saturating_add(delay);
+    tracing::warn!(
+        db = db.as_str(),
+        event_id = %event_id,
+        plugin_id = %plugin_id,
+        attempt = item.delivery.attempt_count,
+        error_kind,
+        next_attempt_at = next_attempt,
+        reason = %reason,
+        "Transient store read error before plugin event delivery; scheduling retry"
+    );
+    if let Err(err) = ctx.store.schedule_retry(
+        db,
+        &ScheduleRetryInput {
+            event_id,
+            plugin_id,
+            claim_nonce,
+            next_attempt_at: next_attempt,
+            error: reason,
+            now_ms,
+        },
+    ) {
+        tracing::warn!(
+            db = db.as_str(),
+            error_kind = store_error_kind(&err),
+            error = %err,
+            "Failed to schedule outbox event retry after transient pre-delivery read error"
+        );
+    }
+    true
 }

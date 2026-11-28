@@ -33,6 +33,7 @@ pub(crate) const OUTBOX_DBS: [OutboxDb; 3] =
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FanoutReadOp<'a> {
     ListEnabledPlugins,
+    GetPlugin { plugin_id: &'a str },
     PluginVersion { plugin_id: &'a str },
     PluginGrants { plugin_id: &'a str },
     ObserveSite { site_id: &'a str },
@@ -341,7 +342,7 @@ struct EligibleSubscriber {
     manifest_has_hook: Vec<String>,
 }
 
-fn store_error_kind(err: &store::StoreError) -> &'static str {
+pub(super) fn store_error_kind(err: &store::StoreError) -> &'static str {
     match err {
         store::StoreError::ReadBusy => "read_busy",
         store::StoreError::ReadDeadline => "read_deadline",
@@ -352,6 +353,20 @@ fn store_error_kind(err: &store::StoreError) -> &'static str {
         store::StoreError::Invalid(_) => "invalid",
         store::StoreError::Missing(_) => "missing",
         _ => "other",
+    }
+}
+
+pub(super) fn is_transient_store_error(err: &store::StoreError) -> bool {
+    match err {
+        store::StoreError::ReadBusy
+        | store::StoreError::ReadDeadline
+        | store::StoreError::ReadClosed
+        | store::StoreError::WriteBusy => true,
+        store::StoreError::Sqlite(rusqlite::Error::SqliteFailure(code, _)) => matches!(
+            code.code,
+            rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+        ),
+        _ => false,
     }
 }
 
@@ -483,20 +498,20 @@ fn grants_cover_event_scope(
 
 pub(super) fn plugin_holds_dual_event_grants_for_event(
     store: &Store,
+    plugins: &super::PluginService,
     plugin_id: &str,
     event: &OutboxEventRecord,
-) -> bool {
-    let Ok(grants) = store.get_plugin_grants(plugin_id) else {
-        return false;
-    };
+) -> Result<bool, store::StoreError> {
+    plugins.check_fanout_read_fault(FanoutReadOp::PluginGrants { plugin_id })?;
+    let grants = store.get_plugin_grants(plugin_id)?;
     let (site_id, library_id, subscribe_id) = extract_event_scope(event);
-    grants_cover_event_scope(
+    Ok(grants_cover_event_scope(
         &grants,
         &event.event_kind,
         site_id.as_deref(),
         library_id.as_deref(),
         subscribe_id.as_deref(),
-    )
+    ))
 }
 
 fn lookup_site_enabled(
