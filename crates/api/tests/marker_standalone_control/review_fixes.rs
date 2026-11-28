@@ -1,6 +1,10 @@
 //! TDD regression coverage for manual unlock, duration bounds, Movie markers,
 //! targeted `file_id` cancellation without `probe_stage_state` wedging, and `theintrodb_only`.
 
+#[path = "review_fixes/cloud_sync.rs"]
+mod cloud_sync;
+
+use std::collections::VecDeque;
 use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::Arc;
@@ -9,32 +13,53 @@ use std::time::{Duration, Instant};
 
 use axum::http::StatusCode;
 use domain::{Confidence, LedgerId, Media, MediaId, MediaKind, QualitySource, UnitKey};
+use parking_lot::Mutex;
 use serde_json::{Value, json};
 use store::ScannedLedger;
 use tower::ServiceExt;
 
 use super::{ControllableFingerprint, common, seed_tv_library_and_episodes, test_state};
 
-struct PanicChapterProbe;
+pub(super) struct PanicChapterProbe;
 impl api::marker_resolver::ChapterProbe for PanicChapterProbe {
     fn probe(&self, _path: &Path) -> Option<Vec<marker::Chapter>> {
         panic!("theintrodb_only must never invoke synchronous local ffprobe chapter probing");
     }
 }
 
-struct StubIntroDbServer {
-    url: String,
+pub(super) struct ScriptedHttpResponse {
+    pub(super) status_line: String,
+    pub(super) headers: Vec<(String, String)>,
+    pub(super) body: String,
+}
+
+pub(super) struct StubIntroDbServer {
+    pub(super) url: String,
     stop: Arc<AtomicBool>,
     handle: Option<std::thread::JoinHandle<()>>,
+    queue: Arc<Mutex<VecDeque<ScriptedHttpResponse>>>,
 }
 
 impl StubIntroDbServer {
-    fn start() -> Self {
+    pub(super) fn start() -> Self {
+        Self::start_with_queue(Arc::new(Mutex::new(VecDeque::new())))
+    }
+
+    pub(super) fn start_scripted(responses: Vec<ScriptedHttpResponse>) -> Self {
+        Self::start_with_queue(Arc::new(Mutex::new(VecDeque::from(responses))))
+    }
+
+    pub(super) fn push_response(&self, resp: ScriptedHttpResponse) {
+        self.queue.lock().push_back(resp);
+    }
+
+    fn start_with_queue(queue: Arc<Mutex<VecDeque<ScriptedHttpResponse>>>) -> Self {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         let stop = Arc::new(AtomicBool::new(false));
         let stopped = stop.clone();
+        let queue_c = queue.clone();
         let handle = std::thread::spawn(move || {
             while !stopped.load(Ordering::Relaxed) {
                 let Ok((mut stream, _)) = listener.accept() else {
@@ -46,6 +71,21 @@ impl StubIntroDbServer {
                 let mut buf = [0u8; 4096];
                 let n = stream.read(&mut buf).unwrap_or(0);
                 let req = String::from_utf8_lossy(&buf[..n]);
+                if let Some(scripted) = queue_c.lock().pop_front() {
+                    let mut extra_headers = String::new();
+                    for (k, v) in scripted.headers {
+                        extra_headers.push_str(&format!("{k}: {v}\r\n"));
+                    }
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 {}\r\nContent-Type: application/json\r\n{}Content-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        scripted.status_line,
+                        extra_headers,
+                        scripted.body.len(),
+                        scripted.body
+                    );
+                    continue;
+                }
                 let first_line = req.lines().next().unwrap_or("");
                 let query = first_line
                     .split_whitespace()
@@ -77,6 +117,7 @@ impl StubIntroDbServer {
             url,
             stop,
             handle: Some(handle),
+            queue,
         }
     }
 }
@@ -90,14 +131,14 @@ impl Drop for StubIntroDbServer {
     }
 }
 
-struct StubIntroDbFactory(String);
+pub(super) struct StubIntroDbFactory(pub(super) String);
 impl api::theintrodb_lookup::ClientFactory for StubIntroDbFactory {
     fn create(&self, api_key: Option<String>) -> api::theintrodb::TheIntroDbClient {
         api::theintrodb::TheIntroDbClient::new(api_key).with_base_url(&self.0)
     }
 }
 
-fn seed_movie_with_duration(
+pub(super) fn seed_movie_with_duration(
     store: &api::Store,
     root: &Path,
     duration_ms: i64,
@@ -177,7 +218,7 @@ fn seed_movie_with_duration(
     (lib.id, media_id, fid)
 }
 
-fn publish_duration(store: &api::Store, fid: LedgerId, duration_ms: i64) {
+pub(super) fn publish_duration(store: &api::Store, fid: LedgerId, duration_ms: i64) {
     let file = store.file_coverage_by_id(fid).unwrap().unwrap().file;
     store
         .publish_probe_result(
@@ -649,115 +690,4 @@ async fn background_resume_preserves_manual_marker_exemption_while_fingerprint_p
     assert_eq!(diag["paused"], true);
     assert_eq!(diag["job"]["status"], "succeeded");
     state.probe.shutdown_workers().await.unwrap();
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn theintrodb_only_returns_503_when_library_writer_busy_and_keeps_expected_skips_200() {
-    let dir = tempfile::tempdir().unwrap();
-    let server = StubIntroDbServer::start();
-    let state = test_state(dir.path(), ControllableFingerprint::fast())
-        .with_chapter_probe(Arc::new(PanicChapterProbe))
-        .with_theintrodb_factory(Arc::new(StubIntroDbFactory(server.url.clone())));
-    state
-        .store()
-        .save_raw_scrape_settings(r#"{"theintrodb_enabled":true}"#)
-        .unwrap();
-    let app = api::router(state.clone());
-    let (mv_lib, mv_media, mv_fid) =
-        seed_movie_with_duration(&state.store(), dir.path(), 7_200_000);
-    let url = format!("/api/v1/libraries/{mv_lib}/items/{mv_media}/markers/detect");
-
-    // 1. Hold Db::Library writer > STORE_WRITE_WAIT (1s) -> must return 503 runtime.busy, not 200.
-    let store_for_blocker = state.store();
-    let (entered_tx, entered_rx) = std::sync::mpsc::sync_channel(1);
-    let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
-    let blocker = std::thread::spawn(move || {
-        let _ = store_for_blocker.with_writer(api::store::Db::Library, |_| {
-            let _ = entered_tx.send(());
-            let _ = release_rx.recv_timeout(Duration::from_secs(10));
-            Ok(())
-        });
-    });
-    entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
-
-    let busy_res = app
-        .clone()
-        .oneshot(common::request(
-            "POST",
-            &url,
-            Some("management-secret"),
-            json!({ "mode": "theintrodb_only" }),
-        ))
-        .await
-        .unwrap();
-    let busy_status = busy_res.status();
-    let has_retry_after = busy_res.headers().contains_key("retry-after");
-    let busy_body = common::json_body(busy_res).await;
-    let _ = release_tx.send(());
-    blocker.join().unwrap();
-
-    assert_eq!(busy_status, StatusCode::SERVICE_UNAVAILABLE, "{busy_body}");
-    assert_eq!(busy_body["error"]["code"], "runtime.busy", "{busy_body}");
-    assert!(has_retry_after, "503 runtime.busy must include Retry-After");
-    assert!(
-        state
-            .store()
-            .get_file_marker(mv_fid, UnitKey::WHOLE)
-            .unwrap()
-            .is_none(),
-        "failed publish must not persist marker"
-    );
-
-    // 2. After releasing writer, retry succeeds with 200 OK and updated_episodes = 1.
-    let ok_res = app
-        .clone()
-        .oneshot(common::request(
-            "POST",
-            &url,
-            Some("management-secret"),
-            json!({ "mode": "theintrodb_only" }),
-        ))
-        .await
-        .unwrap();
-    assert_eq!(ok_res.status(), StatusCode::OK);
-    assert_eq!(common::json_data(ok_res).await["updated_episodes"], 1);
-    assert_eq!(
-        state
-            .store()
-            .get_file_marker(mv_fid, UnitKey::WHOLE)
-            .unwrap()
-            .unwrap()
-            .source,
-        "theintrodb"
-    );
-
-    // 3. Expected skip control: locked manual marker still returns 200 OK with updated_episodes = 0.
-    let lock_res = app
-        .clone()
-        .oneshot(common::request(
-            "PUT",
-            &format!("/api/v1/libraries/{mv_lib}/items/{mv_media}/markers"),
-            Some("management-secret"),
-            json!({
-                "file_id": mv_fid.to_string(),
-                "intro_start_ms": 1000,
-                "intro_end_ms": 30000,
-                "locked": true
-            }),
-        ))
-        .await
-        .unwrap();
-    assert_eq!(lock_res.status(), StatusCode::OK);
-
-    let skip_res = app
-        .oneshot(common::request(
-            "POST",
-            &url,
-            Some("management-secret"),
-            json!({ "mode": "theintrodb_only" }),
-        ))
-        .await
-        .unwrap();
-    assert_eq!(skip_res.status(), StatusCode::OK);
-    assert_eq!(common::json_data(skip_res).await["updated_episodes"], 0);
 }

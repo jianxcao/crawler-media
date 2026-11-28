@@ -173,6 +173,32 @@ pub(crate) struct CloudLookupRequest<'a> {
     pub(crate) force_refresh: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CloudCooldownReason {
+    Unauthorized,
+    RateLimited,
+    Upstream,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum ExplicitCloudLookupError {
+    Unauthorized {
+        status: u16,
+        retry_after_secs: u64,
+    },
+    RateLimited {
+        retry_after_secs: u64,
+    },
+    UpstreamUnavailable {
+        message: String,
+        retry_after_secs: Option<u64>,
+    },
+}
+
+fn ceil_secs(ms: i64) -> u64 {
+    ((ms.max(1) + 999) / 1000).max(1) as u64
+}
+
 pub(crate) fn lookup_cloud_marker(req: CloudLookupRequest<'_>) -> Option<StoredFileMarker> {
     lookup_cloud_marker_for_kind(req, MediaKind::Tv)
 }
@@ -181,13 +207,25 @@ pub(crate) fn lookup_cloud_marker_for_kind(
     req: CloudLookupRequest<'_>,
     kind: MediaKind,
 ) -> Option<StoredFileMarker> {
+    lookup_cloud_marker_explicit(req, kind).ok().flatten()
+}
+
+pub(crate) fn lookup_cloud_marker_explicit(
+    req: CloudLookupRequest<'_>,
+    kind: MediaKind,
+) -> Result<Option<StoredFileMarker>, ExplicitCloudLookupError> {
     let coords = match kind {
-        MediaKind::Tv => Some(req.unit.episode_coordinates()?),
+        MediaKind::Tv => match req.unit.episode_coordinates() {
+            Some(c) => Some(c),
+            None => return Ok(None),
+        },
         MediaKind::Movie if req.unit.is_whole() => None,
-        _ => return None,
+        _ => return Ok(None),
     };
     let (log_season, log_ep) = coords.unwrap_or((0, 0));
-    let duration = req.duration_ms.filter(|&d| d > 0)?;
+    let Some(duration) = req.duration_ms.filter(|&d| d > 0) else {
+        return Ok(None);
+    };
     let cooldown_scope = req.client.cooldown_scope();
     let key = LookupKey {
         file_id: req.file_id,
@@ -197,10 +235,24 @@ pub(crate) fn lookup_cloud_marker_for_kind(
         tmdb_id: req.tmdb_id.to_string(),
         configuration: req.client.cache_scope(),
     };
-    if req.negative.is_cooling_down(cooldown_scope, req.now_ms)
-        || (!req.force_refresh && req.negative.contains(&key, req.now_ms))
-    {
-        return None;
+    if let Some((reason, remaining_ms)) = req.negative.cooldown_state(cooldown_scope, req.now_ms) {
+        let retry_after_secs = ceil_secs(remaining_ms);
+        return Err(match reason {
+            CloudCooldownReason::Unauthorized => ExplicitCloudLookupError::Unauthorized {
+                status: 401,
+                retry_after_secs,
+            },
+            CloudCooldownReason::RateLimited => {
+                ExplicitCloudLookupError::RateLimited { retry_after_secs }
+            }
+            CloudCooldownReason::Upstream => ExplicitCloudLookupError::UpstreamUnavailable {
+                message: "TheIntroDB 上游处于冷却期，请稍后重试".into(),
+                retry_after_secs: Some(retry_after_secs),
+            },
+        });
+    }
+    if !req.force_refresh && req.negative.contains(&key, req.now_ms) {
+        return Ok(None);
     }
     let lookup = match coords {
         Some((season, episode)) => {
@@ -213,9 +265,10 @@ pub(crate) fn lookup_cloud_marker_for_kind(
         Ok(Some(candidate)) => candidate,
         Ok(None) => {
             req.negative.insert(key, req.now_ms);
-            return None;
+            return Ok(None);
         }
         Err(error) => {
+            let explicit_err = classify_explicit_error(&error);
             record_lookup_error(
                 req.negative,
                 cooldown_scope,
@@ -226,13 +279,25 @@ pub(crate) fn lookup_cloud_marker_for_kind(
                 req.now_ms,
                 error,
             );
-            return None;
+            return match explicit_err {
+                Some(err) => Err(err),
+                None => Ok(None),
+            };
         }
     };
-    let Some(group_duration) = candidate.group_duration_ms.filter(|d| *d > 0) else {
+    let Some(marker) = validate_cloud_candidate(&req, duration, &candidate) else {
         req.negative.insert(key, req.now_ms);
-        return None;
+        return Ok(None);
     };
+    Ok(Some(marker))
+}
+
+fn validate_cloud_candidate(
+    req: &CloudLookupRequest<'_>,
+    duration: i64,
+    candidate: &crate::theintrodb::MarkerResult,
+) -> Option<StoredFileMarker> {
+    let group_duration = candidate.group_duration_ms.filter(|d| *d > 0)?;
     // v4 selects within five minutes, but silently falls back to the most
     // popular release when no cluster matches. Reject that fallback ourselves.
     if group_duration.abs_diff(duration) > 300_000 {
@@ -242,7 +307,6 @@ pub(crate) fn lookup_cloud_marker_for_kind(
             group_duration,
             "TheIntroDB release duration does not match this file; candidate was not adopted"
         );
-        req.negative.insert(key, req.now_ms);
         return None;
     }
     let intro = candidate.intro_start_ms.zip(candidate.intro_end_ms);
@@ -261,7 +325,6 @@ pub(crate) fn lookup_cloud_marker_for_kind(
             file_id = %req.file_id,
             "TheIntroDB candidate exceeds this file or has conflicting ranges"
         );
-        req.negative.insert(key, req.now_ms);
         return None;
     }
     Some(StoredFileMarker {
@@ -276,6 +339,34 @@ pub(crate) fn lookup_cloud_marker_for_kind(
         locked: false,
         updated_at: 0,
     })
+}
+
+fn classify_explicit_error(error: &LookupError) -> Option<ExplicitCloudLookupError> {
+    match error {
+        LookupError::Unauthorized(status) => Some(ExplicitCloudLookupError::Unauthorized {
+            status: *status,
+            retry_after_secs: ceil_secs(UNAUTHORIZED_COOLDOWN_MS),
+        }),
+        LookupError::RateLimited { retry_after_ms, .. } => {
+            Some(ExplicitCloudLookupError::RateLimited {
+                retry_after_secs: ceil_secs(*retry_after_ms),
+            })
+        }
+        LookupError::Http(status) => Some(ExplicitCloudLookupError::UpstreamUnavailable {
+            message: format!("TheIntroDB 上游返回 HTTP {status}"),
+            retry_after_secs: (*status >= 500).then_some(ceil_secs(TRANSIENT_COOLDOWN_MS)),
+        }),
+        LookupError::Transport(_) | LookupError::Response(_) => {
+            Some(ExplicitCloudLookupError::UpstreamUnavailable {
+                message: error.to_string(),
+                retry_after_secs: Some(ceil_secs(TRANSIENT_COOLDOWN_MS)),
+            })
+        }
+        LookupError::EpisodeNotFound
+        | LookupError::MediaNotFound
+        | LookupError::Coordinates
+        | LookupError::Boundaries => None,
+    }
 }
 
 fn record_lookup_error(
@@ -301,7 +392,12 @@ fn record_lookup_error(
             retry_after_ms,
         } => {
             tracing::warn!(%error, ?rl_scope, retry_after_ms, title, season, episode, "TheIntroDB 触发限流/配额熔断，进入全局冷却");
-            negative.trip_cooldown(cooldown_scope, now_ms, *retry_after_ms);
+            negative.trip_cooldown_with_reason(
+                cooldown_scope,
+                now_ms,
+                *retry_after_ms,
+                CloudCooldownReason::RateLimited,
+            );
         }
         LookupError::Unauthorized(status) => {
             tracing::warn!(
@@ -311,7 +407,12 @@ fn record_lookup_error(
                 episode,
                 "TheIntroDB API Key 认证失败，冷却 1 小时"
             );
-            negative.trip_cooldown(cooldown_scope, now_ms, UNAUTHORIZED_COOLDOWN_MS);
+            negative.trip_cooldown_with_reason(
+                cooldown_scope,
+                now_ms,
+                UNAUTHORIZED_COOLDOWN_MS,
+                CloudCooldownReason::Unauthorized,
+            );
         }
         LookupError::Http(status) if *status >= 500 => {
             tracing::warn!(
@@ -321,11 +422,21 @@ fn record_lookup_error(
                 episode,
                 "TheIntroDB 上游异常，短冷却 60 秒"
             );
-            negative.trip_cooldown(cooldown_scope, now_ms, TRANSIENT_COOLDOWN_MS);
+            negative.trip_cooldown_with_reason(
+                cooldown_scope,
+                now_ms,
+                TRANSIENT_COOLDOWN_MS,
+                CloudCooldownReason::Upstream,
+            );
         }
         LookupError::Transport(_) => {
             tracing::warn!(%error, title, season, episode, "TheIntroDB 网络失败，短冷却 60 秒");
-            negative.trip_cooldown(cooldown_scope, now_ms, TRANSIENT_COOLDOWN_MS);
+            negative.trip_cooldown_with_reason(
+                cooldown_scope,
+                now_ms,
+                TRANSIENT_COOLDOWN_MS,
+                CloudCooldownReason::Upstream,
+            );
         }
         LookupError::EpisodeNotFound
         | LookupError::MediaNotFound
@@ -442,10 +553,16 @@ pub(crate) struct LookupKey {
     pub configuration: u64,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct CooldownEntry {
+    expires_at_ms: i64,
+    reason: CloudCooldownReason,
+}
+
 #[derive(Default)]
 struct NegativeState {
     entries: HashMap<LookupKey, i64>,
-    cooldowns: HashMap<u64, i64>,
+    cooldowns: HashMap<u64, CooldownEntry>,
 }
 
 #[derive(Default)]
@@ -487,27 +604,41 @@ impl NegativeCache {
     }
 
     pub(crate) fn is_cooling_down(&self, scope: u64, now_ms: i64) -> bool {
-        let mut cache = self.0.lock();
-        if cache
-            .cooldowns
-            .get(&scope)
-            .is_some_and(|expires| *expires > now_ms)
-        {
-            return true;
-        }
-        cache.cooldowns.remove(&scope);
-        false
+        self.cooldown_state(scope, now_ms).is_some()
     }
 
-    pub(crate) fn trip_cooldown(&self, scope: u64, now_ms: i64, ttl_ms: i64) {
+    pub(crate) fn cooldown_state(
+        &self,
+        scope: u64,
+        now_ms: i64,
+    ) -> Option<(CloudCooldownReason, i64)> {
         let mut cache = self.0.lock();
-        cache.cooldowns.retain(|_, expires| *expires > now_ms);
+        if let Some(entry) = cache.cooldowns.get(&scope).copied()
+            && entry.expires_at_ms > now_ms
+        {
+            return Some((entry.reason, entry.expires_at_ms - now_ms));
+        }
+        cache.cooldowns.remove(&scope);
+        None
+    }
+
+    pub(crate) fn trip_cooldown_with_reason(
+        &self,
+        scope: u64,
+        now_ms: i64,
+        ttl_ms: i64,
+        reason: CloudCooldownReason,
+    ) {
+        let mut cache = self.0.lock();
+        cache
+            .cooldowns
+            .retain(|_, entry| entry.expires_at_ms > now_ms);
         if cache.cooldowns.len() >= 64
             && !cache.cooldowns.contains_key(&scope)
             && let Some(oldest) = cache
                 .cooldowns
                 .iter()
-                .min_by_key(|(_, expires)| *expires)
+                .min_by_key(|(_, entry)| entry.expires_at_ms)
                 .map(|(k, _)| *k)
         {
             cache.cooldowns.remove(&oldest);
@@ -516,8 +647,16 @@ impl NegativeCache {
         cache
             .cooldowns
             .entry(scope)
-            .and_modify(|expires| *expires = (*expires).max(target))
-            .or_insert(target);
+            .and_modify(|entry| {
+                if target >= entry.expires_at_ms {
+                    entry.expires_at_ms = target;
+                    entry.reason = reason;
+                }
+            })
+            .or_insert(CooldownEntry {
+                expires_at_ms: target,
+                reason,
+            });
     }
 
     pub(crate) fn invalidate(&self, file: LedgerId) {

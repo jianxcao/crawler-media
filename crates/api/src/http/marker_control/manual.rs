@@ -97,7 +97,7 @@ pub(crate) async fn put_manual_marker(
                 "片头或片尾结束时间不能超过媒体文件总时长",
             ));
         }
-        store
+        let _ = store
             .put_file_marker_checked(&marker, &[observation])
             .map_err(marker_store_error)?;
         store

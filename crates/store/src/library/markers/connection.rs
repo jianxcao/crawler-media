@@ -220,16 +220,18 @@ impl crate::LibraryConnection<'_> {
         &self,
         marker: &StoredFileMarker,
         members: &[SourceObservation],
-    ) -> Result<(), StoreError> {
+    ) -> Result<bool, StoreError> {
         let tx = crate::write_tx(self.library)?;
         for member in members {
             source_guard::check_observed(&tx, &member.file_id.to_string(), members)?;
         }
         self.validate_marker_identity(marker, Some(members))?;
-        upsert_marker_row(&tx, marker)?;
-        self.ensure_chapter_frames_for_updates(&[(marker.file_id.to_string(), Vec::new())])?;
+        let applied = upsert_marker_row(&tx, marker)?;
+        if applied {
+            self.ensure_chapter_frames_for_updates(&[(marker.file_id.to_string(), Vec::new())])?;
+        }
         tx.commit()?;
-        Ok(())
+        Ok(applied)
     }
 
     /// Called inside the publication transaction; reads only registered facts.

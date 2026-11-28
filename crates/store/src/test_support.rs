@@ -61,14 +61,15 @@ pub fn fixture_marker_replacement(
 impl Store {
     /// A fixture explicitly supplies source presence instead of performing IO.
     pub fn put_fixture_marker(&self, marker: &crate::StoredFileMarker) -> Result<(), StoreError> {
-        self.put_file_marker_checked(
+        let _ = self.put_file_marker_checked(
             marker,
             &[crate::SourceObservation {
                 file_id: marker.file_id,
                 expected: marker.version.clone(),
                 presence: FilePresence::Present,
             }],
-        )
+        )?;
+        Ok(())
     }
 
     pub fn get_fixture_marker(

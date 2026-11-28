@@ -105,7 +105,7 @@ pub(super) async fn run_theintrodb_only(
                     .invalidate(target.row.file.file_id);
                 let now_ms =
                     crate::playback_events::PlaybackClock::now_ms(worker.playback_clock.as_ref());
-                let Some(marker) = crate::theintrodb_lookup::lookup_cloud_marker_for_kind(
+                let lookup = crate::theintrodb_lookup::lookup_cloud_marker_explicit(
                     crate::theintrodb_lookup::CloudLookupRequest {
                         client: &client,
                         negative: worker.theintrodb_negative.as_ref(),
@@ -119,8 +119,22 @@ pub(super) async fn run_theintrodb_only(
                         force_refresh: true,
                     },
                     media.kind,
-                ) else {
-                    continue;
+                );
+                let marker = match lookup {
+                    Ok(Some(marker)) => marker,
+                    Ok(None) => continue,
+                    Err(error) => {
+                        if updated_episodes > 0 {
+                            worker.chapter_frames.notify_pending();
+                        }
+                        tracing::warn!(
+                            file_id = %target.row.file.file_id,
+                            updated_episodes,
+                            ?error,
+                            "TheIntroDB 显式云端同步遇到上游故障"
+                        );
+                        return Err(map_cloud_lookup_error(error));
+                    }
                 };
                 match publish_direct_cloud_marker(&worker, &media, &target, &marker) {
                     Ok(CloudPublishOutcome::Updated) => updated_episodes += 1,
@@ -210,15 +224,63 @@ fn publish_direct_cloud_marker(
                     {
                         return Ok(CloudPublishOutcome::Skipped);
                     }
-                    store
+                    let applied = store
                         .put_file_marker_checked(marker, &[observation])
                         .map_err(marker_store_error)?;
-                    Ok(CloudPublishOutcome::Updated)
+                    if applied {
+                        Ok(CloudPublishOutcome::Updated)
+                    } else {
+                        Ok(CloudPublishOutcome::Skipped)
+                    }
                 },
             ))
         })
         .map_err(|reason| err(StatusCode::CONFLICT, "library.protected", &reason))?;
     published?
+}
+
+fn map_cloud_lookup_error(error: crate::theintrodb_lookup::ExplicitCloudLookupError) -> Response {
+    use crate::theintrodb_lookup::ExplicitCloudLookupError;
+    let (mut response, retry_after_secs) = match error {
+        ExplicitCloudLookupError::Unauthorized {
+            status,
+            retry_after_secs,
+        } => (
+            err(
+                StatusCode::BAD_GATEWAY,
+                "markers.theintrodb_auth_failed",
+                &format!("TheIntroDB 鉴权失败（上游 HTTP {status}），请检查刮削设置中的 API Key"),
+            ),
+            Some(retry_after_secs),
+        ),
+        ExplicitCloudLookupError::RateLimited { retry_after_secs } => (
+            err(
+                StatusCode::TOO_MANY_REQUESTS,
+                "markers.theintrodb_rate_limited",
+                "TheIntroDB 触发限流或配额耗尽，请稍后重试",
+            ),
+            Some(retry_after_secs),
+        ),
+        ExplicitCloudLookupError::UpstreamUnavailable {
+            message,
+            retry_after_secs,
+        } => (
+            err(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "markers.theintrodb_unavailable",
+                &format!("TheIntroDB 上游暂不可用：{message}"),
+            ),
+            retry_after_secs,
+        ),
+    };
+    if let Some(secs) = retry_after_secs
+        && let Ok(val) = axum::http::HeaderValue::from_str(&secs.to_string())
+    {
+        response
+            .headers_mut()
+            .insert(axum::http::header::RETRY_AFTER, val);
+    }
+    response
 }
 
 fn map_bounded_lease_error(error: crate::library_lifecycle::BoundedLeaseError) -> Response {

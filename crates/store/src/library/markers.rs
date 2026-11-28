@@ -98,7 +98,7 @@ impl Store {
         &self,
         marker: &StoredFileMarker,
         members: &[SourceObservation],
-    ) -> Result<(), StoreError> {
+    ) -> Result<bool, StoreError> {
         self.with_library_write(|db| db.put_file_marker_checked(marker, members))
     }
 }
@@ -138,12 +138,12 @@ fn write_replacement_markers(
 fn upsert_marker_row(
     tx: &rusqlite::Connection,
     marker: &StoredFileMarker,
-) -> Result<(), StoreError> {
+) -> Result<bool, StoreError> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64;
-    tx.execute(
+    let changed = tx.execute(
         "INSERT INTO file_markers (file_id,file_revision,source_version,season,episode,intro_start_ms,intro_end_ms,
             outro_start_ms,outro_end_ms,source,locked,updated_at)
          VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)
@@ -158,7 +158,7 @@ fn upsert_marker_row(
             marker.unit.season,marker.unit.episode,marker.intro_start_ms,marker.intro_end_ms,
             marker.outro_start_ms,marker.outro_end_ms,marker.source,marker.locked,now],
     )?;
-    Ok(())
+    Ok(changed > 0)
 }
 
 /// Terminal transition for a marker refresh job; fails when the job is no longer active.
