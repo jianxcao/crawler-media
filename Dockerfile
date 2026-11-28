@@ -1,7 +1,9 @@
 FROM node:22-bookworm-slim AS web
 WORKDIR /web
-# corepack 启用 pnpm；锁文件与源码同目录
-COPY web/package.json web/pnpm-lock.yaml ./
+# corepack 启用 pnpm；锁文件与源码同目录，同时带入本地 SDK 包
+COPY web/package.json web/pnpm-lock.yaml web/pnpm-workspace.yaml ./
+COPY sdk/plugin-ui/ /sdk/plugin-ui/
+COPY sdk/plugin-ui-kit/ /sdk/plugin-ui-kit/
 RUN corepack enable && pnpm install --frozen-lockfile
 COPY web/ ./
 RUN pnpm build
