@@ -12,6 +12,7 @@ import {
   type SeasonMarkersDiagnostics,
 } from "@/lib/api/libraries";
 import { cancelFingerprintQueue } from "@/lib/api/probe";
+import { startSingleFlightPoll } from "@/lib/single-flight-poll";
 
 import {
   type EditDraft,
@@ -108,33 +109,36 @@ export function MarkerControlPanel({
   }, [isTv, seasons]);
 
   const load = useCallback(
-    async (expectedGen?: number) => {
+    async (expectedGen?: number, pollSignal?: AbortSignal): Promise<boolean> => {
       const gen = expectedGen ?? scopeGenRef.current;
-      if (!isCurrentScope(gen)) return;
-      loadAbortRef.current?.abort();
-      const controller = new AbortController();
-      loadAbortRef.current = controller;
+      if (!isCurrentScope(gen)) return false;
+      let signal: AbortSignal;
+      if (pollSignal) {
+        signal = pollSignal;
+      } else {
+        loadAbortRef.current?.abort();
+        const controller = new AbortController();
+        loadAbortRef.current = controller;
+        signal = controller.signal;
+      }
       const reqId = ++loadSeqRef.current;
       try {
-        const next = await fetchSeasonMarkers(
-          libraryId,
-          mediaItemId,
-          targetSeason,
-          controller.signal,
-        );
-        if (!isCurrentScope(gen) || controller.signal.aborted || reqId !== loadSeqRef.current) {
-          return;
+        const next = await fetchSeasonMarkers(libraryId, mediaItemId, targetSeason, signal);
+        if (!isCurrentScope(gen) || signal.aborted || reqId !== loadSeqRef.current) {
+          return false;
         }
         const finishedActive = prevActiveRef.current && !next.active;
         prevActiveRef.current = next.active;
         setDiag(next);
         setError(null);
         if (finishedActive && isCurrentScope(gen)) onChangedRef.current?.();
+        return next.active;
       } catch (cause) {
-        if (!isCurrentScope(gen) || controller.signal.aborted || reqId !== loadSeqRef.current) {
-          return;
+        if (!isCurrentScope(gen) || signal.aborted || reqId !== loadSeqRef.current) {
+          return false;
         }
         setError(`读取片头片尾诊断失败：${(cause as Error).message}`);
+        return true;
       }
     },
     [isCurrentScope, libraryId, mediaItemId, targetSeason],
@@ -158,11 +162,11 @@ export function MarkerControlPanel({
   useEffect(() => {
     if (!diag?.active) return;
     const gen = scopeGenRef.current;
-    const timer = setInterval(() => {
-      void load(gen);
+    return startSingleFlightPoll(async (signal) => {
+      if (!isCurrentScope(gen)) return false;
+      return load(gen, signal);
     }, 2000);
-    return () => clearInterval(timer);
-  }, [diag?.active, load]);
+  }, [diag?.active, isCurrentScope, load]);
 
   const runDetect = async (singleEpisode: boolean) => {
     if (busy || (singleEpisode && !canDetectSingleEpisode)) return;

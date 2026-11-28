@@ -587,7 +587,7 @@ test("MarkerControlPanel validates timestamps strictly, preserves sub-second pre
 });
 
 test("MarkerControlPanel defers onChanged for async detect until active->false, handles Season 0, cross-season guard, and out-of-order loads", async (t) => {
-  t.mock.timers.enable({ apis: ["setInterval"] });
+  t.mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
   const calls = [];
   let changedCount = 0;
   let season0Gate = null;
@@ -1498,4 +1498,146 @@ test("MarkerControlPanel isolates async ops across season switch and unmount, an
     await Promise.resolve();
   });
   assert.equal(onChangedCount, changedBeforeUnmount, "unmounted save must not fire onChanged");
+});
+
+test("MarkerControlPanel waits for slow diagnostics response before next poll and drops old season response", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
+  let slowPollGate = null;
+  let s1FetchCount = 0;
+  let changedCount = 0;
+
+  const makeDiag = (season, active) => ({
+    media_id: "media-slow",
+    season,
+    active,
+    paused: false,
+    job: {
+      id: `job-s${season}`,
+      kind: "marker_refresh",
+      season,
+      status: active ? "running" : "succeeded",
+      total: 2,
+      completed: active ? 0 : 2,
+      succeeded: active ? 0 : 2,
+      failed: 0,
+      error: null,
+      elapsed_ms: 500,
+      phase: active ? "capturing" : null,
+      sampling_mode: "full_window",
+    },
+    episodes: [],
+  });
+
+  const { MarkerControlPanel } = loadTsModule(
+    "../components/library-item/marker-control-panel.tsx",
+    {
+      "@/lib/api/libraries": {
+        fetchSeasonMarkers: async (_lib, _media, season, signal) => {
+          if (season === 1) {
+            s1FetchCount += 1;
+            if (s1FetchCount === 1) return makeDiag(1, true);
+            slowPollGate = deferred();
+            if (signal) {
+              signal.addEventListener("abort", () => {
+                slowPollGate?.reject(new Error("aborted"));
+              });
+            }
+            return slowPollGate.promise;
+          }
+          return makeDiag(season, false);
+        },
+        detectItemMarkers: async () => ({
+          queued: true,
+          already_running: false,
+          skipped_multi_unit: 0,
+          job: null,
+        }),
+        saveManualMarker: async () => ({}),
+        deleteManualMarker: async () => ({ deleted: true }),
+      },
+      "@/lib/api/probe": {
+        cancelFingerprintQueue: async () => ({ cancelled_units: 0, aborted_running: 0 }),
+      },
+    },
+  );
+
+  let renderer;
+  t.after(async () => {
+    slowPollGate?.resolve(makeDiag(1, false));
+    if (renderer) await act(async () => renderer.unmount());
+  });
+
+  await act(async () => {
+    renderer = create(
+      React.createElement(MarkerControlPanel, {
+        libraryId: "lib-slow",
+        mediaItemId: "media-slow",
+        seasons: [1, 2],
+        selectedSeason: 1,
+        onChanged: () => {
+          changedCount += 1;
+        },
+      }),
+    );
+  });
+  assert.match(collectText(renderer.toJSON()), /进行中/);
+  assert.equal(s1FetchCount, 1);
+
+  // Advance past 3 polling intervals (6000ms) while the 2nd GET is still in flight:
+  // single-flight polling must NOT abort and re-issue a 3rd GET before the 2nd settles.
+  await act(async () => {
+    t.mock.timers.tick(2000);
+    await Promise.resolve();
+  });
+  assert.equal(s1FetchCount, 2);
+  await act(async () => {
+    t.mock.timers.tick(2000);
+    t.mock.timers.tick(2000);
+    await Promise.resolve();
+  });
+  assert.equal(
+    s1FetchCount,
+    2,
+    "slow in-flight diagnostics poll must not be aborted and re-fired before settling",
+  );
+
+  // Now resolve the slow poll with active=false -> panel must leave 进行中 and notify onChanged once.
+  await act(async () => {
+    slowPollGate.resolve(makeDiag(1, false));
+    await Promise.resolve();
+  });
+  assert.equal(changedCount, 1);
+  assert.doesNotMatch(collectText(renderer.toJSON()), /进行中/);
+
+  // Control: switching season during a slow poll drops old season result cleanly.
+  s1FetchCount = 0;
+  await act(async () => {
+    renderer.root
+      .findByProps({ "aria-label": "检测季选择" })
+      .props.onChange({ target: { value: "2" } });
+    await Promise.resolve();
+  });
+  await act(async () => {
+    renderer.root
+      .findByProps({ "aria-label": "检测季选择" })
+      .props.onChange({ target: { value: "1" } });
+    await Promise.resolve();
+  });
+  await act(async () => {
+    t.mock.timers.tick(2000);
+    await Promise.resolve();
+  });
+  const staleGate = slowPollGate;
+  await act(async () => {
+    renderer.root
+      .findByProps({ "aria-label": "检测季选择" })
+      .props.onChange({ target: { value: "2" } });
+    await Promise.resolve();
+  });
+  await act(async () => {
+    staleGate?.resolve(makeDiag(1, false));
+    await Promise.resolve();
+  });
+  assert.equal(renderer.root.findByProps({ "aria-label": "检测季选择" }).props.value, 2);
+  assert.equal(changedCount, 1, "stale season 1 response after switch must not call onChanged");
 });
