@@ -650,3 +650,114 @@ async fn background_resume_preserves_manual_marker_exemption_while_fingerprint_p
     assert_eq!(diag["job"]["status"], "succeeded");
     state.probe.shutdown_workers().await.unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn theintrodb_only_returns_503_when_library_writer_busy_and_keeps_expected_skips_200() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = StubIntroDbServer::start();
+    let state = test_state(dir.path(), ControllableFingerprint::fast())
+        .with_chapter_probe(Arc::new(PanicChapterProbe))
+        .with_theintrodb_factory(Arc::new(StubIntroDbFactory(server.url.clone())));
+    state
+        .store()
+        .save_raw_scrape_settings(r#"{"theintrodb_enabled":true}"#)
+        .unwrap();
+    let app = api::router(state.clone());
+    let (mv_lib, mv_media, mv_fid) =
+        seed_movie_with_duration(&state.store(), dir.path(), 7_200_000);
+    let url = format!("/api/v1/libraries/{mv_lib}/items/{mv_media}/markers/detect");
+
+    // 1. Hold Db::Library writer > STORE_WRITE_WAIT (1s) -> must return 503 runtime.busy, not 200.
+    let store_for_blocker = state.store();
+    let (entered_tx, entered_rx) = std::sync::mpsc::sync_channel(1);
+    let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+    let blocker = std::thread::spawn(move || {
+        let _ = store_for_blocker.with_writer(api::store::Db::Library, |_| {
+            let _ = entered_tx.send(());
+            let _ = release_rx.recv_timeout(Duration::from_secs(10));
+            Ok(())
+        });
+    });
+    entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+
+    let busy_res = app
+        .clone()
+        .oneshot(common::request(
+            "POST",
+            &url,
+            Some("management-secret"),
+            json!({ "mode": "theintrodb_only" }),
+        ))
+        .await
+        .unwrap();
+    let busy_status = busy_res.status();
+    let has_retry_after = busy_res.headers().contains_key("retry-after");
+    let busy_body = common::json_body(busy_res).await;
+    let _ = release_tx.send(());
+    blocker.join().unwrap();
+
+    assert_eq!(busy_status, StatusCode::SERVICE_UNAVAILABLE, "{busy_body}");
+    assert_eq!(busy_body["error"]["code"], "runtime.busy", "{busy_body}");
+    assert!(has_retry_after, "503 runtime.busy must include Retry-After");
+    assert!(
+        state
+            .store()
+            .get_file_marker(mv_fid, UnitKey::WHOLE)
+            .unwrap()
+            .is_none(),
+        "failed publish must not persist marker"
+    );
+
+    // 2. After releasing writer, retry succeeds with 200 OK and updated_episodes = 1.
+    let ok_res = app
+        .clone()
+        .oneshot(common::request(
+            "POST",
+            &url,
+            Some("management-secret"),
+            json!({ "mode": "theintrodb_only" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(ok_res.status(), StatusCode::OK);
+    assert_eq!(common::json_data(ok_res).await["updated_episodes"], 1);
+    assert_eq!(
+        state
+            .store()
+            .get_file_marker(mv_fid, UnitKey::WHOLE)
+            .unwrap()
+            .unwrap()
+            .source,
+        "theintrodb"
+    );
+
+    // 3. Expected skip control: locked manual marker still returns 200 OK with updated_episodes = 0.
+    let lock_res = app
+        .clone()
+        .oneshot(common::request(
+            "PUT",
+            &format!("/api/v1/libraries/{mv_lib}/items/{mv_media}/markers"),
+            Some("management-secret"),
+            json!({
+                "file_id": mv_fid.to_string(),
+                "intro_start_ms": 1000,
+                "intro_end_ms": 30000,
+                "locked": true
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(lock_res.status(), StatusCode::OK);
+
+    let skip_res = app
+        .oneshot(common::request(
+            "POST",
+            &url,
+            Some("management-secret"),
+            json!({ "mode": "theintrodb_only" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(skip_res.status(), StatusCode::OK);
+    assert_eq!(common::json_data(skip_res).await["updated_episodes"], 0);
+}

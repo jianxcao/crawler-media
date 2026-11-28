@@ -122,18 +122,30 @@ pub(super) async fn run_theintrodb_only(
                 ) else {
                     continue;
                 };
-                if publish_direct_cloud_marker(&worker, &media, &target, &marker) {
-                    updated_episodes += 1;
+                match publish_direct_cloud_marker(&worker, &media, &target, &marker) {
+                    Ok(CloudPublishOutcome::Updated) => updated_episodes += 1,
+                    Ok(CloudPublishOutcome::Skipped) => {}
+                    Err(response) => {
+                        if updated_episodes > 0 {
+                            worker.chapter_frames.notify_pending();
+                        }
+                        tracing::warn!(
+                            file_id = %target.row.file.file_id,
+                            updated_episodes,
+                            "TheIntroDB 直接发布片头片尾标记失败"
+                        );
+                        return Err(response);
+                    }
                 }
             }
             if updated_episodes > 0 {
                 worker.chapter_frames.notify_pending();
             }
-            updated_episodes
+            Ok::<usize, Response>(updated_episodes)
         })
         .await;
     match result {
-        Ok(updated_episodes) => ok(json!({
+        Ok(Ok(updated_episodes)) => ok(json!({
             "queued": false,
             "already_running": false,
             "skipped_multi_unit": skipped_multi_unit,
@@ -141,8 +153,14 @@ pub(super) async fn run_theintrodb_only(
             "job": Value::Null,
         }))
         .into_response(),
+        Ok(Err(response)) => response,
         Err(error) => crate::http::library::browse_work_error(error),
     }
+}
+
+enum CloudPublishOutcome {
+    Updated,
+    Skipped,
 }
 
 fn publish_direct_cloud_marker(
@@ -150,51 +168,74 @@ fn publish_direct_cloud_marker(
     media: &domain::Media,
     target: &CloudTarget,
     marker: &store::StoredFileMarker,
-) -> bool {
-    if crate::fingerprint_job::source::observe_source(&target.row).is_err() {
-        return false;
+) -> Result<CloudPublishOutcome, Response> {
+    if let Err(reason) = crate::fingerprint_job::source::observe_source(&target.row) {
+        return Err(err(
+            StatusCode::CONFLICT,
+            "chapters.source_changed",
+            &reason,
+        ));
     }
-    let Ok(lease) = state
+    let lease = state
         .library_work()
         .acquire_bounded(&state.store, &target.row.file.library_id.to_string())
-    else {
-        return false;
-    };
+        .map_err(map_bounded_lease_error)?;
     let observation = store::SourceObservation {
         file_id: target.row.file.file_id,
         expected: target.row.file.version.clone(),
         presence: domain::FilePresence::Present,
     };
-    let outcome = lease.publish(|| {
-        Ok(crate::http::store_wait::with_foreground_store(
-            state,
-            |store| {
-                let current_dur = store
-                    .file_coverage_by_id(target.row.file.file_id)
-                    .ok()
-                    .flatten()
-                    .and_then(|r| known_file_duration_ms(store, &r));
-                if current_dur != target.duration_ms {
-                    return Ok(false);
-                }
-                let current_media = store.get_media(media.id).ok().flatten();
-                if current_media.is_none_or(|m| m.kind != media.kind || m.tmdb_id != media.tmdb_id)
-                {
-                    return Ok(false);
-                }
-                if store
-                    .get_file_marker(target.row.file.file_id, target.unit)
-                    .ok()
-                    .flatten()
-                    .is_some_and(|m| m.locked)
-                {
-                    return Ok(false);
-                }
-                store
-                    .put_file_marker_checked(marker, &[observation])
-                    .map(|()| true)
-            },
-        ))
-    });
-    matches!(outcome, Ok(Ok(Ok(true))))
+    let published = lease
+        .publish(|| {
+            Ok(crate::http::store_wait::with_foreground_store(
+                state,
+                |store| {
+                    let current_dur = store
+                        .file_coverage_by_id(target.row.file.file_id)
+                        .map_err(marker_store_error)?
+                        .and_then(|r| known_file_duration_ms(store, &r));
+                    if current_dur != target.duration_ms {
+                        return Ok::<_, Response>(CloudPublishOutcome::Skipped);
+                    }
+                    let current_media = store.get_media(media.id).map_err(marker_store_error)?;
+                    if current_media
+                        .is_none_or(|m| m.kind != media.kind || m.tmdb_id != media.tmdb_id)
+                    {
+                        return Ok(CloudPublishOutcome::Skipped);
+                    }
+                    if store
+                        .get_file_marker(target.row.file.file_id, target.unit)
+                        .map_err(marker_store_error)?
+                        .is_some_and(|m| m.locked)
+                    {
+                        return Ok(CloudPublishOutcome::Skipped);
+                    }
+                    store
+                        .put_file_marker_checked(marker, &[observation])
+                        .map_err(marker_store_error)?;
+                    Ok(CloudPublishOutcome::Updated)
+                },
+            ))
+        })
+        .map_err(|reason| err(StatusCode::CONFLICT, "library.protected", &reason))?;
+    published?
+}
+
+fn map_bounded_lease_error(error: crate::library_lifecycle::BoundedLeaseError) -> Response {
+    use crate::library_lifecycle::BoundedLeaseError;
+    match error {
+        BoundedLeaseError::RegistryBusy | BoundedLeaseError::StoreBusy => {
+            crate::http::store_wait::busy_response()
+        }
+        BoundedLeaseError::Reconfiguring
+        | BoundedLeaseError::Unavailable
+        | BoundedLeaseError::OptionalDisabled => err(
+            StatusCode::CONFLICT,
+            "library.protected",
+            &error.to_string(),
+        ),
+        BoundedLeaseError::Store(message) => {
+            err(StatusCode::INTERNAL_SERVER_ERROR, "store.error", &message)
+        }
+    }
 }
